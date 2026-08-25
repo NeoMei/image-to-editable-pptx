@@ -31,6 +31,10 @@ async function encodeRgb(
   return sharp(data, { raw: { width, height, channels: 3 } }).png().toBuffer();
 }
 
+async function decodeMask(mask: Buffer) {
+  return sharp(mask).raw().toBuffer({ resolveWithObject: true });
+}
+
 test("masks contrasting glyph pixels without masking the full OCR box", async () => {
   const width = 16;
   const height = 10;
@@ -49,9 +53,12 @@ test("masks contrasting glyph pixels without masking the full OCR box", async ()
   const element = textElement("ocr-1", { x: 4, y: 2, width: 8, height: 6 });
 
   const result = await buildTightTextMask(source, element, { dilationPx: 0 });
-  const mask = await sharp(result.mask).removeAlpha().raw().toBuffer();
-  const value = (x: number, y: number) => mask[(y * width + x) * 3];
+  const metadata = await sharp(result.mask).metadata();
+  const { data, info } = await decodeMask(result.mask);
+  const value = (x: number, y: number) =>
+    data[(y * info.width + x) * info.channels];
 
+  assert.equal(metadata.channels, 1);
   assert.equal(result.maskedPixels, 3);
   assert.equal(value(6, 4), 255);
   assert.equal(value(4, 2), 0);
@@ -90,17 +97,87 @@ test("caps oversized dilation at one quarter of text height", async () => {
     textElement("capped-dilation", { x: 4, y: 4, width: 12, height: 8 }),
     { dilationPx: 20 },
   );
-  const { data, info } = await sharp(result.mask)
-    .removeAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  const value = (x: number, y: number) => data[(y * info.width + x) * 3];
+  const { data, info } = await decodeMask(result.mask);
+  const value = (x: number, y: number) =>
+    data[(y * info.width + x) * info.channels];
 
   assert.equal(result.maskedPixels, 25);
   assert.equal(value(8, 6), 255);
   assert.equal(value(7, 5), 0);
   assert.equal(value(4, 4), 0);
   assert.equal(value(13, 8), 0);
+});
+
+test("rejects dilation that would cover at least 85 percent of the OCR box", async () => {
+  const width = 8;
+  const height = 8;
+  const raw = Buffer.alloc(width * height * 3, 30);
+  for (const [x, y] of [
+    [3, 3],
+    [4, 3],
+    [3, 4],
+    [4, 4],
+  ]) {
+    raw.fill(240, (y! * width + x!) * 3, (y! * width + x!) * 3 + 3);
+  }
+
+  await assert.rejects(
+    buildTightTextMask(
+      await encodeRgb(raw, width, height),
+      textElement("post-dilation-over-mask", {
+        x: 2,
+        y: 2,
+        width: 4,
+        height: 4,
+      }),
+      { dilationPx: 1 },
+    ),
+    /Text mask would remove too much of the OCR box for post-dilation-over-mask/,
+  );
+});
+
+test("does not dilate a glyph pixel outside the clamped OCR box", async () => {
+  const width = 10;
+  const height = 10;
+  const raw = Buffer.alloc(width * height * 3, 30);
+  raw.fill(240, (4 * width + 3) * 3, (4 * width + 3) * 3 + 3);
+  const result = await buildTightTextMask(
+    await encodeRgb(raw, width, height),
+    textElement("bounded-dilation", { x: 3, y: 3, width: 4, height: 4 }),
+    { dilationPx: 1 },
+  );
+  const { data, info } = await decodeMask(result.mask);
+  const value = (x: number, y: number) =>
+    data[(y * info.width + x) * info.channels];
+
+  assert.equal(value(2, 4), 0);
+  assert.equal(value(3, 4), 255);
+});
+
+test("rejects a competing structural region covering most of the OCR box", async () => {
+  const width = 8;
+  const height = 8;
+  const raw = Buffer.alloc(width * height * 3, 30);
+  for (let y = 2; y < 6; y += 1) {
+    for (let x = 2; x < 6; x += 1) {
+      if ((x === 2 && y === 2) || (x === 5 && y === 5)) continue;
+      raw.fill(240, (y * width + x) * 3, (y * width + x) * 3 + 3);
+    }
+  }
+
+  await assert.rejects(
+    buildTightTextMask(
+      await encodeRgb(raw, width, height),
+      textElement("structural-over-mask", {
+        x: 2,
+        y: 2,
+        width: 4,
+        height: 4,
+      }),
+      { dilationPx: 0 },
+    ),
+    /Text mask would remove too much of the OCR box for structural-over-mask/,
+  );
 });
 
 test("rejects a local surface ring with fewer than eight samples", async () => {

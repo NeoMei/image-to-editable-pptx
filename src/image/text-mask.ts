@@ -16,6 +16,7 @@ export type TextMaskResult = {
 const DEFAULT_COLOR_DISTANCE = 32;
 const DEFAULT_DILATION_PX = 1;
 const MAX_SURFACE_CHANNEL_MAD = 18;
+const MAX_MASKED_BOX_RATIO = 0.85;
 const MIN_SURFACE_SAMPLES = 8;
 
 type Rgb = readonly [number, number, number];
@@ -124,6 +125,7 @@ function dilate(
   width: number,
   height: number,
   radius: number,
+  bounds: Bounds,
 ): Uint8Array {
   if (radius === 0) return foreground;
   const result = new Uint8Array(foreground.length);
@@ -133,15 +135,33 @@ function dilate(
     const y = Math.floor(index / width);
     for (let dy = -radius; dy <= radius; dy += 1) {
       const targetY = y + dy;
-      if (targetY < 0 || targetY >= height) continue;
+      if (targetY < bounds.top || targetY >= bounds.bottom || targetY >= height) {
+        continue;
+      }
       for (let dx = -radius; dx <= radius; dx += 1) {
         const targetX = x + dx;
-        if (targetX < 0 || targetX >= width) continue;
+        if (targetX < bounds.left || targetX >= bounds.right || targetX >= width) {
+          continue;
+        }
         result[targetY * width + targetX] = 255;
       }
     }
   }
   return result;
+}
+
+function countMaskedPixelsInBounds(
+  mask: Uint8Array,
+  width: number,
+  bounds: Bounds,
+): number {
+  let count = 0;
+  for (let y = bounds.top; y < bounds.bottom; y += 1) {
+    for (let x = bounds.left; x < bounds.right; x += 1) {
+      if (mask[y * width + x] !== 0) count += 1;
+    }
+  }
+  return count;
 }
 
 function countMaskedPixels(mask: Uint8Array): number {
@@ -213,11 +233,17 @@ export async function buildTightTextMask(
     info.width,
     info.height,
     Math.floor(effectiveDilationPx),
+    bounds,
   );
+  const maskedBoxPixels = countMaskedPixelsInBounds(maskData, info.width, bounds);
+  if (maskedBoxPixels / boxPixels >= MAX_MASKED_BOX_RATIO) {
+    throw new Error(`Text mask would remove too much of the OCR box for ${element.id}`);
+  }
   const maskedPixels = countMaskedPixels(maskData);
   const mask = await sharp(maskData, {
     raw: { width: info.width, height: info.height, channels: 1 },
   })
+    .toColourspace("b-w")
     .png()
     .toBuffer();
 
