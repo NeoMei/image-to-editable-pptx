@@ -24,22 +24,19 @@ function paddingFor(kind: ElementKind, paddingPx?: RemovalMaskPadding): number {
 }
 
 function expandedBounds(
-  width: number,
-  height: number,
   element: SlideElement,
   padding: number,
-): { x: number; y: number; width: number; height: number } | null {
-  const left = Math.max(0, element.bbox.x - padding);
-  const top = Math.max(0, element.bbox.y - padding);
-  const right = Math.min(width, element.bbox.x + element.bbox.width + padding);
-  const bottom = Math.min(height, element.bbox.y + element.bbox.height + padding);
-  if (right <= left || bottom <= top) return null;
+): { x: number; y: number; width: number; height: number } {
+  const left = element.bbox.x - padding;
+  const top = element.bbox.y - padding;
+  const right = element.bbox.x + element.bbox.width + padding;
+  const bottom = element.bbox.y + element.bbox.height + padding;
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 function targetSvg(
   element: SlideElement,
-  bounds: NonNullable<ReturnType<typeof expandedBounds>>,
+  bounds: ReturnType<typeof expandedBounds>,
   padding: number,
 ): string {
   const right = bounds.x + bounds.width;
@@ -66,8 +63,8 @@ export async function buildRemovalMask(
 
   const targets = elements.flatMap((element) => {
     const padding = paddingFor(element.kind, paddingPx);
-    const bounds = expandedBounds(width, height, element, padding);
-    return bounds === null ? [] : [targetSvg(element, bounds, padding)];
+    const bounds = expandedBounds(element, padding);
+    return [targetSvg(element, bounds, padding)];
   });
   const svg = Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="${width}" height="${height}" fill="black"/>${targets.join("")}</svg>`,

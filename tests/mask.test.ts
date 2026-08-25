@@ -99,3 +99,31 @@ test("clips padded target bounds at every canvas edge", async () => {
   assert.equal(pixel(data, info.width, 1268, 715), 255);
   assert.equal(pixel(data, info.width, 1267, 715), 0);
 });
+
+test("lets the SVG viewport naturally clip expanded rounded rectangles at an edge", async () => {
+  const element: SlideElement = {
+    kind: "shape",
+    id: "edge-round-rect",
+    shape: "roundRect",
+    bbox: { x: 0, y: 0, width: 40, height: 30 },
+    fillColor: "FFFFFF",
+    strokeColor: "23394D",
+    strokeWidthPx: 1,
+    cornerRadiusPx: 2,
+    zIndex: 1,
+  };
+
+  const mask = await buildRemovalMask(1280, 720, [element]);
+  const expected = await sharp(
+    Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><rect width="1280" height="720" fill="black"/><rect x="-2" y="-2" width="44" height="34" rx="4" fill="white"/></svg>',
+    ),
+  )
+    .png()
+    .toBuffer();
+  const actualPixels = await maskPixels(mask);
+  const expectedPixels = await maskPixels(expected);
+
+  assert.equal(pixel(actualPixels.data, actualPixels.info.width, 0, 0), 255);
+  assert.deepEqual(actualPixels.data, expectedPixels.data);
+});

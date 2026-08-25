@@ -3,6 +3,7 @@ import sharp from "sharp";
 import type { BBox } from "../contracts.js";
 
 const DEFAULT_COLOR_TOLERANCE = 24;
+const MIN_EDGE_COLOR_CONSISTENCY = 0.85;
 const MIN_TRANSPARENT_RATIO = 0.05;
 const MAX_TRANSPARENT_RATIO = 0.92;
 
@@ -17,6 +18,7 @@ export type ExtractedAsset = {
   image: Buffer;
   extraction: AssetExtraction;
   fallbackReason?:
+    | "edge_colors_inconsistent"
     | "transparent_pixel_ratio_below_5_percent"
     | "transparent_pixel_ratio_above_92_percent";
 };
@@ -30,15 +32,11 @@ function median(values: number[]): number {
   return values.length % 2 === 0 ? (values[middle - 1]! + upper) / 2 : upper;
 }
 
-function medianEdgeColor(data: Buffer, width: number, height: number): Rgb {
-  const red: number[] = [];
-  const green: number[] = [];
-  const blue: number[] = [];
+function edgeColors(data: Buffer, width: number, height: number): Rgb[] {
+  const colors: Rgb[] = [];
   const sample = (x: number, y: number): void => {
     const offset = (y * width + x) * 4;
-    red.push(data[offset]!);
-    green.push(data[offset + 1]!);
-    blue.push(data[offset + 2]!);
+    colors.push([data[offset]!, data[offset + 1]!, data[offset + 2]!]);
   };
 
   for (let x = 0; x < width; x += 1) {
@@ -50,7 +48,34 @@ function medianEdgeColor(data: Buffer, width: number, height: number): Rgb {
     if (width > 1) sample(width - 1, y);
   }
 
-  return [median(red), median(green), median(blue)];
+  return colors;
+}
+
+function medianEdgeColor(colors: readonly Rgb[]): Rgb {
+  return [
+    median(colors.map((color) => color[0])),
+    median(colors.map((color) => color[1])),
+    median(colors.map((color) => color[2])),
+  ];
+}
+
+function maxChannelDistance(left: Rgb, right: Rgb): number {
+  return Math.max(
+    Math.abs(left[0] - right[0]),
+    Math.abs(left[1] - right[1]),
+    Math.abs(left[2] - right[2]),
+  );
+}
+
+function hasConsistentEdgeColor(
+  colors: readonly Rgb[],
+  edgeColor: Rgb,
+  tolerance: number,
+): boolean {
+  const consistentSamples = colors.filter(
+    (color) => maxChannelDistance(color, edgeColor) <= tolerance,
+  ).length;
+  return consistentSamples / colors.length >= MIN_EDGE_COLOR_CONSISTENCY;
 }
 
 function removeConnectedBackground(
@@ -70,10 +95,9 @@ function removeConnectedBackground(
     if (visited[index] === 1) return;
     visited[index] = 1;
     const offset = index * 4;
-    const distance = Math.max(
-      Math.abs(data[offset]! - edgeColor[0]),
-      Math.abs(data[offset + 1]! - edgeColor[1]),
-      Math.abs(data[offset + 2]! - edgeColor[2]),
+    const distance = maxChannelDistance(
+      [data[offset]!, data[offset + 1]!, data[offset + 2]!],
+      edgeColor,
     );
     if (distance <= tolerance) queue[tail++] = index;
   };
@@ -140,11 +164,20 @@ export async function extractAsset(
   if (!Number.isFinite(colorTolerance) || colorTolerance < 0) {
     throw new RangeError("colorTolerance must be a non-negative finite number");
   }
+  const sampledEdgeColors = edgeColors(data, info.width, info.height);
+  const edgeColor = medianEdgeColor(sampledEdgeColors);
+  if (!hasConsistentEdgeColor(sampledEdgeColors, edgeColor, colorTolerance)) {
+    return {
+      image: rectangularImage,
+      extraction: "rectangular",
+      fallbackReason: "edge_colors_inconsistent",
+    };
+  }
   const transparentPixels = removeConnectedBackground(
     data,
     info.width,
     info.height,
-    medianEdgeColor(data, info.width, info.height),
+    edgeColor,
     colorTolerance,
   );
   const transparentRatio = transparentPixels / (info.width * info.height);

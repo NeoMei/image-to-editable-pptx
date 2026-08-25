@@ -89,12 +89,48 @@ test("falls back to the rectangular crop when edge colors are not a removable ba
     .toBuffer({ resolveWithObject: true });
 
   assert.equal(extracted.extraction, "rectangular");
-  assert.equal(extracted.fallbackReason, "transparent_pixel_ratio_below_5_percent");
+  assert.equal(extracted.fallbackReason, "edge_colors_inconsistent");
   assert.ok(
     Array.from({ length: info.width * info.height }, (_, index) => data[index * 4 + 3]).every(
       (alpha) => alpha === 255,
     ),
   );
+});
+
+test("rejects materially different edge colors when one color is an imbalanced minority", async () => {
+  const source = await sharp({
+    create: {
+      width: 25,
+      height: 20,
+      channels: 3,
+      background: "#23394d",
+    },
+  })
+    .composite([
+      {
+        input: {
+          create: {
+            width: 5,
+            height: 20,
+            channels: 3,
+            background: "#e65d16",
+          },
+        },
+        left: 20,
+        top: 0,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const extracted = await extractAsset(
+    source,
+    { x: 0, y: 0, width: 25, height: 20 },
+    { extraction: "transparent" },
+  );
+
+  assert.equal(extracted.extraction, "rectangular");
+  assert.equal(extracted.fallbackReason, "edge_colors_inconsistent");
 });
 
 test("falls back when background removal would erase more than 92 percent", async () => {
