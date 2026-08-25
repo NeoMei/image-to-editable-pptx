@@ -153,3 +153,24 @@ export type FidelityPlan = {
   icons: FidelityIconCandidate[];
   warnings: string[];
 };
+
+export type LocalRepairReason =
+  | "mask_empty"
+  | "surface_samples_insufficient"
+  | "surface_variance_too_high"
+  | "filled_pixels_too_different";
+
+export type LocalRepairMetrics = {
+  maskedPixels: number;
+  outsideMaskChangedPixels: number;
+  ringSamples: number;
+  ringChannelMad: number;
+  filledPixelDistanceP95: number;
+};
+
+export type LocalRepairResult = {
+  image: Buffer;
+  accepted: boolean;
+  metrics: LocalRepairMetrics;
+  reason?: LocalRepairReason;
+};
