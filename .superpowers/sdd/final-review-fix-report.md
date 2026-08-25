@@ -147,3 +147,15 @@
 - The self-review quoted-assignment gap was closed with its own RED/GREEN cycle before handoff; final source and compiled suites include those stronger canaries.
 - `dist` is generated and ignored. It was rebuilt only for the explicit compiled validation and is not committed.
 - No Alibaba credentials were available. The official-envelope behavior and failed-response evidence are verified offline with mocked transport, not by a live authenticated call.
+
+---
+
+## Round 3 runtime-contract note
+
+- Starting head: `cffb573ea3d2be380995fe878d21c9260d78c2cd`
+- Implementation commit: `bebb559` (`fix: align Node engine with test globs`)
+- Finding: the scoped test scripts rely on Node's native test-runner glob support, available from Node 22.6, while package metadata and documentation still claimed Node 20 compatibility.
+- RED: after adding `assert.equal(packageJson.engines.node, ">=22.6")`, `node --import tsx --test tests/package-scripts.test.ts` exited 1 with `'>=20' !== '>=22.6'`.
+- GREEN: `package.json` and root `package-lock.json` metadata now require `>=22.6`; README and the approved implementation plan document Node 22.6+ and the source/compiled glob scripts. The focused command passed 1/1 on Node 24.18.0.
+- Full verification: `npm test` 78/78; `npm run lint:types` exit 0; `npm run build` exit 0; `npm run test:compiled` 78/78; `git diff --check` exit 0.
+- Concern: Node 20 and Node 22.0–22.5 are now intentionally unsupported. No live API calls were made.
