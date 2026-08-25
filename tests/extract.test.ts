@@ -43,6 +43,11 @@ test("removes a cream border connected to the crop edge", async () => {
 
   assert.equal(extracted.extraction, "transparent");
   assert.equal(extracted.fallbackReason, undefined);
+  assert.deepEqual(extracted.metrics, {
+    transparentRatio: 0.75,
+    opaqueBorderRatio: 0,
+    foregroundPixels: 144,
+  });
   assert.equal(info.width, 24);
   assert.equal(info.height, 24);
   assert.equal(data[(1 * info.width + 1) * 4 + 3], 0);
@@ -50,6 +55,87 @@ test("removes a cream border connected to the crop edge", async () => {
     [...data.subarray((12 * info.width + 12) * 4, (12 * info.width + 12) * 4 + 4)],
     [35, 57, 77, 255],
   );
+});
+
+test("falls back when foreground occupies more than two percent of the crop perimeter", async () => {
+  const source = await sharp({
+    create: {
+      width: 24,
+      height: 24,
+      channels: 3,
+      background: "#f7f3e9",
+    },
+  })
+    .composite([
+      {
+        input: {
+          create: {
+            width: 12,
+            height: 12,
+            channels: 3,
+            background: "#23394d",
+          },
+        },
+        left: 6,
+        top: 6,
+      },
+      {
+        input: {
+          create: {
+            width: 2,
+            height: 1,
+            channels: 3,
+            background: "#23394d",
+          },
+        },
+        left: 11,
+        top: 0,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const extracted = await extractAsset(
+    source,
+    { x: 0, y: 0, width: 24, height: 24 },
+    { extraction: "transparent" },
+  );
+
+  assert.equal(extracted.extraction, "rectangular");
+  assert.equal(
+    extracted.fallbackReason,
+    "opaque_border_ratio_above_2_percent",
+  );
+  assert.deepEqual(extracted.metrics, {
+    transparentRatio: 430 / 576,
+    opaqueBorderRatio: 2 / 92,
+    foregroundPixels: 146,
+  });
+});
+
+test("reports zero alpha metrics when rectangular extraction is explicitly requested", async () => {
+  const source = await sharp({
+    create: {
+      width: 8,
+      height: 8,
+      channels: 3,
+      background: "#23394d",
+    },
+  })
+    .png()
+    .toBuffer();
+
+  const extracted = await extractAsset(
+    source,
+    { x: 0, y: 0, width: 8, height: 8 },
+    { extraction: "rectangular" },
+  );
+
+  assert.deepEqual(extracted.metrics, {
+    transparentRatio: 0,
+    opaqueBorderRatio: 0,
+    foregroundPixels: 0,
+  });
 });
 
 test("falls back to the rectangular crop when edge colors are not a removable background", async () => {

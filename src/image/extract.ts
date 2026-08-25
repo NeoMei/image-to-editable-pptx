@@ -6,6 +6,7 @@ const DEFAULT_COLOR_TOLERANCE = 24;
 const MIN_EDGE_COLOR_CONSISTENCY = 0.85;
 const MIN_TRANSPARENT_RATIO = 0.05;
 const MAX_TRANSPARENT_RATIO = 0.92;
+const MAX_OPAQUE_BORDER_RATIO = 0.02;
 
 export type AssetExtraction = "transparent" | "rectangular";
 
@@ -17,11 +18,20 @@ export type ExtractAssetOptions = {
 export type ExtractedAsset = {
   image: Buffer;
   extraction: AssetExtraction;
+  metrics: {
+    transparentRatio: number;
+    opaqueBorderRatio: number;
+    foregroundPixels: number;
+  };
   fallbackReason?:
     | "edge_colors_inconsistent"
     | "transparent_pixel_ratio_below_5_percent"
-    | "transparent_pixel_ratio_above_92_percent";
+    | "transparent_pixel_ratio_above_92_percent"
+    | "opaque_border_ratio_above_2_percent";
 };
+
+type AlphaMetrics = ExtractedAsset["metrics"];
+type FallbackReason = NonNullable<ExtractedAsset["fallbackReason"]>;
 
 type Rgb = readonly [number, number, number];
 
@@ -125,6 +135,47 @@ function removeConnectedBackground(
   return tail;
 }
 
+function calculateAlphaMetrics(
+  data: Buffer,
+  width: number,
+  height: number,
+): AlphaMetrics {
+  let foregroundPixels = 0;
+  let opaqueBorderPixels = 0;
+  let perimeterPixels = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const foreground = data[(y * width + x) * 4 + 3]! >= 128;
+      if (foreground) foregroundPixels += 1;
+      if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
+        perimeterPixels += 1;
+        if (foreground) opaqueBorderPixels += 1;
+      }
+    }
+  }
+
+  const pixelCount = width * height;
+  return {
+    transparentRatio: (pixelCount - foregroundPixels) / pixelCount,
+    opaqueBorderRatio: opaqueBorderPixels / perimeterPixels,
+    foregroundPixels,
+  };
+}
+
+function rectangularFallback(
+  image: Buffer,
+  metrics: AlphaMetrics,
+  fallbackReason: FallbackReason,
+): ExtractedAsset {
+  return {
+    image,
+    extraction: "rectangular",
+    metrics,
+    fallbackReason,
+  };
+}
+
 function integerCrop(
   bbox: BBox,
   sourceWidth: number,
@@ -153,7 +204,15 @@ export async function extractAsset(
   const crop = integerCrop(bbox, sourceMetadata.width, sourceMetadata.height);
   const rectangularImage = await sharp(source).extract(crop).png().toBuffer();
   if ((options.extraction ?? "transparent") === "rectangular") {
-    return { image: rectangularImage, extraction: "rectangular" };
+    return {
+      image: rectangularImage,
+      extraction: "rectangular",
+      metrics: {
+        transparentRatio: 0,
+        opaqueBorderRatio: 0,
+        foregroundPixels: 0,
+      },
+    };
   }
 
   const { data, info } = await sharp(rectangularImage)
@@ -167,34 +226,41 @@ export async function extractAsset(
   const sampledEdgeColors = edgeColors(data, info.width, info.height);
   const edgeColor = medianEdgeColor(sampledEdgeColors);
   if (!hasConsistentEdgeColor(sampledEdgeColors, edgeColor, colorTolerance)) {
-    return {
-      image: rectangularImage,
-      extraction: "rectangular",
-      fallbackReason: "edge_colors_inconsistent",
-    };
+    return rectangularFallback(
+      rectangularImage,
+      calculateAlphaMetrics(data, info.width, info.height),
+      "edge_colors_inconsistent",
+    );
   }
-  const transparentPixels = removeConnectedBackground(
+  removeConnectedBackground(
     data,
     info.width,
     info.height,
     edgeColor,
     colorTolerance,
   );
-  const transparentRatio = transparentPixels / (info.width * info.height);
+  const metrics = calculateAlphaMetrics(data, info.width, info.height);
 
-  if (transparentRatio < MIN_TRANSPARENT_RATIO) {
-    return {
-      image: rectangularImage,
-      extraction: "rectangular",
-      fallbackReason: "transparent_pixel_ratio_below_5_percent",
-    };
+  if (metrics.transparentRatio < MIN_TRANSPARENT_RATIO) {
+    return rectangularFallback(
+      rectangularImage,
+      metrics,
+      "transparent_pixel_ratio_below_5_percent",
+    );
   }
-  if (transparentRatio > MAX_TRANSPARENT_RATIO) {
-    return {
-      image: rectangularImage,
-      extraction: "rectangular",
-      fallbackReason: "transparent_pixel_ratio_above_92_percent",
-    };
+  if (metrics.transparentRatio > MAX_TRANSPARENT_RATIO) {
+    return rectangularFallback(
+      rectangularImage,
+      metrics,
+      "transparent_pixel_ratio_above_92_percent",
+    );
+  }
+  if (metrics.opaqueBorderRatio > MAX_OPAQUE_BORDER_RATIO) {
+    return rectangularFallback(
+      rectangularImage,
+      metrics,
+      "opaque_border_ratio_above_2_percent",
+    );
   }
 
   const image = await sharp(data, {
@@ -202,5 +268,5 @@ export async function extractAsset(
   })
     .png()
     .toBuffer();
-  return { image, extraction: "transparent" };
+  return { image, extraction: "transparent", metrics };
 }
