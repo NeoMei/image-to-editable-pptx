@@ -24,7 +24,7 @@ export DASHSCOPE_WORKSPACE_ID='<your-workspace-id>'
 三种模式都会在发起网络请求前验证两个必需环境变量。
 
 ```bash
-# 只做 OCR 和视觉分析；生成 ocr.json 与 vision.json
+# 只做 OCR 和视觉分析；同时生成可验证的 analysis-ledger.json
 npm run cli -- analyze --image <png> --out <analysis-dir> [--record]
 
 # 使用已有分析结果做资产提取、背景补全和 PPTX 导出
@@ -34,7 +34,9 @@ npm run cli -- build --image <png> --analysis <analysis-dir> --out <output-dir>
 npm run cli -- run --image <png> --out <output-dir> [--record]
 ```
 
-`--record` 在 ledger 中标记本次为录制运行。不论是否加该开关，输出目录都会保存经 schema 验证和递归脱敏后的统一 OCR/Vision JSON，便于审计和离线 replay。
+不论是否加 `--record`，分析目录都会保存经 schema 验证和递归脱敏后的统一 `ocr.json`/`vision.json`，以及 `analysis-ledger.json`。该 analysis ledger 保存 live/replay 模式、模型 ID、OCR/Vision/总分析耗时、告警、record 标记和输入/结果 SHA-256。后续 `build` 会先验证该 ledger 与三项哈希，再将其 provenance 原样带入最终 run ledger，不会把 split build 伪记成 replay/0 ms。
+
+加 `--record` 时，还会创建 `recordings/ocr.json` 和 `recordings/vision.json`：它们是供审计和离线 replay 的统一、可验证快照，不是包含 HTTP 头的原始网络包。Live 与内部 replay 模式都支持该行为；快照不包含 API Key、Authorization 或 DashScope 头。
 
 第 7 页的固定验收命令是：
 
@@ -50,6 +52,8 @@ bash scripts/accept-slide-07.sh
 
 - `ocr.json`：统一 OCR 文本行和坐标；
 - `vision.json`：统一视觉元素候选；
+- `analysis-ledger.json`：经验证的分析 provenance、耗时、模型与哈希；
+- `recordings/*.json`：仅在 `--record` 时产生的脱敏、统一 replay 快照；
 - `manifest.json`：最终文本、形状、资产与层级规划；
 - `removal-mask.png`：黑白合并移除遮罩；
 - `clean-background.png`：万相补全后的背景；
@@ -58,6 +62,8 @@ bash scripts/accept-slide-07.sh
 - `run-ledger.json`：模型 ID、每阶段耗时、万相任务 ID、告警、退化原因、输出路径及所有主要产物的 SHA-256。
 
 ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key、`Authorization`、access token 或 `x-dashscope-*` 头。
+
+完整 `run` 不会直接改写固定输出目录。它先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。
 
 ## 发送到阿里云的数据
 

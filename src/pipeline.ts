@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+} from "node:fs/promises";
+import { basename, dirname, extname, join, resolve } from "node:path";
 
 import sharp from "sharp";
 import { z } from "zod";
@@ -41,6 +47,52 @@ const DEFAULT_MODELS = {
   edit: "wanx2.1-imageedit",
 } as const;
 
+const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const AnalysisLedgerSchema = z
+  .object({
+    analysisVersion: z.literal(1),
+    mode: z.enum(["live", "replay"]),
+    recorded: z.boolean(),
+    models: z.object({
+      ocr: z.string().min(1),
+      vision: z.string().min(1),
+      edit: z.string().min(1),
+    }),
+    durationsMs: z.object({
+      ocr: z.number().finite().nonnegative(),
+      vision: z.number().finite().nonnegative(),
+      analyze: z.number().finite().nonnegative(),
+    }),
+    warnings: z.array(z.string()),
+    hashes: z.object({
+      sourceImage: Sha256Schema,
+      ocr: Sha256Schema,
+      vision: Sha256Schema,
+    }),
+    outputs: z.object({
+      ocr: z.literal("ocr.json"),
+      vision: z.literal("vision.json"),
+    }),
+    recordings: z
+      .object({
+        ocr: z.literal("recordings/ocr.json"),
+        vision: z.literal("recordings/vision.json"),
+      })
+      .optional(),
+  })
+  .superRefine((ledger, context) => {
+    if (ledger.recorded !== (ledger.recordings !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "recorded must match the presence of recording paths",
+        path: ["recordings"],
+      });
+    }
+  });
+
+export type AnalysisLedger = z.infer<typeof AnalysisLedgerSchema>;
+
 export type ReplayInputs = {
   ocrPath: string;
   visionPath: string;
@@ -79,19 +131,18 @@ export type BuildOptions = {
   outDir: string;
   config?: AppConfig;
   inpaint?: Inpaint;
-  record?: boolean;
 };
 
 type AnalysisResult = {
   ocr: OcrResult;
   vision: VisionResult;
-  durationsMs: { ocr: number; vision: number; analyze: number };
-  mode: "live" | "replay";
+  ledger: AnalysisLedger;
 };
 
 type BuildContext = {
   analysis: AnalysisResult;
   startedAt: number;
+  publishedOutDir?: string;
 };
 
 function elapsed(startedAt: number): number {
@@ -159,6 +210,7 @@ export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisRes
   let vision: VisionResult;
   let ocrDuration: number;
   let visionDuration: number;
+  let activeConfig = options.config;
 
   if (options.replay !== undefined) {
     const ocrStartedAt = performance.now();
@@ -168,7 +220,8 @@ export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisRes
     vision = await readReplayVision(options.replay.visionPath);
     visionDuration = elapsed(visionStartedAt);
   } else {
-    const config = options.config ?? loadConfig();
+    const config = activeConfig ?? loadConfig();
+    activeConfig = config;
     const ocrStartedAt = performance.now();
     const ocrPromise = recognizeText(image, config).then((result) => {
       ocrDuration = elapsed(ocrStartedAt);
@@ -189,15 +242,46 @@ export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisRes
     writeRecording(join(outDir, "vision.json"), vision),
   ]);
 
-  return {
-    ocr,
-    vision,
+  const recorded = options.record === true;
+  if (recorded) {
+    await Promise.all([
+      writeRecording(join(outDir, "recordings/ocr.json"), ocr),
+      writeRecording(join(outDir, "recordings/vision.json"), vision),
+    ]);
+  }
+
+  const ledger = AnalysisLedgerSchema.parse({
+    analysisVersion: 1,
+    mode: options.replay === undefined ? "live" : "replay",
+    recorded,
+    models: configuredModels(activeConfig),
     durationsMs: {
       ocr: ocrDuration,
       vision: visionDuration,
       analyze: elapsed(startedAt),
     },
-    mode: options.replay === undefined ? "live" : "replay",
+    warnings: [],
+    hashes: {
+      sourceImage: sha256(image),
+      ocr: await sha256File(join(outDir, "ocr.json")),
+      vision: await sha256File(join(outDir, "vision.json")),
+    },
+    outputs: { ocr: "ocr.json", vision: "vision.json" },
+    ...(recorded
+      ? {
+          recordings: {
+            ocr: "recordings/ocr.json",
+            vision: "recordings/vision.json",
+          },
+        }
+      : {}),
+  });
+  await writeRecording(join(outDir, "analysis-ledger.json"), ledger);
+
+  return {
+    ocr,
+    vision,
+    ledger,
   };
 }
 
@@ -219,6 +303,7 @@ async function buildFromAnalysis(
   context: BuildContext,
 ): Promise<PipelineResult> {
   const outDir = resolve(options.outDir);
+  const publishedOutDir = resolve(context.publishedOutDir ?? outDir);
   const imagePath = resolve(options.imagePath);
   const image = await readFile(imagePath);
   await inspectSourceImage(image);
@@ -227,7 +312,23 @@ async function buildFromAnalysis(
   await Promise.all([
     writeRecording(join(outDir, "ocr.json"), context.analysis.ocr),
     writeRecording(join(outDir, "vision.json"), context.analysis.vision),
+    writeRecording(
+      join(outDir, "analysis-ledger.json"),
+      context.analysis.ledger,
+    ),
   ]);
+  if (context.analysis.ledger.recorded) {
+    await Promise.all([
+      writeRecording(
+        join(outDir, "recordings/ocr.json"),
+        context.analysis.ocr,
+      ),
+      writeRecording(
+        join(outDir, "recordings/vision.json"),
+        context.analysis.vision,
+      ),
+    ]);
+  }
 
   const planStartedAt = performance.now();
   const planned = planSlide(context.analysis.ocr, context.analysis.vision);
@@ -314,11 +415,11 @@ async function buildFromAnalysis(
   );
   await writeRecording(ledgerPath, {
     ledgerVersion: 1,
-    mode: context.analysis.mode,
-    recorded: options.record === true,
-    models: configuredModels(config),
+    mode: context.analysis.ledger.mode,
+    recorded: context.analysis.ledger.recorded,
+    models: context.analysis.ledger.models,
     durationsMs: {
-      ...context.analysis.durationsMs,
+      ...context.analysis.ledger.durationsMs,
       plan: planDuration,
       extract: extractDuration,
       mask: maskDuration,
@@ -327,12 +428,15 @@ async function buildFromAnalysis(
       total: elapsed(context.startedAt),
     },
     taskIds: { wanx: clean.taskId },
-    warnings,
+    warnings: [...context.analysis.ledger.warnings, ...warnings],
     fallbacks,
     hashes: {
       sourceImage: sha256(image),
       ocr: await sha256File(join(outDir, "ocr.json")),
       vision: await sha256File(join(outDir, "vision.json")),
+      analysisLedger: await sha256File(
+        join(outDir, "analysis-ledger.json"),
+      ),
       manifest: await sha256File(manifestPath),
       removalMask: sha256(mask),
       cleanBackground: await sha256File(cleanBackgroundPath),
@@ -340,14 +444,15 @@ async function buildFromAnalysis(
       pptx: await sha256File(pptxPath),
     },
     outputs: {
-      directory: outDir,
-      ocr: join(outDir, "ocr.json"),
-      vision: join(outDir, "vision.json"),
-      manifest: manifestPath,
-      removalMask: maskPath,
-      cleanBackground: cleanBackgroundPath,
-      assets: assetsDir,
-      pptx: pptxPath,
+      directory: publishedOutDir,
+      ocr: join(publishedOutDir, "ocr.json"),
+      vision: join(publishedOutDir, "vision.json"),
+      analysisLedger: join(publishedOutDir, "analysis-ledger.json"),
+      manifest: join(publishedOutDir, "manifest.json"),
+      removalMask: join(publishedOutDir, "removal-mask.png"),
+      cleanBackground: join(publishedOutDir, "clean-background.png"),
+      assets: join(publishedOutDir, "assets"),
+      pptx: join(publishedOutDir, outputName(imagePath)),
     },
   });
 
@@ -357,16 +462,82 @@ async function buildFromAnalysis(
 export async function buildSlide(options: BuildOptions): Promise<PipelineResult> {
   const startedAt = performance.now();
   const analysisDir = resolve(options.analysisDir);
+  const image = await readFile(options.imagePath);
+  const ledger = await readRecording(
+    join(analysisDir, "analysis-ledger.json"),
+    AnalysisLedgerSchema,
+  );
+  const ocrPath = join(analysisDir, ledger.outputs.ocr);
+  const visionPath = join(analysisDir, ledger.outputs.vision);
   const analysis: AnalysisResult = {
-    ocr: await readRecording(join(analysisDir, "ocr.json"), OcrResultSchema),
-    vision: await readRecording(
-      join(analysisDir, "vision.json"),
-      VisionResultSchema,
-    ),
-    durationsMs: { ocr: 0, vision: 0, analyze: 0 },
-    mode: "replay",
+    ocr: await readRecording(ocrPath, OcrResultSchema),
+    vision: await readRecording(visionPath, VisionResultSchema),
+    ledger,
   };
+  const actualHashes = {
+    sourceImage: sha256(image),
+    ocr: await sha256File(ocrPath),
+    vision: await sha256File(visionPath),
+  };
+  for (const key of ["sourceImage", "ocr", "vision"] as const) {
+    if (actualHashes[key] !== ledger.hashes[key]) {
+      throw new Error(`Analysis provenance hash mismatch: ${key}`);
+    }
+  }
   return buildFromAnalysis(options, { analysis, startedAt });
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
+
+async function promoteSuccessfulRun(
+  stagingDir: string,
+  targetDir: string,
+): Promise<void> {
+  const backupDir = `${targetDir}.previous-${basename(stagingDir)}`;
+  let hadPreviousTarget = false;
+
+  try {
+    await rename(targetDir, backupDir);
+    hadPreviousTarget = true;
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+
+  try {
+    await rename(stagingDir, targetDir);
+  } catch (error) {
+    if (hadPreviousTarget) {
+      await rename(backupDir, targetDir);
+    }
+    throw error;
+  }
+
+  if (hadPreviousTarget) {
+    await rm(backupDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function retainFailedRun(
+  stagingDir: string,
+  targetDir: string,
+): Promise<void> {
+  const failedRoot = `${targetDir}.failed-runs`;
+  await mkdir(failedRoot, { recursive: true });
+  const failedDir = join(failedRoot, basename(stagingDir));
+  try {
+    await rename(stagingDir, failedDir);
+  } catch (error) {
+    if (!isNotFound(error)) {
+      await rm(stagingDir, { recursive: true, force: true });
+    }
+  }
 }
 
 export async function runPipeline(
@@ -378,22 +549,40 @@ export async function runPipeline(
     (options.replay === undefined || options.inpaint === undefined
       ? loadConfig()
       : undefined);
-  const analysis = await analyzeSlide({
-    imagePath: options.imagePath,
-    outDir: options.outDir,
-    ...(options.replay === undefined ? {} : { replay: options.replay }),
-    ...(options.record === undefined ? {} : { record: options.record }),
-    ...(config === undefined ? {} : { config }),
-  });
-  return buildFromAnalysis(
-    {
+  const targetDir = resolve(options.outDir);
+  const targetParent = dirname(targetDir);
+  await mkdir(targetParent, { recursive: true });
+  const stagingDir = await mkdtemp(
+    join(targetParent, `.${basename(targetDir)}.staging-`),
+  );
+
+  try {
+    const analysis = await analyzeSlide({
       imagePath: options.imagePath,
-      analysisDir: options.outDir,
-      outDir: options.outDir,
+      outDir: stagingDir,
+      ...(options.replay === undefined ? {} : { replay: options.replay }),
       ...(options.record === undefined ? {} : { record: options.record }),
       ...(config === undefined ? {} : { config }),
-      ...(options.inpaint === undefined ? {} : { inpaint: options.inpaint }),
-    },
-    { analysis, startedAt },
-  );
+    });
+    await buildFromAnalysis(
+      {
+        imagePath: options.imagePath,
+        analysisDir: stagingDir,
+        outDir: stagingDir,
+        ...(config === undefined ? {} : { config }),
+        ...(options.inpaint === undefined ? {} : { inpaint: options.inpaint }),
+      },
+      { analysis, startedAt, publishedOutDir: targetDir },
+    );
+    await promoteSuccessfulRun(stagingDir, targetDir);
+    return {
+      outDir: targetDir,
+      manifestPath: join(targetDir, "manifest.json"),
+      pptxPath: join(targetDir, outputName(options.imagePath)),
+      ledgerPath: join(targetDir, "run-ledger.json"),
+    };
+  } catch (error) {
+    await retainFailedRun(stagingDir, targetDir);
+    throw error;
+  }
 }
