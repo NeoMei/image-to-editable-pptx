@@ -24,7 +24,7 @@ export DASHSCOPE_WORKSPACE_ID='<your-workspace-id>'
 三种模式都会在发起网络请求前验证两个必需环境变量。
 
 ```bash
-# 只做 OCR 和视觉分析；同时生成可验证的 analysis-ledger.json
+# 只做 OCR 和视觉分析；输出目录必须不存在或为空
 npm run cli -- analyze --image <png> --out <analysis-dir> [--record]
 
 # 使用已有分析结果做资产提取、背景补全和 PPTX 导出
@@ -34,7 +34,7 @@ npm run cli -- build --image <png> --analysis <analysis-dir> --out <output-dir>
 npm run cli -- run --image <png> --out <output-dir> [--record]
 ```
 
-不论是否加 `--record`，分析目录都会保存经 schema 验证和递归脱敏后的统一 `ocr.json`/`vision.json`，以及 `analysis-ledger.json`。该 analysis ledger 保存 live/replay 模式、模型 ID、OCR/Vision/总分析耗时、告警、record 标记和输入/结果 SHA-256。后续 `build` 会先验证该 ledger 与三项哈希，再将其 provenance 原样带入最终 run ledger，不会把 split build 伪记成 replay/0 ms。
+不论是否加 `--record`，分析目录都会保存经 schema 验证和递归脱敏后的统一 `ocr.json`/`vision.json`，以及 `analysis-ledger.json`。该 analysis ledger 保存 live/replay 模式、模型 ID、OCR/Vision/总分析耗时、告警、record 标记和输入/结果 SHA-256。后续 `build` 会先验证该 ledger 与三项哈希，再将其 provenance 原样带入最终 run ledger，不会把 split build 伪记成 replay/0 ms。为避免混入旧分析结果，独立 `analyze` 只接受新目录或空目录。
 
 加 `--record` 时，还会创建 `recordings/ocr.json` 和 `recordings/vision.json`：它们是供审计和离线 replay 的统一、可验证快照，不是包含 HTTP 头的原始网络包。Live 与内部 replay 模式都支持该行为；快照不包含 API Key、Authorization 或 DashScope 头。
 
@@ -62,9 +62,9 @@ bash scripts/accept-slide-07.sh
 - `<source-name>-editable.pptx`：可编辑的宽屏 PowerPoint；
 - `run-ledger.json`：模型 ID、每阶段耗时、万相任务 ID、告警、退化原因、输出路径及所有主要产物的 SHA-256。
 
-ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key、`Authorization`、access token 或 `x-dashscope-*` 头。
+ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key、`Authorization`、access token 或 `x-dashscope-*` 头。Live OCR/Vision 响应会在解析前写入 staging；正常解析后该临时原始响应被移除，如果 schema/JSON 解析失败，脱敏的 `raw-responses/<provider>.json` 与 `parse-errors/<provider>.json` 会一起留在失败运行目录中。
 
-完整 `run` 不会直接改写固定输出目录。它先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger、ownership marker 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。
+`run` 和独立 `build` 都不会直接改写固定输出目录。它们先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger、ownership marker 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。成功的小 manifest 重跑会整体替换旧目录，因此不会残留旧 asset 或 recording。
 
 为避免误删用户文件，已存在的输出目录只有在 marker 是目标目录内的普通文件、且其 `markerVersion`/`appId`/`artifactKind` 通过严格 schema 验证时才能被替换。未标记、损坏、伪版本或符号链接 marker 的目录会被拒绝且内容保持不变。临时 backup 也会在移动后重新验证 marker，只有得到该 ownership 证据的 backup 才会递归删除。
 
@@ -74,9 +74,9 @@ ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key�
 
 每次完整 `run` 会进行三类模型调用：
 
-1. 向 `qwen3.5-ocr` 发送整页 PNG 的 Base64 Data URL，用于识别文字与坐标；
+1. 向 `qwen3.5-ocr` 发送整页 PNG 的 Base64 Data URL，使用 `advanced_recognition` 获取 `ocr_result.words_info[]` 文字与坐标；
 2. 向 `qwen3-vl-plus` 发送同一张整页 PNG 和固定结构化提示词，用于候选元素分析；
-3. 向 `wanx2.1-imageedit` 发送整页 PNG、本地生成的 removal mask 和固定中文补全提示词。完成后从服务返回的下载 URL 获取补全图。
+3. 向 `wanx2.1-imageedit` 发送整页 PNG、本地生成的 removal mask 和固定中文补全提示词。完成后只从 HTTPS、无 userinfo/非默认端口/fragment，且为 `dashscope-result-*.oss-cn-*.aliyuncs.com` 的阿里云 OSS 结果 URL 下载，并禁止跟随重定向。
 
 文件不会上传到项目自建服务，也不会在用户机器上运行模型。请在使用前确认源图内容符合组织的数据合规要求。
 
@@ -88,6 +88,7 @@ ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key�
 
 - 只接受精确 1280×720 PNG，只导出单页，没有整套 PPT 批处理、排队或人工校正界面；
 - OCR 文本是权威内容，但字体统一回退为 Microsoft YaHei，不能还原未提供的原始字体文件；
+- 只有垂直间隔不超过较小行高的 75%、左边对齐误差不超过较小估算字号的 50%（最少 4 px）且估算字号比不超过 1.2 的相邻 OCR 行才合并为保留换行的段落；
 - 只有高置信规则面板会转为原生形状；复杂插画仍是独立位图，不会重建内部矢量路径；
 - 本地透明化依赖边缘颜色一致性；质量不足时保守回退为矩形裁剪并记录 `fallbackReason`；
 - 本版未集成阿里云 VIAPI 通用分割，不需要第二套 AccessKey/Secret；

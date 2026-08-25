@@ -19,6 +19,13 @@ type PlannedElement = {
   inputOrder: number;
 };
 
+type OcrCandidate = {
+  text: string;
+  bbox: BBox;
+  sourceIndex: number;
+  lastLineBBox: BBox;
+};
+
 function clipBBox(
   bbox: ProviderBBox,
   noteClipping: () => void,
@@ -74,6 +81,62 @@ function estimateFontSize(height: number): number {
   return Math.round(estimate * 100) / 100;
 }
 
+function unionBBox(left: BBox, right: BBox): BBox {
+  const x = Math.min(left.x, right.x);
+  const y = Math.min(left.y, right.y);
+  const rightEdge = Math.max(left.x + left.width, right.x + right.width);
+  const bottom = Math.max(left.y + left.height, right.y + right.height);
+  return { x, y, width: rightEdge - x, height: bottom - y };
+}
+
+function areAdjacentBodyLines(left: BBox, right: BBox): boolean {
+  const verticalGap = right.y - (left.y + left.height);
+  const smallerHeight = Math.min(left.height, right.height);
+  const leftFontSize = estimateFontSize(left.height);
+  const rightFontSize = estimateFontSize(right.height);
+  const fontSizeRatio =
+    Math.max(leftFontSize, rightFontSize) /
+    Math.min(leftFontSize, rightFontSize);
+  const alignmentTolerance = Math.max(
+    4,
+    Math.min(leftFontSize, rightFontSize) * 0.5,
+  );
+
+  return (
+    verticalGap >= 0 &&
+    verticalGap <= Math.max(4, smallerHeight * 0.75) &&
+    Math.abs(left.x - right.x) <= alignmentTolerance &&
+    fontSizeRatio <= 1.2
+  );
+}
+
+function mergeAdjacentOcrLines(
+  lines: ReadonlyArray<{
+    line: OcrResult["lines"][number];
+    bbox: BBox;
+    sourceIndex: number;
+  }>,
+): OcrCandidate[] {
+  const merged: OcrCandidate[] = [];
+
+  for (const { line, bbox, sourceIndex } of lines) {
+    const previous = merged.at(-1);
+    if (
+      previous !== undefined &&
+      areAdjacentBodyLines(previous.lastLineBBox, bbox)
+    ) {
+      previous.text = `${previous.text}\n${line.text}`;
+      previous.bbox = unionBBox(previous.bbox, bbox);
+      previous.lastLineBBox = bbox;
+      continue;
+    }
+
+    merged.push({ text: line.text, bbox, sourceIndex, lastLineBBox: bbox });
+  }
+
+  return merged;
+}
+
 function isRectangle(
   element: VisionResult["elements"][number],
 ): boolean {
@@ -91,6 +154,12 @@ export function planSlide(
   };
   const visionWithClippedBboxes = vision.elements.flatMap(
     (element, sourceIndex) => {
+      if (
+        element.type === "background" ||
+        element.editableAs === "background"
+      ) {
+        return [];
+      }
       const bbox = clipBBox(element.bbox, noteClipping);
       return bbox === null ? [] : [{ element, bbox, sourceIndex }];
     },
@@ -99,9 +168,10 @@ export function planSlide(
     const bbox = clipBBox(line.bbox, noteClipping);
     return bbox === null ? [] : [{ line, bbox, sourceIndex }];
   });
+  const mergedOcrCandidates = mergeAdjacentOcrLines(ocrWithClippedBboxes);
   const planned: PlannedElement[] = [];
 
-  for (const { line, bbox, sourceIndex } of ocrWithClippedBboxes) {
+  for (const { text, bbox, sourceIndex } of mergedOcrCandidates) {
     const visualTextHint = visionWithClippedBboxes
       .filter(({ element }) => element.type === "text")
       .map((candidate) => ({
@@ -115,7 +185,7 @@ export function planSlide(
       element: {
         kind: "text",
         id: `ocr-${sourceIndex + 1}`,
-        text: line.text,
+        text,
         bbox,
         rotation: 0,
         color: visualTextHint?.fillColor ?? DEFAULT_TEXT_COLOR,
@@ -159,6 +229,7 @@ export function planSlide(
         element: {
           kind: "shape",
           id,
+          label: element.label,
           shape: cornerRadiusPx > 0 ? "roundRect" : "rect",
           bbox,
           fillColor: element.fillColor ?? "FFFFFF",

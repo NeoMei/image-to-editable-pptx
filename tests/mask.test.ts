@@ -39,6 +39,7 @@ test("renders an exact 1280 by 720 merged mask with kind-specific padding", asyn
     {
       kind: "shape",
       id: "shape-1",
+      label: "rounded mask shape",
       shape: "roundRect",
       bbox: { x: 300, y: 300, width: 50, height: 40 },
       fillColor: "FFFFFF",
@@ -104,6 +105,7 @@ test("lets the SVG viewport naturally clip expanded rounded rectangles at an edg
   const element: SlideElement = {
     kind: "shape",
     id: "edge-round-rect",
+    label: "edge rounded rectangle",
     shape: "roundRect",
     bbox: { x: 0, y: 0, width: 40, height: 30 },
     fillColor: "FFFFFF",

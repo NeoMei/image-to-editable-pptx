@@ -15,11 +15,26 @@ import test from "node:test";
 import JSZip from "jszip";
 import sharp from "sharp";
 
+import type { AppConfig } from "../src/config.js";
 import {
   analyzeSlide,
   buildSlide,
   runPipeline,
 } from "../src/pipeline.js";
+
+const liveConfig: AppConfig = {
+  apiKey: "provider-secret-canary",
+  workspaceId: "workspace-123",
+  dashscopeApiBase:
+    "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1",
+  dashscopeCompatibleBase:
+    "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  ocrModel: "qwen3.5-ocr",
+  visionModel: "qwen3-vl-plus",
+  editModel: "wanx2.1-imageedit",
+  requestTimeoutMs: 120_000,
+  pollIntervalMs: 0,
+};
 
 async function snapshotTree(
   directory: string,
@@ -40,6 +55,20 @@ async function snapshotTree(
     }
   }
   return snapshot;
+}
+
+async function writeNormalizedReplay(
+  directory: string,
+  ocr: unknown,
+  vision: unknown,
+): Promise<{ ocrPath: string; visionPath: string }> {
+  const ocrPath = join(directory, "normalized-ocr.json");
+  const visionPath = join(directory, "normalized-vision.json");
+  await Promise.all([
+    writeFile(ocrPath, JSON.stringify(ocr), "utf8"),
+    writeFile(visionPath, JSON.stringify(vision), "utf8"),
+  ]);
+  return { ocrPath, visionPath };
 }
 
 test("runs the complete pipeline from recorded provider fixtures", async () => {
@@ -89,11 +118,30 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
 
     const manifest = JSON.parse(
       await readFile(join(outDir, "manifest.json"), "utf8"),
-    ) as { elements: Array<{ kind: string }> };
+    ) as { elements: Array<{ kind: string; label?: string }> };
     const assets = manifest.elements.filter(
       (element) => element.kind === "asset",
     );
-    assert.ok(assets.length >= 6);
+    const nativeShapeLabels = manifest.elements
+      .filter((element) => element.kind === "shape")
+      .map((element) => element.label)
+      .sort();
+    const expectedNativeShapeLabels = [
+      "MCP ecosystem panel",
+      "bottom navy bar",
+      "collaboration tools panel",
+      "execution tools panel",
+      "orange subtitle bar",
+      "perception tools panel",
+      "top section label",
+    ].sort();
+    assert.equal(assets.length, 6);
+    assert.deepEqual(nativeShapeLabels, expectedNativeShapeLabels);
+    assert.ok(
+      assets.every(
+        (element) => !expectedNativeShapeLabels.includes(element.label ?? ""),
+      ),
+    );
 
     const ledgerText = await readFile(
       join(outDir, "run-ledger.json"),
@@ -142,6 +190,13 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
       .async("string");
     assert.match(slideXml, /<a:t>第 4 章 工具<\/a:t>/);
     assert.match(slideXml, /name="asset-vision-/);
+    for (const label of expectedNativeShapeLabels) {
+      assert.match(
+        slideXml,
+        new RegExp(`name="shape-vision-\\d+-${label}"`),
+      );
+      assert.doesNotMatch(slideXml, new RegExp(`name="asset-[^"]*${label}"`));
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -246,6 +301,182 @@ test("preserves live-like analysis provenance through a split build", async () =
   }
 });
 
+test("requires standalone analyze output to be new or empty", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-analyze-contract-"));
+  const imagePath = join(directory, "slide-07.png");
+  const analysisDir = join(directory, "analysis");
+  const sentinelPath = join(analysisDir, "user-file.txt");
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    await mkdir(analysisDir);
+    await writeFile(sentinelPath, "must remain untouched\n");
+
+    await assert.rejects(
+      analyzeSlide({
+        imagePath,
+        outDir: analysisDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+      }),
+      /analysis output directory must be new or empty/i,
+    );
+    assert.equal(await readFile(sentinelPath, "utf8"), "must remain untouched\n");
+    assert.deepEqual(await readdir(analysisDir), ["user-file.txt"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed standalone build preserves its owned success and retains staged evidence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-build-transaction-"));
+  const imagePath = join(directory, "slide-07.png");
+  const firstAnalysisDir = join(directory, "analysis-first");
+  const secondAnalysisDir = join(directory, "analysis-second");
+  const outDir = join(directory, "output");
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    await analyzeSlide({
+      imagePath,
+      outDir: firstAnalysisDir,
+      replay: {
+        ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+        visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+      },
+    });
+    await buildSlide({
+      imagePath,
+      analysisDir: firstAnalysisDir,
+      outDir,
+      inpaint: async () => ({ image: source, taskId: "first-build" }),
+    });
+    const before = await snapshotTree(outDir);
+    const smallerReplay = await writeNormalizedReplay(
+      directory,
+      { lines: [] },
+      { elements: [] },
+    );
+    await analyzeSlide({
+      imagePath,
+      outDir: secondAnalysisDir,
+      replay: smallerReplay,
+    });
+
+    await assert.rejects(
+      buildSlide({
+        imagePath,
+        analysisDir: secondAnalysisDir,
+        outDir,
+        inpaint: async () => {
+          throw new Error("simulated split build failure");
+        },
+      }),
+      /simulated split build failure/,
+    );
+
+    assert.deepEqual(await snapshotTree(outDir), before);
+    const failedRuns = await readdir(`${outDir}.failed-runs`);
+    assert.equal(failedRuns.length, 1);
+    const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
+    await Promise.all([
+      access(join(failedRun, "analysis-ledger.json")),
+      access(join(failedRun, "manifest.json")),
+      access(join(failedRun, "removal-mask.png")),
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("successful smaller standalone build removes stale assets and recordings", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-build-stale-"));
+  const imagePath = join(directory, "slide-07.png");
+  const firstAnalysisDir = join(directory, "analysis-first");
+  const secondAnalysisDir = join(directory, "analysis-second");
+  const outDir = join(directory, "output");
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    await analyzeSlide({
+      imagePath,
+      outDir: firstAnalysisDir,
+      replay: {
+        ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+        visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+      },
+      record: true,
+    });
+    await buildSlide({
+      imagePath,
+      analysisDir: firstAnalysisDir,
+      outDir,
+      inpaint: async () => ({ image: source, taskId: "large-build" }),
+    });
+    assert.equal((await readdir(join(outDir, "assets"))).length, 6);
+    await access(join(outDir, "recordings/ocr.json"));
+
+    const smallerReplay = await writeNormalizedReplay(
+      directory,
+      { lines: [] },
+      { elements: [] },
+    );
+    await analyzeSlide({
+      imagePath,
+      outDir: secondAnalysisDir,
+      replay: smallerReplay,
+      record: false,
+    });
+    await buildSlide({
+      imagePath,
+      analysisDir: secondAnalysisDir,
+      outDir,
+      inpaint: async () => ({ image: source, taskId: "small-build" }),
+    });
+
+    assert.deepEqual(await readdir(join(outDir, "assets")), []);
+    await assert.rejects(access(join(outDir, "recordings")), /ENOENT/);
+    const ledger = JSON.parse(
+      await readFile(join(outDir, "run-ledger.json"), "utf8"),
+    ) as { taskIds: { wanx: string } };
+    assert.equal(ledger.taskIds.wanx, "small-build");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("record mode writes sanitized replay snapshots and explicit metadata", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-record-"));
   const imagePath = join(directory, "slide-07.png");
@@ -325,6 +556,171 @@ test("record mode writes sanitized replay snapshots and explicit metadata", asyn
       /replay-credential-canary|authorization|apiKey|bearer/i,
     );
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retains sanitized malformed live OCR response and parse error in the failed run", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-malformed-ocr-"));
+  const imagePath = join(directory, "slide-07.png");
+  const outDir = join(directory, "output");
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    const visionFixture = JSON.parse(
+      await readFile(resolve("tests/fixtures/qwen-vision-slide-07.json"), "utf8"),
+    ) as { choices: Array<{ message: { content: string } }> };
+
+    globalThis.fetch = async (input) => {
+      if (String(input).endsWith("/chat/completions")) {
+        return Response.json({
+          id: "valid-vision",
+          object: "chat.completion",
+          created: 0,
+          model: liveConfig.visionModel,
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: visionFixture.choices[0]!.message.content,
+              },
+            },
+          ],
+        });
+      }
+      return Response.json({
+        Authorization: "Bearer provider-secret-canary",
+        "x-dashscope-api-key": "provider-secret-canary",
+        output: {
+          choices: [
+            {
+              message: {
+                content: [{ text: "plain response without coordinates" }],
+              },
+            },
+          ],
+        },
+      });
+    };
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        config: liveConfig,
+        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
+      }),
+      /coordinates require the advanced_recognition task/i,
+    );
+
+    const failedRuns = await readdir(`${outDir}.failed-runs`);
+    assert.equal(failedRuns.length, 1);
+    const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
+    const raw = await readFile(join(failedRun, "raw-responses/ocr.json"), "utf8");
+    const parseError = await readFile(
+      join(failedRun, "parse-errors/ocr.json"),
+      "utf8",
+    );
+    assert.match(raw, /plain response without coordinates/);
+    assert.match(parseError, /advanced_recognition/);
+    assert.doesNotMatch(
+      raw + parseError,
+      /provider-secret-canary|authorization|api[_-]?key|bearer/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retains sanitized malformed live Vision response and parse error in the failed run", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-malformed-vision-"));
+  const imagePath = join(directory, "slide-07.png");
+  const outDir = join(directory, "output");
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    const validOcr = JSON.parse(
+      await readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8"),
+    ) as unknown;
+
+    globalThis.fetch = async (input) => {
+      if (String(input).endsWith("/chat/completions")) {
+        return Response.json({
+          id: "malformed-vision",
+          object: "chat.completion",
+          created: 0,
+          model: liveConfig.visionModel,
+          apiKey: "provider-secret-canary",
+          Authorization: "Bearer provider-secret-canary",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: "not valid JSON from Vision",
+              },
+            },
+          ],
+        });
+      }
+      return Response.json(validOcr);
+    };
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        config: liveConfig,
+        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
+      }),
+      /vision response is not valid JSON/i,
+    );
+
+    const failedRuns = await readdir(`${outDir}.failed-runs`);
+    assert.equal(failedRuns.length, 1);
+    const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
+    const raw = await readFile(
+      join(failedRun, "raw-responses/vision.json"),
+      "utf8",
+    );
+    const parseError = await readFile(
+      join(failedRun, "parse-errors/vision.json"),
+      "utf8",
+    );
+    assert.match(raw, /not valid JSON from Vision/);
+    assert.match(parseError, /not valid JSON/);
+    assert.doesNotMatch(
+      raw + parseError,
+      /provider-secret-canary|authorization|api[_-]?key|bearer/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
   }
 });

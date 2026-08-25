@@ -6,6 +6,7 @@ import {
   VisionResultSchema,
   type VisionResult,
 } from "../contracts.js";
+import type { ProviderResponseObserver } from "./response-observer.js";
 
 const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
@@ -121,6 +122,7 @@ export function parseQwenVisionContent(content: string): VisionResult {
 export async function analyzeElements(
   image: Buffer,
   config: AppConfig,
+  observer?: ProviderResponseObserver,
 ): Promise<VisionResult> {
   const baseURL = requireSafeCompatibleBase(config);
   const client = new OpenAI({
@@ -153,10 +155,16 @@ export async function analyzeElements(
     ],
   });
 
-  const content = completion.choices[0]?.message.content;
-  if (typeof content !== "string") {
-    throw new Error("Qwen vision response did not contain text content");
-  }
+  await observer?.recordRawResponse(completion);
+  try {
+    const content = completion.choices[0]?.message.content;
+    if (typeof content !== "string") {
+      throw new Error("Qwen vision response did not contain text content");
+    }
 
-  return parseQwenVisionContent(content);
+    return parseQwenVisionContent(content);
+  } catch (error) {
+    await observer?.recordParseError(error);
+    throw error;
+  }
 }

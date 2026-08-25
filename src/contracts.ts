@@ -47,6 +47,7 @@ export const SlideElementSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("shape"),
     id: z.string(),
+    label: z.string(),
     shape: z.enum(["rect", "roundRect", "ellipse", "line"]),
     bbox: BBoxSchema,
     fillColor: z.string(),

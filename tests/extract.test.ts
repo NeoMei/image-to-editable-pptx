@@ -154,3 +154,47 @@ test("falls back when background removal would erase more than 92 percent", asyn
   assert.equal(extracted.extraction, "rectangular");
   assert.equal(extracted.fallbackReason, "transparent_pixel_ratio_above_92_percent");
 });
+
+test("falls back unchanged when a one-pixel connected perimeter is below five percent", async () => {
+  const source = await sharp({
+    create: {
+      width: 100,
+      height: 100,
+      channels: 3,
+      background: "#f7f3e9",
+    },
+  })
+    .composite([
+      {
+        input: {
+          create: {
+            width: 98,
+            height: 98,
+            channels: 3,
+            background: "#23394d",
+          },
+        },
+        left: 1,
+        top: 1,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const extracted = await extractAsset(
+    source,
+    { x: 0, y: 0, width: 100, height: 100 },
+    { extraction: "transparent" },
+  );
+  const [sourcePixels, extractedPixels] = await Promise.all([
+    sharp(source).raw().toBuffer(),
+    sharp(extracted.image).raw().toBuffer(),
+  ]);
+
+  assert.equal(extracted.extraction, "rectangular");
+  assert.equal(
+    extracted.fallbackReason,
+    "transparent_pixel_ratio_below_5_percent",
+  );
+  assert.deepEqual(extractedPixels, sourcePixels);
+});

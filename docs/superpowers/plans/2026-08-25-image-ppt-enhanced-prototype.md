@@ -123,7 +123,7 @@ export const BBoxSchema = z.object({
 export const SlideElementSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("text"), id: z.string(), text: z.string(), bbox: BBoxSchema,
     rotation: z.number(), color: z.string(), fontSizePx: z.number().positive(), align: z.enum(["left", "center", "right"]), zIndex: z.number().int() }),
-  z.object({ kind: z.literal("shape"), id: z.string(), shape: z.enum(["rect", "roundRect", "ellipse", "line"]), bbox: BBoxSchema,
+  z.object({ kind: z.literal("shape"), id: z.string(), label: z.string(), shape: z.enum(["rect", "roundRect", "ellipse", "line"]), bbox: BBoxSchema,
     fillColor: z.string(), strokeColor: z.string(), strokeWidthPx: z.number().nonnegative(), cornerRadiusPx: z.number().nonnegative(), zIndex: z.number().int() }),
   z.object({ kind: z.literal("asset"), id: z.string(), label: z.string(), bbox: BBoxSchema,
     extraction: z.enum(["transparent", "rectangular"]), assetPath: z.string(), zIndex: z.number().int(), fallbackReason: z.string().optional() }),
@@ -276,11 +276,11 @@ Use headers `Authorization: Bearer ...` and `Content-Type: application/json`. Se
 {
   "model": "qwen3.5-ocr",
   "input": { "messages": [{ "role": "user", "content": [{ "image": "data:image/png;base64,...", "enable_rotate": false }] }] },
-  "parameters": { "ocr_options": { "task": "text_recognition" } }
+  "parameters": { "ocr_options": { "task": "advanced_recognition" } }
 }
 ```
 
-Normalize each line's four-point `location` to an axis-aligned bbox, retaining the original quad and text.
+Normalize each `ocr_result.words_info[]` line's four-point `location` to an axis-aligned bbox, retaining the original quad and text. Reject the coordinate-free plain-text envelope produced by `text_recognition`.
 
 - [ ] **Step 4: Implement vision request**
 
@@ -323,9 +323,11 @@ Cover these exact behaviors:
 - OCR text wins over overlapping visual `text` candidates;
 - visual rectangles with confidence at least `0.85` become native shapes;
 - uncertain rectangles become bitmap assets;
+- candidates with `type: background` or `editableAs: background` never become foreground assets or removal-mask targets;
+- adjacent aligned OCR body lines with similar estimated font sizes merge, while distant, shifted, or differently sized lines remain separate;
 - bbox values are clipped and an `out_of_bounds_clipped` warning is emitted;
 - elements are sorted by `zIndex`, then stable input order;
-- the slide 7 fixture produces at least one title text, four panel shapes, and six movable asset candidates.
+- the slide 7 fixture produces at least one title text, seven semantically named native shapes (top label, subtitle bar, four content panels, bottom bar), and six movable asset candidates.
 
 - [ ] **Step 2: Verify tests fail**
 
@@ -339,7 +341,7 @@ Expected: module-not-found failure.
 
 - [ ] **Step 3: Implement minimal deterministic merge**
 
-Use intersection-over-union greater than `0.5` to suppress duplicate text candidates. Estimate text color from the vision hint when present and default to `23394D`. Estimate `fontSizePx` as `bbox.height * 0.72`, clamped to `[14, 88]`.
+Use intersection-over-union greater than `0.5` to suppress duplicate text candidates. Estimate text color from the vision hint when present and default to `23394D`. Estimate `fontSizePx` as `bbox.height * 0.72`, clamped to `[14, 88]`. Merge only consecutive OCR lines whose non-negative vertical gap is at most 75% of the smaller line height (minimum tolerance 4 px), whose left edges differ by at most 50% of the smaller estimated font size (minimum tolerance 4 px), and whose estimated font-size ratio is at most `1.2`; join their exact text with a newline and use the coordinate union.
 
 - [ ] **Step 4: Run planner tests and all offline tests**
 
@@ -460,7 +462,7 @@ with `X-DashScope-Async: enable`, `model: wanx2.1-imageedit`, `function: descrip
 移除白色遮罩区域中的文字、图标、线条和面板边框，延续周围米白色纸张纹理与自然阴影，不添加任何新文字、符号、物体或装饰。
 ```
 
-Poll `{dashscopeApiBase}/tasks/{taskId}` until success or the configured timeout. Download the result URL immediately because it is temporary.
+Poll `{dashscopeApiBase}/tasks/{taskId}` until success or the configured timeout. Download the temporary result only when it is HTTPS, has no userinfo, non-default port, or fragment, and its hostname matches the documented `dashscope-result-*.oss-cn-*.aliyuncs.com` OSS family. Disable redirects and reject every other URL before download.
 
 - [ ] **Step 4: Run tests and typecheck**
 
@@ -502,7 +504,7 @@ Export a synthetic manifest, unzip the result in the test, and assert:
 - native rectangle shapes exist;
 - each asset has a distinct relationship;
 - the full-slide background is behind all other elements;
-- generated element names begin with `text-`, `shape-`, or `asset-`.
+- generated element names begin with `text-`, `shape-`, or `asset-`, and native shape names retain their semantic label.
 
 - [ ] **Step 2: Verify test fails**
 
@@ -585,6 +587,8 @@ npm run cli -- run --image <png> --out <dir> [--record]
 ```
 
 The ledger must contain model IDs, durations, task IDs, warnings, fallbacks, SHA-256 hashes, and output paths, but no secrets or Authorization headers.
+
+Both `run` and standalone `build` use a sibling staging directory, atomic promotion, owned-target backup validation, and failed-run retention. Standalone `analyze` requires a new or empty output directory. Live OCR/Vision envelopes are recorded through a provider-boundary observer before normalization; successful temporary raw envelopes are removed, while malformed sanitized envelopes and parse errors remain in the failed-run directory.
 
 - [ ] **Step 4: Add exact slide 7 acceptance script**
 

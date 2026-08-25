@@ -30,7 +30,7 @@ function createSuccessfulTaskFetch(
   taskId: string,
   download: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
 ): typeof fetch {
-  const resultUrl = `https://temporary-result.example/${taskId}.png`;
+  const resultUrl = `https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/${taskId}.png`;
   return async (input, init) => {
     const url = String(input);
     if (url.endsWith("/image-synthesis")) {
@@ -79,7 +79,7 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
         task_status: "SUCCEEDED",
         results: [
           {
-            url: "https://temporary-result.example/clean.png?Expires=123",
+            url: "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png?Expires=123",
           },
         ],
       },
@@ -144,11 +144,83 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
 
     assert.equal(
       calls[4]?.url,
-      "https://temporary-result.example/clean.png?Expires=123",
+      "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png?Expires=123",
     );
     assert.equal(calls[4]?.init?.method, "GET");
     assert.deepEqual(calls[4]?.init?.headers, {});
     assert.equal(calls[4]?.init?.redirect, "error");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rejects provider-controlled result URLs outside the documented DashScope OSS family", async () => {
+  const originalFetch = globalThis.fetch;
+  const invalidUrls = [
+    "not a URL",
+    "http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png",
+    "https://user@dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png",
+    "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com:8443/clean.png",
+    "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png#fragment",
+    "https://127.0.0.1/clean.png",
+    "https://[::1]/clean.png",
+    "https://localhost/clean.png",
+    "https://unrelated.example/clean.png",
+    "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com.evil.example/clean.png",
+  ];
+
+  try {
+    for (const [index, resultUrl] of invalidUrls.entries()) {
+      let fetchCount = 0;
+      globalThis.fetch = async (input) => {
+        fetchCount += 1;
+        const url = String(input);
+        if (url.endsWith("/image-synthesis")) {
+          return Response.json({
+            output: { task_id: `unsafe-${index}` },
+          });
+        }
+        if (url.endsWith(`/tasks/unsafe-${index}`)) {
+          return Response.json({
+            output: {
+              task_id: `unsafe-${index}`,
+              task_status: "SUCCEEDED",
+              results: [{ url: resultUrl }],
+            },
+          });
+        }
+        return new Response(Buffer.from("must-not-download"));
+      };
+
+      await assert.rejects(
+        inpaintBackground(Buffer.from("source"), Buffer.from("mask"), config),
+        /safe DashScope OSS result URL/i,
+        resultUrl,
+      );
+      assert.equal(fetchCount, 2, `must reject before download: ${resultUrl}`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rejects a DashScope OSS result redirect without following it", async () => {
+  const originalFetch = globalThis.fetch;
+  let downloadInit: RequestInit | undefined;
+  globalThis.fetch = createSuccessfulTaskFetch(
+    "task-result-redirect",
+    async (_input, init) => {
+      downloadInit = init;
+      return Response.redirect("https://unrelated.example/redirected.png", 302);
+    },
+  );
+
+  try {
+    await assert.rejects(
+      inpaintBackground(Buffer.from("source"), Buffer.from("mask"), config),
+      /result download failed with status 302/i,
+    );
+    assert.equal(downloadInit?.redirect, "error");
   } finally {
     globalThis.fetch = originalFetch;
   }

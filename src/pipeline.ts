@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   lstat,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -43,6 +44,7 @@ import {
   parseQwenVisionContent,
 } from "./providers/qwen-vision.js";
 import { inpaintBackground } from "./providers/wanx-edit.js";
+import type { ProviderResponseObserver } from "./providers/response-observer.js";
 import { readRecording, writeRecording } from "./recording.js";
 
 const RawVisionRecordingSchema = z.object({
@@ -347,12 +349,50 @@ async function inspectSourceImage(image: Buffer): Promise<void> {
   }
 }
 
+async function prepareAnalysisDirectory(outDir: string): Promise<void> {
+  try {
+    const info = await lstat(outDir);
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error("Analysis output directory must be new or empty");
+    }
+    if ((await readdir(outDir)).length !== 0) {
+      throw new Error("Analysis output directory must be new or empty");
+    }
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    await mkdir(outDir, { recursive: true });
+  }
+}
+
+function parseErrorRecord(provider: "ocr" | "vision", error: unknown) {
+  return {
+    provider,
+    name: error instanceof Error ? error.name : "UnknownError",
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function responseObserver(
+  outDir: string,
+  provider: "ocr" | "vision",
+): ProviderResponseObserver {
+  return {
+    recordRawResponse: (payload) =>
+      writeRecording(join(outDir, `raw-responses/${provider}.json`), payload),
+    recordParseError: (error) =>
+      writeRecording(
+        join(outDir, `parse-errors/${provider}.json`),
+        parseErrorRecord(provider, error),
+      ),
+  };
+}
+
 export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisResult> {
   const startedAt = performance.now();
   const outDir = resolve(options.outDir);
   const image = await readFile(options.imagePath);
   await inspectSourceImage(image);
-  await mkdir(outDir, { recursive: true });
+  await prepareAnalysisDirectory(outDir);
 
   let ocr: OcrResult;
   let vision: VisionResult;
@@ -371,18 +411,32 @@ export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisRes
     const config = activeConfig ?? loadConfig();
     activeConfig = config;
     const ocrStartedAt = performance.now();
-    const ocrPromise = recognizeText(image, config).then((result) => {
+    const ocrPromise = recognizeText(
+      image,
+      config,
+      responseObserver(outDir, "ocr"),
+    ).finally(() => {
       ocrDuration = elapsed(ocrStartedAt);
-      return result;
     });
     const visionStartedAt = performance.now();
-    const visionPromise = analyzeElements(image, config).then((result) => {
+    const visionPromise = analyzeElements(
+      image,
+      config,
+      responseObserver(outDir, "vision"),
+    ).finally(() => {
       visionDuration = elapsed(visionStartedAt);
-      return result;
     });
-    [ocr, vision] = await Promise.all([ocrPromise, visionPromise]);
+    const [ocrOutcome, visionOutcome] = await Promise.allSettled([
+      ocrPromise,
+      visionPromise,
+    ]);
     ocrDuration = ocrDuration!;
     visionDuration = visionDuration!;
+    if (ocrOutcome.status === "rejected") throw ocrOutcome.reason;
+    if (visionOutcome.status === "rejected") throw visionOutcome.reason;
+    ocr = ocrOutcome.value;
+    vision = visionOutcome.value;
+    await rm(join(outDir, "raw-responses"), { recursive: true, force: true });
   }
 
   await Promise.all([
@@ -637,10 +691,29 @@ export async function buildSlide(options: BuildOptions): Promise<PipelineResult>
       throw new Error(`Analysis provenance hash mismatch: ${key}`);
     }
   }
-  return buildFromAnalysis(
-    { ...options, outDir: publication.targetDir },
-    { analysis, startedAt },
+  const targetDir = publication.targetDir;
+  const targetParent = dirname(targetDir);
+  await mkdir(targetParent, { recursive: true });
+  const stagingDir = await mkdtemp(
+    join(targetParent, `.${basename(targetDir)}.staging-`),
   );
+
+  try {
+    await buildFromAnalysis(
+      { ...options, outDir: stagingDir },
+      { analysis, startedAt, publishedOutDir: targetDir },
+    );
+    await promoteSuccessfulRun(stagingDir, targetDir, options.imagePath);
+    return {
+      outDir: targetDir,
+      manifestPath: join(targetDir, "manifest.json"),
+      pptxPath: join(targetDir, outputName(options.imagePath)),
+      ledgerPath: join(targetDir, "run-ledger.json"),
+    };
+  } catch (error) {
+    await retainFailedRun(stagingDir, targetDir);
+    throw error;
+  }
 }
 
 function isNotFound(error: unknown): boolean {

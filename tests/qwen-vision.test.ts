@@ -40,7 +40,9 @@ test("strips one outer Markdown fence and validates vision elements", async () =
   const fixture = await readFixture();
   const result = parseQwenVisionContent(fixture.choices[0]!.message.content);
 
-  assert.deepEqual(result.elements[0], {
+  assert.deepEqual(
+    result.elements.find((element) => element.label === "perception tools panel"),
+    {
     type: "panel",
     bbox: { x: 60, y: 241, width: 272, height: 343 },
     label: "perception tools panel",
@@ -50,19 +52,23 @@ test("strips one outer Markdown fence and validates vision elements", async () =
     fillColor: "F7F3E9",
     strokeColor: "456A84",
     cornerRadius: 20,
-  });
+    },
+  );
   assert.ok(result.elements.some((element) => element.type === "icon"));
 });
 
-test("contains four panels and six distinct movable slide 7 assets", async () => {
+test("contains every recolorable slide 7 structure and six distinct movable assets", async () => {
   const fixture = await readFixture();
   const result = parseQwenVisionContent(fixture.choices[0]!.message.content);
-  const panels = result.elements.filter(
+  const nativeShapeLabels = result.elements
+    .filter(
     (element) =>
       (element.type === "panel" || element.type === "shape") &&
       element.editableAs === "native-shape" &&
       element.confidence >= 0.9,
-  );
+    )
+    .map((element) => element.label)
+    .sort();
   const assetLabels = result.elements
     .filter(
       (element) =>
@@ -72,7 +78,18 @@ test("contains four panels and six distinct movable slide 7 assets", async () =>
     .map((element) => element.label)
     .sort();
 
-  assert.equal(panels.length, 4);
+  assert.deepEqual(
+    nativeShapeLabels,
+    [
+      "MCP ecosystem panel",
+      "bottom navy bar",
+      "collaboration tools panel",
+      "execution tools panel",
+      "orange subtitle bar",
+      "perception tools panel",
+      "top section label",
+    ].sort(),
+  );
   assert.deepEqual(assetLabels, [
     "clock",
     "eye",
@@ -140,7 +157,7 @@ test("uses the compatible client with the requested model and constrained prompt
   try {
     const result = await analyzeElements(Buffer.from([0x89, 0x50]), config);
 
-    assert.equal(result.elements.length, 10);
+    assert.equal(result.elements.length, 13);
     assert.equal(calls.length, 1);
     assert.equal(
       calls[0]?.url,

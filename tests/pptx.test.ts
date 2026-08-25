@@ -69,6 +69,7 @@ test("exports one editable wide slide with ordered, named PowerPoint layers", as
         {
           kind: "shape",
           id: "panel",
+          label: "synthetic panel",
           shape: "rect",
           bbox: { x: 64, y: 72, width: 640, height: 360 },
           fillColor: "F4EBDD",
@@ -137,7 +138,7 @@ test("exports one editable wide slide with ordered, named PowerPoint layers", as
     ).filter((name) => name !== "");
     assert.deepEqual(generatedNames, [
       "asset-background",
-      "shape-panel",
+      "shape-panel-synthetic panel",
       "text-title",
       "asset-icon-one",
       "asset-icon-two",

@@ -57,6 +57,24 @@ test("contains representative slide 7 title and section text", async () => {
   assert.ok(text.has("工具是 Agent 的手脚，定义能力边界"));
 });
 
+test("rejects a plain-text text_recognition envelope when coordinates are required", () => {
+  assert.throws(
+    () =>
+      parseQwenOcrResponse({
+        output: {
+          choices: [
+            {
+              message: {
+                content: [{ text: "plain text without words_info locations" }],
+              },
+            },
+          ],
+        },
+      }),
+    /coordinates require the advanced_recognition task/i,
+  );
+});
+
 test("posts the exact OCR request to the validated Beijing endpoint", async () => {
   const originalFetch = globalThis.fetch;
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
@@ -95,7 +113,7 @@ test("posts the exact OCR request to the validated Beijing endpoint", async () =
           },
         ],
       },
-      parameters: { ocr_options: { task: "text_recognition" } },
+      parameters: { ocr_options: { task: "advanced_recognition" } },
     });
   } finally {
     globalThis.fetch = originalFetch;

@@ -5,6 +5,7 @@ import {
   OcrResultSchema,
   type OcrResult,
 } from "../contracts.js";
+import type { ProviderResponseObserver } from "./response-observer.js";
 
 const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
@@ -74,13 +75,48 @@ function requireSafeOcrBase(config: AppConfig): string {
   return expectedHref;
 }
 
+function isCoordinateFreeTextResponse(payload: unknown): boolean {
+  if (typeof payload !== "object" || payload === null) return false;
+  const output = "output" in payload ? payload.output : undefined;
+  if (typeof output !== "object" || output === null || !("choices" in output)) {
+    return false;
+  }
+  if (!Array.isArray(output.choices)) return false;
+
+  return output.choices.some((choice) => {
+    if (typeof choice !== "object" || choice === null || !("message" in choice)) {
+      return false;
+    }
+    const message = choice.message;
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      !("content" in message) ||
+      !Array.isArray(message.content)
+    ) {
+      return false;
+    }
+    return (message.content as unknown[]).some(
+      (content: unknown) =>
+        typeof content === "object" &&
+        content !== null &&
+        "text" in content &&
+        typeof content.text === "string" &&
+        !("ocr_result" in content),
+    );
+  });
+}
+
 export function parseQwenOcrResponse(payload: unknown): OcrResult {
   let parsed: z.infer<typeof OcrResponseSchema>;
 
   try {
     parsed = OcrResponseSchema.parse(payload);
   } catch (error) {
-    throw new Error("Invalid Qwen OCR response", { cause: error });
+    const detail = isCoordinateFreeTextResponse(payload)
+      ? ": coordinates require the advanced_recognition task"
+      : "";
+    throw new Error(`Invalid Qwen OCR response${detail}`, { cause: error });
   }
 
   const lines = parsed.output.choices.flatMap((choice) =>
@@ -123,6 +159,7 @@ export function parseQwenOcrResponse(payload: unknown): OcrResult {
 export async function recognizeText(
   image: Buffer,
   config: AppConfig,
+  observer?: ProviderResponseObserver,
 ): Promise<OcrResult> {
   const baseUrl = requireSafeOcrBase(config);
   const response = await fetch(
@@ -148,7 +185,7 @@ export async function recognizeText(
             },
           ],
         },
-        parameters: { ocr_options: { task: "text_recognition" } },
+        parameters: { ocr_options: { task: "advanced_recognition" } },
       }),
       signal: AbortSignal.timeout(config.requestTimeoutMs),
       redirect: "error",
@@ -159,5 +196,12 @@ export async function recognizeText(
     throw new Error(`Qwen OCR request failed with status ${response.status}`);
   }
 
-  return parseQwenOcrResponse(await response.json());
+  const payload: unknown = await response.json();
+  await observer?.recordRawResponse(payload);
+  try {
+    return parseQwenOcrResponse(payload);
+  } catch (error) {
+    await observer?.recordParseError(error);
+    throw error;
+  }
 }

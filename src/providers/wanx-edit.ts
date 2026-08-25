@@ -4,6 +4,8 @@ import type { AppConfig } from "../config.js";
 
 const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+const DASHSCOPE_RESULT_HOST_PATTERN =
+  /^dashscope-result-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.oss-cn-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.aliyuncs\.com$/i;
 
 const INPAINT_PROMPT =
   "移除白色遮罩区域中的文字、图标、线条和面板边框，延续周围米白色纸张纹理与自然阴影，不添加任何新文字、符号、物体或装饰。";
@@ -63,6 +65,28 @@ function requireSafeWanxBase(config: AppConfig): string {
   }
 
   return expectedHref;
+}
+
+function requireSafeResultUrl(candidate: string): string {
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new Error("Expected a safe DashScope OSS result URL");
+  }
+
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.hash !== "" ||
+    !DASHSCOPE_RESULT_HOST_PATTERN.test(url.hostname)
+  ) {
+    throw new Error("Expected a safe DashScope OSS result URL");
+  }
+
+  return url.href;
 }
 
 function timeoutSignal(deadline: number): AbortSignal {
@@ -209,10 +233,21 @@ export async function inpaintBackground(
         );
       }
 
+      let safeResultUrl: string;
+      try {
+        safeResultUrl = requireSafeResultUrl(resultUrl);
+      } catch (error) {
+        throw taskError(
+          taskId,
+          "returned an unsafe result URL; expected a safe DashScope OSS result URL",
+          error,
+        );
+      }
+
       const downloadSignal = taskTimeoutSignal(deadline, taskId);
       let download: Response;
       try {
-        download = await fetch(resultUrl, {
+        download = await fetch(safeResultUrl, {
           method: "GET",
           headers: {},
           signal: downloadSignal,

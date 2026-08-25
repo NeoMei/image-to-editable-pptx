@@ -69,7 +69,7 @@ export async function exportPptx(
       case "shape": {
         const options = {
           ...position(element.bbox),
-          objectName: `shape-${element.id}`,
+          objectName: `shape-${element.id}-${element.label}`,
           fill: { color: element.fillColor },
           line: {
             color: element.strokeColor,

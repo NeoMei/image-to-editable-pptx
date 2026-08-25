@@ -3,11 +3,14 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 
+import sharp from "sharp";
+
 import {
   SlideManifestSchema,
   type OcrResult,
   type VisionResult,
 } from "../src/contracts.js";
+import { buildRemovalMask } from "../src/image/mask.js";
 import { planSlide } from "../src/planner.js";
 import { parseQwenOcrResponse } from "../src/providers/qwen-ocr.js";
 import { parseQwenVisionContent } from "../src/providers/qwen-vision.js";
@@ -92,6 +95,7 @@ test("high-confidence visual rectangles become native shapes", () => {
   assert.deepEqual(manifest.elements[0], {
     kind: "shape",
     id: "vision-1",
+    label: "rounded panel",
     shape: "roundRect",
     bbox: { x: 80, y: 100, width: 280, height: 320 },
     fillColor: "F4EBDD",
@@ -100,6 +104,36 @@ test("high-confidence visual rectangles become native shapes", () => {
     cornerRadiusPx: 18,
     zIndex: 2,
   });
+});
+
+test("excludes full-canvas background candidates from assets and the removal mask", async () => {
+  const vision: VisionResult = {
+    elements: [
+      visionElement({
+        type: "background",
+        bbox: { x: 0, y: 0, width: 1280, height: 720 },
+        label: "full slide paper background",
+        zIndex: 0,
+        editableAs: "bitmap",
+      }),
+      visionElement({
+        type: "photo",
+        bbox: { x: 0, y: 0, width: 1280, height: 720 },
+        label: "background by editability contract",
+        zIndex: 0,
+        editableAs: "background",
+      }),
+    ],
+  };
+
+  const manifest = planSlide(emptyOcr, vision);
+  const mask = await buildRemovalMask(1280, 720, manifest.elements);
+  const { data } = await sharp(mask).removeAlpha().raw().toBuffer({
+    resolveWithObject: true,
+  });
+
+  assert.deepEqual(manifest.elements, []);
+  assert.ok(data.every((channel) => channel === 0));
 });
 
 test("uncertain visual rectangles become rectangular bitmap assets", () => {
@@ -234,6 +268,52 @@ test("uses deterministic default text styling with clamped font sizes", () => {
   );
 });
 
+test("merges adjacent aligned OCR body lines with similar estimated font sizes", () => {
+  const ocr: OcrResult = {
+    lines: [
+      ocrLine("First paragraph line", { x: 100, y: 200, width: 420, height: 24 }),
+      ocrLine("Second paragraph line", { x: 104, y: 230, width: 390, height: 25 }),
+    ],
+  };
+
+  const manifest = planSlide(ocr, { elements: [] });
+  const text = manifest.elements.filter((element) => element.kind === "text");
+
+  assert.equal(text.length, 1);
+  assert.equal(text[0]?.text, "First paragraph line\nSecond paragraph line");
+  assert.deepEqual(text[0]?.bbox, { x: 100, y: 200, width: 420, height: 55 });
+});
+
+test("keeps OCR lines separate when distance, alignment, or font size differs", () => {
+  const cases: OcrResult[] = [
+    {
+      lines: [
+        ocrLine("far first", { x: 100, y: 100, width: 300, height: 24 }),
+        ocrLine("far second", { x: 102, y: 170, width: 300, height: 24 }),
+      ],
+    },
+    {
+      lines: [
+        ocrLine("aligned first", { x: 100, y: 100, width: 300, height: 24 }),
+        ocrLine("shifted second", { x: 150, y: 130, width: 300, height: 24 }),
+      ],
+    },
+    {
+      lines: [
+        ocrLine("small first", { x: 100, y: 100, width: 300, height: 20 }),
+        ocrLine("large second", { x: 102, y: 125, width: 300, height: 34 }),
+      ],
+    },
+  ];
+
+  for (const ocr of cases) {
+    const text = planSlide(ocr, { elements: [] }).elements.filter(
+      (element) => element.kind === "text",
+    );
+    assert.equal(text.length, 2);
+  }
+});
+
 test("plans the slide 7 fixture into title text, panels, and movable assets", async () => {
   const rawOcr = JSON.parse(
     await readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8"),
@@ -254,10 +334,25 @@ test("plans the slide 7 fixture into title text, panels, and movable assets", as
   );
   const panels = first.elements.filter((element) => element.kind === "shape");
   const assets = first.elements.filter((element) => element.kind === "asset");
+  const nativeShapeLabels = panels.map((element) => element.label).sort();
+  const expectedNativeShapeLabels = [
+    "MCP ecosystem panel",
+    "bottom navy bar",
+    "collaboration tools panel",
+    "execution tools panel",
+    "orange subtitle bar",
+    "perception tools panel",
+    "top section label",
+  ].sort();
 
   assert.ok(titleText.length >= 1);
-  assert.ok(panels.length >= 4);
-  assert.ok(assets.length >= 6);
+  assert.deepEqual(nativeShapeLabels, expectedNativeShapeLabels);
+  assert.equal(assets.length, 6);
+  assert.ok(
+    assets.every(
+      (element) => !expectedNativeShapeLabels.includes(element.label),
+    ),
+  );
   assert.doesNotThrow(() => SlideManifestSchema.parse(first));
   assert.deepEqual(second, first);
 });
