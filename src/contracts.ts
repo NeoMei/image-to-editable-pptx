@@ -61,8 +61,8 @@ export const SlideElementSchema = z.discriminatedUnion("kind", [
 ]);
 
 const PointSchema = z.object({
-  x: z.number(),
-  y: z.number(),
+  x: z.number().min(0).max(1280),
+  y: z.number().min(0).max(720),
 });
 
 export const OcrResultSchema = z.object({
