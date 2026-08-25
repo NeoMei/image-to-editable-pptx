@@ -85,3 +85,61 @@
 - The first full `npm test` attempt saw three failures only from stale ignored `dist/tests` left by an older compile. `npm run build` refreshed that generated tree, after which the full suite passed 148/148. `dist` remains ignored and is not part of the commit.
 - No real Alibaba credentials were available, so `advanced_recognition`, the documented OSS hostname family, and malformed-response retention are verified against official-contract-shaped offline envelopes and mocked transport, not a live authenticated request.
 - Finding 7 changed tests only because production behavior was already correct.
+
+---
+
+## Round 2 final review fixes
+
+- Starting head: `ca91dddef99ccc5f7de94026d48a61ce8a1c31aa`
+- Implementation commit: `f94a9c4` (`fix: address second final review findings`)
+- Network policy: no live API calls were made. Provider tests used mocked `fetch`; pipeline tests used sanitized fixtures and injected local inpainting.
+- Source inspection: the required 1280×720 `source-slide-07.png` was opened at original detail before choosing geometry. It shows the orange bar at approximately `(135,162)..(1159,218)`, bottom navy bar at `(42,607)..(1240,689)`, three main panels, and two separate right-side panels with a visible gap.
+
+### Round 2 finding-by-finding TDD evidence
+
+#### R2-1. Representative font size for merged OCR lines
+
+- RED: `npm test -- tests/planner.test.ts tests/mask.test.ts tests/qwen-vision.test.ts` exited 1; the merged two-line paragraph used the union bbox and produced `39.6 px` instead of the expected representative `17.64 px`.
+- GREEN: the planner retains each source line's clamped estimate and uses their median after merging. The positive two-line regression is `17.64 px`; distance, alignment, and size-mismatch negative cases retain their independent estimates. The PowerPoint exporter still explicitly uses `fit: "none"`.
+- Files: `src/planner.ts`, `tests/planner.test.ts`, approved design/implementation documents.
+
+#### R2-2. Slide-7 semantic-shape geometry
+
+- RED: the same focused RED command reported four fixture/geometry failures: only seven shapes existed; the right-side panels were bridged; the event panel was absent from fixture/planner acceptance; the fixture had 13 rather than 14 total elements.
+- GREEN: the inspected fixture now has eight native structures and six bitmap assets. Tests assert exact bboxes/radii, all labels in the manifest, the two right panels' black mask gap, and every semantic `shape-*` name in PPTX XML. Chosen bars are `(135,162,1024,56)` and `(42,607,1198,82)`.
+- Files: `tests/fixtures/qwen-vision-slide-07.json`, `tests/qwen-vision.test.ts`, `tests/planner.test.ts`, `tests/mask.test.ts`, `tests/pipeline.test.ts`, approved design/implementation documents.
+
+#### R2-3. Malformed outer HTTP response retention
+
+- RED: `npm test -- tests/pipeline.test.ts` exited 1 with 10/13 passing. Literal invalid-JSON bodies for OCR and Vision escaped as SDK/native `SyntaxError`s and produced neither a bounded raw-body recording nor the required stable parse-error record.
+- GREEN: OCR reads text before `JSON.parse`; Vision's constrained fetch clones and reads the body before SDK decoding. Both paths save a maximum 65,536-character sanitized body with `originalLength`/`truncated`, redact the configured key plus assignment/Bearer/`sk-`/`LTAI` credential shapes, save a provider parse error, and retain both files under the failed staging run. Existing valid-outer/invalid-inner regressions remain green; recording still rejects executable payload methods.
+- Files: `src/providers/response-observer.ts`, `src/providers/qwen-ocr.ts`, `src/providers/qwen-vision.ts`, `src/pipeline.ts`, `tests/pipeline.test.ts`, approved design document.
+
+#### R2-4. Source-only and compiled test scopes
+
+- RED: `npm test -- tests/package-scripts.test.ts` exited 1 because `npm test` had no source-tree selector and rediscovered ignored compiled tests.
+- GREEN: `npm test` targets only `tests/*.test.ts`; `npm run test:compiled` separately targets `dist/tests/*.test.js`. README and the implementation plan document the split. Logical source count is 78, not a combined source-plus-compiled count.
+- Files: `package.json`, `tests/package-scripts.test.ts`, `README.md`, approved implementation plan.
+
+### Round 2 verification commands and results
+
+1. Required TDD skill read completely before edits: `/Users/neomei/.agents/skills/test-driven-development/SKILL.md`.
+2. RED:
+   - `npm test -- tests/planner.test.ts tests/mask.test.ts tests/qwen-vision.test.ts` -> exit 1, 16/21 pass and 5 expected failures.
+   - `npm test -- tests/pipeline.test.ts` -> exit 1, 10/13 pass and 3 expected failures (one fixture geometry plus two malformed outer bodies).
+   - `npm test -- tests/package-scripts.test.ts` -> exit 1, 0/1 pass.
+3. Focused GREEN: `node --import tsx --test tests/planner.test.ts tests/mask.test.ts tests/qwen-vision.test.ts tests/pipeline.test.ts tests/package-scripts.test.ts` -> 35/35 pass.
+4. Source-only full suite: `npm test` -> 78/78 pass.
+5. `npm run lint:types` -> exit 0.
+6. `npm run build` -> exit 0.
+7. Compiled validation: `npm run test:compiled` -> 78/78 pass.
+8. `bash -n scripts/accept-slide-07.sh` -> exit 0.
+9. `git diff --check` and `git diff --cached --check` -> exit 0.
+10. Credential scan over added lines found only the two deliberately fake malformed-body canaries and their assertions; excluding those named canaries, no credential-shaped values matched.
+11. Placeholder scan over `src`, `tests`, `README.md`, `scripts`, and non-plan docs found no unresolved implementation placeholders; the documented README `<your-api-key>` setup token is intentional.
+
+### Round 2 self-review and concerns
+
+- Self-review traced the normal/invalid outer/invalid inner provider paths, confirmed both provider promises still settle before failed staging moves, and found no bypass of output ownership, canonical-path validation, redirect rejection, or recording sanitization.
+- `dist` is generated and ignored. It was rebuilt only for the explicit compiled validation and is not committed.
+- No Alibaba credentials were available. The official-envelope behavior and failed-response evidence are verified offline with mocked transport, not by a live authenticated call.
