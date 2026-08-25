@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import type { AppConfig } from "../src/config.js";
@@ -27,11 +28,12 @@ type VisionFixture = {
 };
 
 async function readFixture(): Promise<VisionFixture> {
-  const fixtureUrl = new URL(
-    "fixtures/qwen-vision-slide-07.json",
-    import.meta.url,
-  );
-  return JSON.parse(await readFile(fixtureUrl, "utf8")) as VisionFixture;
+  return JSON.parse(
+    await readFile(
+      resolve("tests/fixtures/qwen-vision-slide-07.json"),
+      "utf8",
+    ),
+  ) as VisionFixture;
 }
 
 test("strips one outer Markdown fence and validates vision elements", async () => {

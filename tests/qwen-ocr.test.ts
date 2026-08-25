@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import type { AppConfig } from "../src/config.js";
@@ -23,8 +24,9 @@ const config: AppConfig = {
 };
 
 async function readFixture(): Promise<unknown> {
-  const fixtureUrl = new URL("fixtures/qwen-ocr-slide-07.json", import.meta.url);
-  return JSON.parse(await readFile(fixtureUrl, "utf8"));
+  return JSON.parse(
+    await readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8"),
+  );
 }
 
 test("normalizes a four-point OCR location to an axis-aligned bbox", async () => {
