@@ -1,0 +1,10 @@
+{
+  "choices": [
+    {
+      "message": {
+        "role": "assistant",
+        "content": "```json\n{\"elements\":[{\"type\":\"panel\",\"bbox\":[80,160,320,480],\"label\":\"content panel\",\"zIndex\":2,\"editableAs\":\"native-shape\",\"confidence\":0.95,\"fillColor\":\"F4EBDD\",\"strokeColor\":\"23394D\",\"cornerRadius\":16},{\"type\":\"icon\",\"bbox\":[352,196,416,260],\"label\":\"tool icon\",\"zIndex\":3,\"editableAs\":\"bitmap\",\"confidence\":0.91}]}\n```"
+      }
+    }
+  ]
+}

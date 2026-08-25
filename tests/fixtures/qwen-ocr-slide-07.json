@@ -1,0 +1,26 @@
+{
+  "output": {
+    "choices": [
+      {
+        "message": {
+          "content": [
+            {
+              "ocr_result": {
+                "words_info": [
+                  {
+                    "text": "AI-Agent",
+                    "location": [40, 32, 340, 36, 336, 96, 36, 92]
+                  },
+                  {
+                    "text": "LLM + Harness + Tools",
+                    "location": [96, 176, 420, 176, 420, 214, 96, 214]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
