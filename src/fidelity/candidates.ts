@@ -10,6 +10,9 @@ import { planSlide } from "../planner.js";
 
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
+const MIN_MAJOR_CANDIDATE_CONFIDENCE = 0.8;
+const MIN_MAJOR_CANDIDATE_DIMENSION_PX = 24;
+const MIN_MAJOR_CANDIDATE_AREA_PX2 = 1600;
 
 const clipBBox = (
   bbox: ProviderBBox,
@@ -95,9 +98,13 @@ export function planFidelityCandidates(
     .filter(({ element }) => element.type === "panel");
   const bitmap = visionWithClippedBboxes
     .filter(
-      ({ element }) =>
+      ({ element, bbox }) =>
         element.editableAs === "bitmap" &&
-        (element.type === "icon" || element.type === "illustration"),
+        (element.type === "icon" || element.type === "illustration") &&
+        element.confidence >= MIN_MAJOR_CANDIDATE_CONFIDENCE &&
+        bbox.width >= MIN_MAJOR_CANDIDATE_DIMENSION_PX &&
+        bbox.height >= MIN_MAJOR_CANDIDATE_DIMENSION_PX &&
+        bbox.width * bbox.height >= MIN_MAJOR_CANDIDATE_AREA_PX2,
     );
 
   const grouped = new Map<number, typeof bitmap>();

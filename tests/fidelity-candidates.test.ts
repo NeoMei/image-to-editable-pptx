@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import type { OcrResult, VisionResult } from "../src/contracts.js";
 import { planFidelityCandidates } from "../src/fidelity/candidates.js";
+import { parseQwenOcrResponse } from "../src/providers/qwen-ocr.js";
 
 const ocr: OcrResult = {
   lines: Array.from({ length: 10 }, (_, index) => ({
@@ -67,6 +70,46 @@ test("plans all OCR text but keeps panels and bars in the background", () => {
   );
 });
 
+test("keeps decorative and uncertain bitmaps in the background", () => {
+  const plan = planFidelityCandidates(ocr, {
+    elements: [
+      ...vision.elements,
+      {
+        type: "icon",
+        bbox: { x: 320, y: 120, width: 20, height: 20 },
+        label: "decorative sparkle",
+        zIndex: 4,
+        editableAs: "bitmap",
+        confidence: 0.99,
+      },
+      {
+        type: "illustration",
+        bbox: { x: 700, y: 100, width: 200, height: 200 },
+        label: "uncertain diagram",
+        zIndex: 5,
+        editableAs: "bitmap",
+        confidence: 0.79,
+      },
+    ],
+  });
+
+  assert.equal(plan.icons.length, 1);
+  assert.equal(plan.icons[0]?.label, "wrench + shield");
+  assert.deepEqual(plan.icons[0]?.sourceElementIndexes, [1, 2]);
+});
+
+test("plans exactly ten required text candidates from the slide 7 OCR fixture", async () => {
+  const rawOcr = JSON.parse(
+    await readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8"),
+  );
+  const fixtureOcr = parseQwenOcrResponse(rawOcr);
+
+  const plan = planFidelityCandidates(fixtureOcr, { elements: [] });
+
+  assert.equal(plan.text.length, 10);
+  assert.equal(plan.text.every((candidate) => candidate.required), true);
+});
+
 test("clips intersecting candidates, omits outside visuals, and warns once", () => {
   const clippedOcr: OcrResult = {
     lines: [
@@ -86,7 +129,7 @@ test("clips intersecting candidates, omits outside visuals, and warns once", () 
     elements: [
       {
         type: "icon",
-        bbox: { x: -10, y: 40, width: 30, height: 30 },
+        bbox: { x: -10, y: 40, width: 50, height: 50 },
         label: "left-edge icon",
         zIndex: 4,
         editableAs: "bitmap",
@@ -115,8 +158,8 @@ test("clips intersecting candidates, omits outside visuals, and warns once", () 
   assert.deepEqual(plan.icons[0]?.bbox, {
     x: 0,
     y: 40,
-    width: 20,
-    height: 30,
+    width: 40,
+    height: 50,
   });
   assert.deepEqual(plan.icons[0]?.sourceElementIndexes, [0]);
   assert.deepEqual(plan.warnings, ["out_of_bounds_clipped"]);
