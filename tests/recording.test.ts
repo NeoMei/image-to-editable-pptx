@@ -71,3 +71,29 @@ test("round-trips a sanitized fixture through a supplied Zod schema", async () =
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("rejects an enumerable toJSON function before it can reintroduce secrets", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-recording-"));
+  const recordingPath = join(directory, "fixture.json");
+  let toJsonCalled = false;
+
+  try {
+    await assert.rejects(
+      writeRecording(recordingPath, {
+        safe: "kept",
+        toJSON() {
+          toJsonCalled = true;
+          return {
+            authorization: "Bearer reintroduced-secret",
+            apiKey: "reintroduced-secret",
+          };
+        },
+      }),
+      /function/i,
+    );
+    assert.equal(toJsonCalled, false);
+    await assert.rejects(readFile(recordingPath, "utf8"), /ENOENT/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
