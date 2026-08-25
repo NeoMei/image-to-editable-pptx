@@ -128,3 +128,28 @@ export type SlideElement = z.infer<typeof SlideElementSchema>;
 export type OcrResult = z.infer<typeof OcrResultSchema>;
 export type VisionResult = z.infer<typeof VisionResultSchema>;
 export type SlideManifest = z.infer<typeof SlideManifestSchema>;
+
+export type TextSlideElement = Extract<SlideElement, { kind: "text" }>;
+
+export type FidelityTextCandidate = {
+  kind: "text";
+  id: string;
+  required: true;
+  element: TextSlideElement;
+};
+
+export type FidelityIconCandidate = {
+  kind: "icon";
+  id: string;
+  label: string;
+  bbox: BBox;
+  zIndex: number;
+  sourceElementIndexes: number[];
+};
+
+export type FidelityPlan = {
+  canvas: { width: 1280; height: 720 };
+  text: FidelityTextCandidate[];
+  icons: FidelityIconCandidate[];
+  warnings: string[];
+};
