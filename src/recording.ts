@@ -45,7 +45,13 @@ function sanitize(value: unknown, ancestors = new WeakSet<object>()): JsonValue 
 
   try {
     if (Array.isArray(value)) {
-      return value.map((item) => sanitize(item, ancestors));
+      const sanitizedItems: JsonValue[] = [];
+
+      for (let index = 0; index < value.length; index += 1) {
+        sanitizedItems[index] = sanitize(value[index], ancestors);
+      }
+
+      return sanitizedItems;
     }
 
     return Object.fromEntries(

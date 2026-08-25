@@ -97,3 +97,44 @@ test("rejects an enumerable toJSON function before it can reintroduce secrets", 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("does not invoke own or inherited array map overrides", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-recording-"));
+  const recordingPath = join(directory, "fixture.json");
+  const ownOverride = [{ value: "own-safe" }];
+  const inheritedOverride = [{ value: "inherited-safe" }];
+  let ownMapCalled = false;
+  let inheritedMapCalled = false;
+
+  Object.defineProperty(ownOverride, "map", {
+    enumerable: true,
+    value() {
+      ownMapCalled = true;
+      return [{ authorization: "Bearer own-secret" }];
+    },
+  });
+  Object.setPrototypeOf(inheritedOverride, {
+    map() {
+      inheritedMapCalled = true;
+      return [{ apiKey: "inherited-secret" }];
+    },
+  });
+
+  try {
+    await writeRecording(recordingPath, {
+      ownOverride,
+      inheritedOverride,
+    });
+
+    const text = await readFile(recordingPath, "utf8");
+    assert.equal(ownMapCalled, false);
+    assert.equal(inheritedMapCalled, false);
+    assert.doesNotMatch(text, /secret/);
+    assert.deepEqual(JSON.parse(text), {
+      ownOverride: [{ value: "own-safe" }],
+      inheritedOverride: [{ value: "inherited-safe" }],
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
