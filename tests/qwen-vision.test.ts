@@ -94,7 +94,7 @@ test("rejects nested Markdown fences after stripping only the outer fence", () =
   );
 });
 
-test("rejects invalid element enums and out-of-canvas bboxes", () => {
+test("rejects invalid element enums and non-positive bboxes", () => {
   assert.throws(
     () =>
       parseQwenVisionContent(
@@ -105,7 +105,7 @@ test("rejects invalid element enums and out-of-canvas bboxes", () => {
   assert.throws(
     () =>
       parseQwenVisionContent(
-        '{"elements":[{"type":"photo","bbox":[1200,700,1300,740],"label":"bad bbox","zIndex":1,"editableAs":"bitmap","confidence":0.9}]}',
+        '{"elements":[{"type":"photo","bbox":[100,100,100,140],"label":"bad bbox","zIndex":1,"editableAs":"bitmap","confidence":0.9}]}',
       ),
     /vision response/i,
   );

@@ -2,6 +2,7 @@ import {
   SlideManifestSchema,
   type BBox,
   type OcrResult,
+  type ProviderBBox,
   type SlideElement,
   type SlideManifest,
   type VisionResult,
@@ -18,43 +19,35 @@ type PlannedElement = {
   inputOrder: number;
 };
 
-function clipAxis(
-  start: number,
-  length: number,
-  limit: number,
-): { start: number; length: number; clipped: boolean } {
-  const end = start + length;
-  let clippedStart = Math.max(0, Math.min(start, limit));
-  let clippedEnd = Math.max(0, Math.min(end, limit));
-
-  if (clippedEnd <= clippedStart) {
-    clippedStart = Math.min(clippedStart, limit - 1);
-    clippedEnd = clippedStart + 1;
-  }
-
-  return {
-    start: clippedStart,
-    length: clippedEnd - clippedStart,
-    clipped: clippedStart !== start || clippedEnd !== end,
-  };
-}
-
 function clipBBox(
-  bbox: BBox,
+  bbox: ProviderBBox,
   noteClipping: () => void,
-): BBox {
-  const horizontal = clipAxis(bbox.x, bbox.width, CANVAS_WIDTH);
-  const vertical = clipAxis(bbox.y, bbox.height, CANVAS_HEIGHT);
+): BBox | null {
+  const right = bbox.x + bbox.width;
+  const bottom = bbox.y + bbox.height;
+  const clippedLeft = Math.max(0, bbox.x);
+  const clippedTop = Math.max(0, bbox.y);
+  const clippedRight = Math.min(CANVAS_WIDTH, right);
+  const clippedBottom = Math.min(CANVAS_HEIGHT, bottom);
 
-  if (horizontal.clipped || vertical.clipped) {
+  if (
+    clippedLeft !== bbox.x ||
+    clippedTop !== bbox.y ||
+    clippedRight !== right ||
+    clippedBottom !== bottom
+  ) {
     noteClipping();
   }
 
+  if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) {
+    return null;
+  }
+
   return {
-    x: horizontal.start,
-    y: vertical.start,
-    width: horizontal.length,
-    height: vertical.length,
+    x: clippedLeft,
+    y: clippedTop,
+    width: clippedRight - clippedLeft,
+    height: clippedBottom - clippedTop,
   };
 }
 
@@ -96,17 +89,19 @@ export function planSlide(
   const noteClipping = (): void => {
     wasClipped = true;
   };
-  const visionWithClippedBboxes = vision.elements.map((element) => ({
-    element,
-    bbox: clipBBox(element.bbox, noteClipping),
-  }));
-  const ocrWithClippedBboxes = ocr.lines.map((line) => ({
-    line,
-    bbox: clipBBox(line.bbox, noteClipping),
-  }));
+  const visionWithClippedBboxes = vision.elements.flatMap(
+    (element, sourceIndex) => {
+      const bbox = clipBBox(element.bbox, noteClipping);
+      return bbox === null ? [] : [{ element, bbox, sourceIndex }];
+    },
+  );
+  const ocrWithClippedBboxes = ocr.lines.flatMap((line, sourceIndex) => {
+    const bbox = clipBBox(line.bbox, noteClipping);
+    return bbox === null ? [] : [{ line, bbox, sourceIndex }];
+  });
   const planned: PlannedElement[] = [];
 
-  for (const [index, { line, bbox }] of ocrWithClippedBboxes.entries()) {
+  for (const { line, bbox, sourceIndex } of ocrWithClippedBboxes) {
     const visualTextHint = visionWithClippedBboxes
       .filter(({ element }) => element.type === "text")
       .map((candidate) => ({
@@ -119,7 +114,7 @@ export function planSlide(
     planned.push({
       element: {
         kind: "text",
-        id: `ocr-${index + 1}`,
+        id: `ocr-${sourceIndex + 1}`,
         text: line.text,
         bbox,
         rotation: 0,
@@ -132,8 +127,8 @@ export function planSlide(
     });
   }
 
-  for (const [index, { element, bbox }] of visionWithClippedBboxes.entries()) {
-    const id = `vision-${index + 1}`;
+  for (const { element, bbox, sourceIndex } of visionWithClippedBboxes) {
+    const id = `vision-${sourceIndex + 1}`;
 
     if (element.type === "text") {
       const overlapsOcr = ocrWithClippedBboxes.some(

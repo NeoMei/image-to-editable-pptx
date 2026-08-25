@@ -25,6 +25,13 @@ export const BBoxSchema = z
     }
   });
 
+export const ProviderBBoxSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().finite().positive(),
+  height: z.number().finite().positive(),
+});
+
 export const SlideElementSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("text"),
@@ -60,17 +67,22 @@ export const SlideElementSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-const PointSchema = z.object({
-  x: z.number().min(0).max(1280),
-  y: z.number().min(0).max(720),
+const ProviderPointSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
 });
 
 export const OcrResultSchema = z.object({
   lines: z.array(
     z.object({
       text: z.string(),
-      bbox: BBoxSchema,
-      quad: z.tuple([PointSchema, PointSchema, PointSchema, PointSchema]),
+      bbox: ProviderBBoxSchema,
+      quad: z.tuple([
+        ProviderPointSchema,
+        ProviderPointSchema,
+        ProviderPointSchema,
+        ProviderPointSchema,
+      ]),
     }),
   ),
 });
@@ -87,7 +99,7 @@ export const VisionResultSchema = z.object({
         "photo",
         "background",
       ]),
-      bbox: BBoxSchema,
+      bbox: ProviderBBoxSchema,
       label: z.string(),
       zIndex: z.number().int(),
       editableAs: z.enum(["text", "native-shape", "bitmap", "background"]),
@@ -110,6 +122,7 @@ export const SlideManifestSchema = z.object({
 });
 
 export type BBox = z.infer<typeof BBoxSchema>;
+export type ProviderBBox = z.infer<typeof ProviderBBoxSchema>;
 export type SlideElement = z.infer<typeof SlideElementSchema>;
 export type OcrResult = z.infer<typeof OcrResultSchema>;
 export type VisionResult = z.infer<typeof VisionResultSchema>;

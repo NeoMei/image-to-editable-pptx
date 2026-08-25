@@ -121,18 +121,70 @@ test("uncertain visual rectangles become rectangular bitmap assets", () => {
   assert.equal(asset?.extraction, "rectangular");
 });
 
-test("clips out-of-bounds bboxes and emits a warning", () => {
-  const vision = {
-    elements: [
-      visionElement({
-        bbox: { x: 1260, y: 700, width: 80, height: 60 },
-        label: "edge asset",
-      }),
-    ],
-  } as VisionResult;
+test("clips OCR parser overflow and emits a warning", () => {
+  const ocr = parseQwenOcrResponse({
+    output: {
+      choices: [
+        {
+          message: {
+            content: [
+              {
+                ocr_result: {
+                  words_info: [
+                    {
+                      text: "edge text",
+                      location: [1260, 700, 1320, 700, 1320, 760, 1260, 760],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  });
+
+  const manifest = planSlide(ocr, { elements: [] });
+
+  assert.deepEqual(manifest.elements[0]?.bbox, {
+    x: 1260,
+    y: 700,
+    width: 20,
+    height: 20,
+  });
+  assert.deepEqual(manifest.warnings, ["out_of_bounds_clipped"]);
+  assert.doesNotThrow(() => SlideManifestSchema.parse(manifest));
+});
+
+test("clips Vision parser overflow and drops fully non-intersecting boxes", () => {
+  const vision = parseQwenVisionContent(
+    JSON.stringify({
+      elements: [
+        {
+          type: "panel",
+          bbox: [1260, 700, 1320, 760],
+          label: "edge panel",
+          zIndex: 1,
+          editableAs: "native-shape",
+          confidence: 0.95,
+        },
+        {
+          type: "icon",
+          bbox: [1300, 100, 1340, 140],
+          label: "outside icon",
+          zIndex: 2,
+          editableAs: "bitmap",
+          confidence: 0.95,
+        },
+      ],
+    }),
+  );
 
   const manifest = planSlide(emptyOcr, vision);
 
+  assert.equal(vision.elements.length, 2);
+  assert.equal(manifest.elements.length, 1);
   assert.deepEqual(manifest.elements[0]?.bbox, {
     x: 1260,
     y: 700,
