@@ -166,15 +166,26 @@ test("throws a terminal task failure containing the task_id and provider details
   }
 });
 
-test("times out while polling and preserves the submitted task_id", async () => {
+test("classifies an in-flight poll deadline abort as timeout and preserves task_id", async () => {
   const originalFetch = globalThis.fetch;
-  let calls = 0;
 
-  globalThis.fetch = async () => {
-    calls += 1;
-    return Response.json({
-      request_id: `request-${calls}`,
-      output: { task_id: "task-timeout", task_status: "PENDING" },
+  globalThis.fetch = async (input, init) => {
+    if (String(input).endsWith("/image-synthesis")) {
+      return Response.json({
+        request_id: "submit-request",
+        output: { task_id: "task-poll-timeout", task_status: "PENDING" },
+      });
+    }
+
+    const signal = init?.signal;
+    assert.ok(signal);
+    return new Promise<Response>((_resolve, reject) => {
+      const rejectWithSignalReason = () => reject(signal.reason);
+      if (signal.aborted) {
+        rejectWithSignalReason();
+        return;
+      }
+      signal.addEventListener("abort", rejectWithSignalReason, { once: true });
     });
   };
 
@@ -182,17 +193,99 @@ test("times out while polling and preserves the submitted task_id", async () => 
     await assert.rejects(
       inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
         ...config,
-        requestTimeoutMs: 2,
-        pollIntervalMs: 10,
+        requestTimeoutMs: 25,
       }),
       (error: unknown) => {
         assert.ok(error instanceof Error);
-        assert.match(error.message, /task-timeout/);
+        assert.match(error.message, /task-poll-timeout/);
         assert.match(error.message, /timed out/i);
+        assert.ok(error.cause instanceof DOMException);
+        assert.equal(error.cause.name, "TimeoutError");
         return true;
       },
     );
-    assert.ok(calls >= 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("classifies a poll response body deadline abort as timeout and preserves task_id", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    if (String(input).endsWith("/image-synthesis")) {
+      return Response.json({
+        request_id: "submit-request",
+        output: { task_id: "task-body-timeout", task_status: "PENDING" },
+      });
+    }
+
+    const signal = init?.signal;
+    assert.ok(signal);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const failBodyWithSignalReason = () => controller.error(signal.reason);
+        if (signal.aborted) {
+          failBodyWithSignalReason();
+          return;
+        }
+        signal.addEventListener("abort", failBodyWithSignalReason, {
+          once: true,
+        });
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    await assert.rejects(
+      inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
+        ...config,
+        requestTimeoutMs: 25,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /task-body-timeout/);
+        assert.match(error.message, /timed out/i);
+        assert.ok(error.cause instanceof DOMException);
+        assert.equal(error.cause.name, "TimeoutError");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("does not classify an ordinary poll abort as a configured timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  const ordinaryAbort = new DOMException("upstream aborted", "AbortError");
+
+  globalThis.fetch = async (input) => {
+    if (String(input).endsWith("/image-synthesis")) {
+      return Response.json({
+        request_id: "submit-request",
+        output: { task_id: "task-ordinary-abort", task_status: "PENDING" },
+      });
+    }
+    throw ordinaryAbort;
+  };
+
+  try {
+    await assert.rejects(
+      inpaintBackground(Buffer.from("source"), Buffer.from("mask"), config),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /task-ordinary-abort/);
+        assert.match(error.message, /poll failed/i);
+        assert.doesNotMatch(error.message, /timed out/i);
+        assert.equal(error.cause, ordinaryAbort);
+        return true;
+      },
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

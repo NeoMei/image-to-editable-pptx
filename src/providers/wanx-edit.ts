@@ -88,6 +88,25 @@ function taskError(taskId: string, message: string, cause?: unknown): Error {
     : new Error(`Wanx task ${taskId} ${message}`, { cause });
 }
 
+function taskTimeoutSignal(deadline: number, taskId: string): AbortSignal {
+  try {
+    return timeoutSignal(deadline);
+  } catch (error) {
+    throw taskError(taskId, "timed out", error);
+  }
+}
+
+function isConfiguredDeadlineTimeout(signal: AbortSignal): boolean {
+  const reason = signal.reason;
+  return (
+    signal.aborted &&
+    typeof reason === "object" &&
+    reason !== null &&
+    "name" in reason &&
+    reason.name === "TimeoutError"
+  );
+}
+
 export async function inpaintBackground(
   source: Buffer,
   mask: Buffer,
@@ -140,15 +159,19 @@ export async function inpaintBackground(
       throw taskError(taskId, "timed out");
     }
 
+    const pollSignal = taskTimeoutSignal(deadline, taskId);
     let response: Response;
     try {
       response = await fetch(pollUrl, {
         method: "GET",
         headers: { Authorization: `Bearer ${config.apiKey}` },
-        signal: timeoutSignal(deadline),
+        signal: pollSignal,
         redirect: "error",
       });
     } catch (error) {
+      if (isConfiguredDeadlineTimeout(pollSignal)) {
+        throw taskError(taskId, "timed out", error);
+      }
       throw taskError(taskId, "poll failed", error);
     }
 
@@ -160,6 +183,9 @@ export async function inpaintBackground(
     try {
       task = TaskResponseSchema.parse(await response.json()).output;
     } catch (error) {
+      if (isConfiguredDeadlineTimeout(pollSignal)) {
+        throw taskError(taskId, "timed out", error);
+      }
       throw taskError(taskId, "returned an invalid poll response", error);
     }
 
