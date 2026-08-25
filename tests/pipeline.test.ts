@@ -77,6 +77,8 @@ function oversizedInvalidJsonBody(provider: "ocr" | "vision"): string {
     liveConfig.apiKey,
     "Authorization: Bearer sk-round2-credential-1234567890",
     "api_key=LTAI0123456789ABCDEF",
+    '"apiKey":"quoted-round2-secret-1234567890"',
+    '"Authorization":"Bearer quoted-round2-bearer-1234567890"',
     "x".repeat(70_000),
   ].join(" ");
 }
@@ -816,7 +818,7 @@ test("captures a bounded sanitized invalid-JSON OCR HTTP body before decoding", 
     assert.match(parseError, /OCR HTTP response is not valid JSON/);
     assert.doesNotMatch(
       rawText + parseError,
-      /provider-secret-canary|sk-round2-credential|LTAI0123456789ABCDEF|authorization|api[_-]?key|bearer/i,
+      /provider-secret-canary|sk-round2-credential|LTAI0123456789ABCDEF|quoted-round2|authorization|api[_-]?key|bearer/i,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -889,7 +891,7 @@ test("captures a bounded sanitized invalid-JSON Vision HTTP body before decoding
     assert.match(parseError, /Vision HTTP response is not valid JSON/);
     assert.doesNotMatch(
       rawText + parseError,
-      /provider-secret-canary|sk-round2-credential|LTAI0123456789ABCDEF|authorization|api[_-]?key|bearer/i,
+      /provider-secret-canary|sk-round2-credential|LTAI0123456789ABCDEF|quoted-round2|authorization|api[_-]?key|bearer/i,
     );
   } finally {
     globalThis.fetch = originalFetch;

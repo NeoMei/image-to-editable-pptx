@@ -13,7 +13,7 @@ export type RecordedHttpResponse = {
 };
 
 const CREDENTIAL_ASSIGNMENT =
-  /\b(?:authorization|api[_-]?key|access[_-]?token|x-dashscope-[a-z0-9-]+)\b\s*[:=]\s*(?:bearer\s+)?[^\s,;}"']+/gi;
+  /["']?\b(?:authorization|api[_-]?key|access[_-]?token|x-dashscope-[a-z0-9-]+)\b["']?\s*[:=]\s*["']?(?:bearer\s+)?[^\s,;}"']+["']?/gi;
 const BEARER_CREDENTIAL = /\bbearer\s+[^\s,;}"']+/gi;
 const OPENAI_SHAPED_CREDENTIAL = /\bsk-[a-z0-9_-]{8,}\b/gi;
 const ALIBABA_SHAPED_CREDENTIAL = /\bLTAI[a-z0-9]{12,}\b/gi;
