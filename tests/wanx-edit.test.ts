@@ -26,6 +26,35 @@ type FetchCall = {
   init: RequestInit | undefined;
 };
 
+function createSuccessfulTaskFetch(
+  taskId: string,
+  download: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  const resultUrl = `https://temporary-result.example/${taskId}.png`;
+  return async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/image-synthesis")) {
+      return Response.json({
+        request_id: `submit-${taskId}`,
+        output: { task_id: taskId, task_status: "PENDING" },
+      });
+    }
+    if (url.endsWith(`/tasks/${taskId}`)) {
+      return Response.json({
+        request_id: `poll-${taskId}`,
+        output: {
+          task_id: taskId,
+          task_status: "SUCCEEDED",
+          results: [{ url: resultUrl }],
+        },
+        usage: { image_count: 1 },
+      });
+    }
+    assert.equal(url, resultUrl);
+    return download(input, init);
+  };
+}
+
 test("submits masked PNGs, polls pending and running states, then downloads the succeeded image", async () => {
   const originalFetch = globalThis.fetch;
   const calls: FetchCall[] = [];
@@ -281,6 +310,153 @@ test("does not classify an ordinary poll abort as a configured timeout", async (
         assert.ok(error instanceof Error);
         assert.match(error.message, /task-ordinary-abort/);
         assert.match(error.message, /poll failed/i);
+        assert.doesNotMatch(error.message, /timed out/i);
+        assert.equal(error.cause, ordinaryAbort);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("classifies an in-flight result download deadline abort as timeout and preserves task_id", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = createSuccessfulTaskFetch(
+    "task-download-timeout",
+    async (_input, init) => {
+      const signal = init?.signal;
+      assert.ok(signal);
+      return new Promise<Response>((_resolve, reject) => {
+        const rejectWithSignalReason = () => reject(signal.reason);
+        if (signal.aborted) {
+          rejectWithSignalReason();
+          return;
+        }
+        signal.addEventListener("abort", rejectWithSignalReason, {
+          once: true,
+        });
+      });
+    },
+  );
+
+  try {
+    await assert.rejects(
+      inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
+        ...config,
+        requestTimeoutMs: 25,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /task-download-timeout/);
+        assert.match(error.message, /timed out/i);
+        assert.ok(error.cause instanceof DOMException);
+        assert.equal(error.cause.name, "TimeoutError");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("classifies a result download body deadline abort as timeout and preserves task_id", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = createSuccessfulTaskFetch(
+    "task-download-body-timeout",
+    async (_input, init) => {
+      const signal = init?.signal;
+      assert.ok(signal);
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const failBodyWithSignalReason = () =>
+            controller.error(signal.reason);
+          if (signal.aborted) {
+            failBodyWithSignalReason();
+            return;
+          }
+          signal.addEventListener("abort", failBodyWithSignalReason, {
+            once: true,
+          });
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "image/png" },
+      });
+    },
+  );
+
+  try {
+    await assert.rejects(
+      inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
+        ...config,
+        requestTimeoutMs: 25,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /task-download-body-timeout/);
+        assert.match(error.message, /timed out/i);
+        assert.ok(error.cause instanceof DOMException);
+        assert.equal(error.cause.name, "TimeoutError");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("does not classify an ordinary result download abort as timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  const ordinaryAbort = new DOMException("upstream aborted", "AbortError");
+  globalThis.fetch = createSuccessfulTaskFetch(
+    "task-download-abort",
+    async () => {
+      throw ordinaryAbort;
+    },
+  );
+
+  try {
+    await assert.rejects(
+      inpaintBackground(Buffer.from("source"), Buffer.from("mask"), config),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /task-download-abort/);
+        assert.match(error.message, /result download failed/i);
+        assert.doesNotMatch(error.message, /timed out/i);
+        assert.equal(error.cause, ordinaryAbort);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("does not classify an ordinary result body abort as timeout", async () => {
+  const originalFetch = globalThis.fetch;
+  const ordinaryAbort = new DOMException("body aborted", "AbortError");
+  globalThis.fetch = createSuccessfulTaskFetch(
+    "task-download-body-abort",
+    async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(ordinaryAbort);
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "image/png" } },
+      ),
+  );
+
+  try {
+    await assert.rejects(
+      inpaintBackground(Buffer.from("source"), Buffer.from("mask"), config),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /task-download-body-abort/);
+        assert.match(error.message, /result download could not be read/i);
         assert.doesNotMatch(error.message, /timed out/i);
         assert.equal(error.cause, ordinaryAbort);
         return true;

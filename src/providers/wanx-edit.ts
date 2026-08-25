@@ -209,15 +209,19 @@ export async function inpaintBackground(
         );
       }
 
+      const downloadSignal = taskTimeoutSignal(deadline, taskId);
       let download: Response;
       try {
         download = await fetch(resultUrl, {
           method: "GET",
           headers: {},
-          signal: timeoutSignal(deadline),
+          signal: downloadSignal,
           redirect: "error",
         });
       } catch (error) {
+        if (isConfiguredDeadlineTimeout(downloadSignal)) {
+          throw taskError(taskId, "timed out", error);
+        }
         throw taskError(taskId, "result download failed", error);
       }
 
@@ -234,6 +238,9 @@ export async function inpaintBackground(
           taskId,
         };
       } catch (error) {
+        if (isConfiguredDeadlineTimeout(downloadSignal)) {
+          throw taskError(taskId, "timed out", error);
+        }
         throw taskError(taskId, "result download could not be read", error);
       }
     }
