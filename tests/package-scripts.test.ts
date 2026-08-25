@@ -4,9 +4,11 @@ import test from "node:test";
 
 test("scopes source and compiled test scripts to their own trees", async () => {
   const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
+    engines: Record<string, string>;
     scripts: Record<string, string>;
   };
 
+  assert.equal(packageJson.engines.node, ">=22.6");
   assert.equal(
     packageJson.scripts.test,
     'node --import tsx --test "tests/*.test.ts"',

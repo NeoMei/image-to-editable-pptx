@@ -6,7 +6,7 @@
 
 **Architecture:** A provider layer calls Qwen OCR, Qwen Vision, and Wanx image editing; a deterministic planner merges their responses into a versioned slide manifest; image utilities create masks and movable assets; a PptxGenJS exporter rebuilds the slide. Provider responses are recordable fixtures so all parsing, planning, image processing, and export tests run without network access.
 
-**Tech Stack:** Node.js 20+, TypeScript, Node test runner, OpenAI-compatible HTTP, native `fetch`, Zod, Sharp, PptxGenJS.
+**Tech Stack:** Node.js 22.6+, TypeScript, Node test runner with native test globs, OpenAI-compatible HTTP, native `fetch`, Zod, Sharp, PptxGenJS.
 
 ## Global Constraints
 
@@ -89,10 +89,11 @@ Create `package.json` with:
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22.6" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test",
+    "test": "node --import tsx --test \"tests/*.test.ts\"",
+    "test:compiled": "node --test \"dist/tests/*.test.js\"",
     "lint:types": "tsc -p tsconfig.json --noEmit",
     "cli": "tsx src/cli.ts"
   },
