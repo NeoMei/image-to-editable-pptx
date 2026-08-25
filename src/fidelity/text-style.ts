@@ -19,7 +19,7 @@ const WHITESPACE_ADVANCE = 0.35;
 const PUNCTUATION_ADVANCE = 0.4;
 const OTHER_ADVANCE = 0.7;
 const MEASURED_GLYPH_HEIGHT_TO_FONT_SIZE = 0.94;
-const TEXT_BOX_HEIGHT_SAFETY = 0.94;
+const TEXT_LINE_HEIGHT_FACTOR = 1 / 0.94;
 const TEXT_BOX_WIDTH_SAFETY = 0.96;
 const MIN_ADVANCE_UNITS = 0.25;
 const MIN_FONT_SIZE_PX = 0.1;
@@ -55,6 +55,10 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
+function normalizedTextLines(text: string): string[] {
+  return text.replace(/\r\n?/g, "\n").split("\n");
+}
+
 export function inferEditableTextStyle(
   text: string,
   bbox: BBox,
@@ -63,17 +67,24 @@ export function inferEditableTextStyle(
   const glyphHeight = finitePositive(maskMetrics.glyphBounds.height, 1);
   const boxHeight = finitePositive(bbox.height, MIN_FONT_SIZE_PX);
   const boxWidth = finitePositive(bbox.width, MIN_FONT_SIZE_PX);
-  const advanceUnits = Math.max(
+  const lines = normalizedTextLines(text);
+  const lineCount = Math.max(1, lines.length);
+  const widestLineAdvanceUnits = Math.max(
     MIN_ADVANCE_UNITS,
-    Array.from(text).reduce(
-      (total, character) => total + characterAdvance(character),
-      0,
+    ...lines.map((line) =>
+      Array.from(line).reduce(
+        (total, character) => total + characterAdvance(character),
+        0,
+      ),
     ),
   );
+  const perLineGlyphHeight = glyphHeight / lineCount;
+  const availableLineBoxHeight = boxHeight / lineCount;
   const measuredHeightBudget =
-    glyphHeight * MEASURED_GLYPH_HEIGHT_TO_FONT_SIZE;
-  const boxHeightBudget = boxHeight * TEXT_BOX_HEIGHT_SAFETY;
-  const boxWidthBudget = (boxWidth * TEXT_BOX_WIDTH_SAFETY) / advanceUnits;
+    perLineGlyphHeight * MEASURED_GLYPH_HEIGHT_TO_FONT_SIZE;
+  const boxHeightBudget = availableLineBoxHeight / TEXT_LINE_HEIGHT_FACTOR;
+  const boxWidthBudget =
+    (boxWidth * TEXT_BOX_WIDTH_SAFETY) / widestLineAdvanceUnits;
   const fontSizePx = clamp(
     Math.round(
       Math.min(measuredHeightBudget, boxHeightBudget, boxWidthBudget) * 100,
@@ -90,7 +101,7 @@ export function inferEditableTextStyle(
     0,
     1,
   );
-  const normalizedStrokeWidth = strokeWidth / glyphHeight;
+  const normalizedStrokeWidth = strokeWidth / perLineGlyphHeight;
   const boldGeometryScore = normalizedStrokeWidth * (1 + coverage);
 
   return {

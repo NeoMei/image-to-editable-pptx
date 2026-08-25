@@ -57,3 +57,58 @@ test("clamps degenerate text inputs to a positive finite font size", () => {
   assert.ok(Number.isFinite(style.fontSizePx));
   assert.ok(style.fontSizePx > 0);
 });
+
+test("budgets two CJK lines by the widest line and per-line height", () => {
+  const style = inferEditableTextStyle(
+    "工具\n生态",
+    { x: 0, y: 0, width: 40, height: 80 },
+    metrics({ glyphBounds: { x: 0, y: 0, width: 38, height: 60 } }),
+  );
+
+  assert.equal(style.fontSizePx, 19.2);
+});
+
+test("gives A newline B two line boxes instead of one AB line box", () => {
+  const geometry = metrics({
+    glyphBounds: { x: 0, y: 0, width: 60, height: 40 },
+  });
+  const oneLine = inferEditableTextStyle("AB", bbox, geometry);
+  const twoLines = inferEditableTextStyle("A\nB", bbox, geometry);
+
+  assert.equal(oneLine.fontSizePx, 37.6);
+  assert.equal(twoLines.fontSizePx, 18.8);
+});
+
+test("normalizes CRLF and budgets Latin width by World rather than both lines", () => {
+  const style = inferEditableTextStyle(
+    "Hello\r\nWorld",
+    { x: 0, y: 0, width: 56, height: 200 },
+    metrics({ glyphBounds: { x: 0, y: 0, width: 54, height: 100 } }),
+  );
+
+  assert.equal(style.fontSizePx, 18.8);
+});
+
+test("classifies multiline bold from per-line stroke geometry", () => {
+  const singleLine = inferEditableTextStyle(
+    "AB",
+    bbox,
+    metrics({
+      glyphBounds: { x: 0, y: 0, width: 60, height: 20 },
+      inBoxForegroundCoverage: 0.3,
+      estimatedStrokeWidthPx: 3,
+    }),
+  );
+  const twoLines = inferEditableTextStyle(
+    "A\nB",
+    { ...bbox, height: 80 },
+    metrics({
+      glyphBounds: { x: 0, y: 0, width: 30, height: 40 },
+      inBoxForegroundCoverage: 0.3,
+      estimatedStrokeWidthPx: 3,
+    }),
+  );
+
+  assert.equal(singleLine.bold, true);
+  assert.equal(twoLines.bold, singleLine.bold);
+});
