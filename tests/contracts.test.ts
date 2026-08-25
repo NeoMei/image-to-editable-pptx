@@ -33,6 +33,16 @@ test("parses a version 1 slide manifest", () => {
   assert.equal(parsed.manifestVersion, 1);
 });
 
+test("preserves optional bold text style in manifest v1", () => {
+  const styledManifest = structuredClone(validManifest);
+  Object.assign(styledManifest.elements[0]!, { bold: true });
+
+  const parsed = SlideManifestSchema.parse(styledManifest);
+
+  assert.equal(parsed.elements[0]?.kind, "text");
+  assert.equal(parsed.elements[0]?.bold, true);
+});
+
 test("rejects a bbox that extends beyond the slide canvas", () => {
   const invalidManifest = structuredClone(validManifest);
   invalidManifest.elements[0]!.bbox = {

@@ -603,7 +603,10 @@ async function buildFromAnalysis(
     ledgerVersion: 2,
     mode: context.analysis.ledger.mode,
     recorded: context.analysis.ledger.recorded,
-    models: context.analysis.ledger.models,
+    models: {
+      ocr: context.analysis.ledger.models.ocr,
+      vision: context.analysis.ledger.models.vision,
+    },
     durationsMs: {
       ...context.analysis.ledger.durationsMs,
       plan: planDuration,

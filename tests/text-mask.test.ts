@@ -35,7 +35,7 @@ async function decodeMask(mask: Buffer) {
   return sharp(mask).raw().toBuffer({ resolveWithObject: true });
 }
 
-test("masks contrasting glyph pixels without masking the full OCR box", async () => {
+test("infers light glyph color on a dark local surface", async () => {
   const width = 16;
   const height = 10;
   const raw = Buffer.alloc(width * height * 3, 30);
@@ -64,6 +64,32 @@ test("masks contrasting glyph pixels without masking the full OCR box", async ()
   assert.equal(value(4, 2), 0);
   assert.equal(value(11, 7), 0);
   assert.deepEqual(result.surfaceRgb, [30, 30, 30]);
+  assert.deepEqual(result.glyphRgb, [240, 240, 240]);
+});
+
+test("infers dark glyph color on a light local surface", async () => {
+  const width = 16;
+  const height = 10;
+  const raw = Buffer.alloc(width * height * 3, 240);
+  for (const [x, y] of [
+    [6, 4],
+    [7, 4],
+    [7, 5],
+  ]) {
+    const offset = (y! * width + x!) * 3;
+    raw[offset] = 20;
+    raw[offset + 1] = 30;
+    raw[offset + 2] = 40;
+  }
+
+  const result = await buildTightTextMask(
+    await encodeRgb(raw, width, height),
+    textElement("dark-glyph", { x: 4, y: 2, width: 8, height: 6 }),
+    { dilationPx: 0 },
+  );
+
+  assert.deepEqual(result.surfaceRgb, [240, 240, 240]);
+  assert.deepEqual(result.glyphRgb, [20, 30, 40]);
 });
 
 test("rejects an OCR box whose perimeter crosses incompatible surfaces", async () => {
@@ -136,7 +162,7 @@ test("rejects dilation that would cover at least 85 percent of the OCR box", asy
   );
 });
 
-test("does not dilate a glyph pixel outside the clamped OCR box", async () => {
+test("bounds dilation to one requested pixel beyond the OCR box", async () => {
   const width = 10;
   const height = 10;
   const raw = Buffer.alloc(width * height * 3, 30);
@@ -150,8 +176,30 @@ test("does not dilate a glyph pixel outside the clamped OCR box", async () => {
   const value = (x: number, y: number) =>
     data[(y * info.width + x) * info.channels];
 
-  assert.equal(value(2, 4), 0);
+  assert.equal(value(1, 4), 0);
+  assert.equal(value(2, 4), 255);
   assert.equal(value(3, 4), 255);
+});
+
+test("captures a contrasting glyph fringe immediately outside the OCR box", async () => {
+  const width = 14;
+  const height = 10;
+  const raw = Buffer.alloc(width * height * 3, 30);
+  for (const x of [8, 9]) {
+    raw.fill(240, (4 * width + x) * 3, (4 * width + x) * 3 + 3);
+  }
+  const result = await buildTightTextMask(
+    await encodeRgb(raw, width, height),
+    textElement("edge-fringe", { x: 4, y: 2, width: 5, height: 6 }),
+    { dilationPx: 0 },
+  );
+  const { data, info } = await decodeMask(result.mask);
+  const value = (x: number, y: number) =>
+    data[(y * info.width + x) * info.channels];
+
+  assert.equal(value(8, 4), 255);
+  assert.equal(value(9, 4), 255);
+  assert.equal(value(10, 4), 0);
 });
 
 test("rejects a competing structural region covering most of the OCR box", async () => {

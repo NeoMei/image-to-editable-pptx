@@ -262,7 +262,6 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
     assert.deepEqual(ledger.models, {
       ocr: "qwen3.5-ocr",
       vision: "qwen3-vl-plus",
-      edit: "wanx2.1-imageedit",
     });
     assert.ok(
       Object.values(ledger.durationsMs).every(
@@ -382,7 +381,6 @@ test("preserves live-like analysis provenance through a split build", async () =
     assert.deepEqual(ledger.models, {
       ocr: "live-ocr-model",
       vision: "live-vision-model",
-      edit: "live-edit-model",
     });
     assert.equal(ledger.durationsMs.ocr, 11);
     assert.equal(ledger.durationsMs.vision, 22);

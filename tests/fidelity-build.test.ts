@@ -93,6 +93,7 @@ function passingDependencies(
       mask,
       maskedPixels: 4,
       surfaceRgb: [247, 243, 233],
+      glyphRgb: [250, 251, 252],
     }),
     repair: async () => ({
       image: source,
@@ -154,6 +155,45 @@ test("accepts every required text and only a passing transparent icon", async ()
   assert.equal(result.manifest.elements.some((item) => item.kind === "shape"), false);
   assert.equal(result.decisions.length, 4);
   assert.equal(result.assets.size, 1);
+  const text = result.manifest.elements.filter((item) => item.kind === "text");
+  assert.deepEqual(
+    text.map((item) => ({
+      text: item.text,
+      color: item.color,
+      bold: item.bold,
+      fontSizePx: item.fontSizePx,
+    })),
+    [
+      { text: "ocr-1", color: "FAFBFC", bold: true, fontSizePx: 18.72 },
+      { text: "ocr-2", color: "FAFBFC", bold: true, fontSizePx: 18.72 },
+    ],
+  );
+});
+
+test("passes adaptive text dilation derived from OCR box height", async () => {
+  const { source, mask, transparentAsset } = await fixtures();
+  const dependencies = passingDependencies(source, mask, transparentAsset);
+  const heights = [20, 48, 100];
+  const plan = makePlan(0);
+  plan.text = heights.map((height, index) => {
+    const element = textElement(`adaptive-${index + 1}`, 20 + index * 120);
+    element.bbox.height = height;
+    return { kind: "text", id: element.id, required: true, element };
+  });
+  const dilationInputs: Array<number | undefined> = [];
+  dependencies.buildTextMask = async (_source, _element, options) => {
+    dilationInputs.push(options?.dilationPx);
+    return {
+      mask,
+      maskedPixels: 4,
+      surfaceRgb: [247, 243, 233],
+      glyphRgb: [35, 57, 77],
+    };
+  };
+
+  await buildFidelityLayers(source, plan, dependencies);
+
+  assert.deepEqual(dilationInputs, [1, 2, 3]);
 });
 
 test("fails the page when a required text repair is rejected", async () => {

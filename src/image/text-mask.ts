@@ -11,6 +11,7 @@ export type TextMaskResult = {
   mask: Buffer;
   maskedPixels: number;
   surfaceRgb: readonly [number, number, number];
+  glyphRgb: readonly [number, number, number];
 };
 
 const DEFAULT_COLOR_DISTANCE = 32;
@@ -18,6 +19,10 @@ const DEFAULT_DILATION_PX = 1;
 const MAX_SURFACE_CHANNEL_MAD = 18;
 const MAX_MASKED_BOX_RATIO = 0.85;
 const MIN_SURFACE_SAMPLES = 8;
+// OCR boxes occasionally stop on the last solid glyph column. Capture only
+// contrasting pixels connected to an in-box glyph in this bounded halo;
+// dilation adds no more than its requested radius beyond that fringe.
+const MAX_OCR_EDGE_FRINGE_PX = 8;
 
 type Rgb = readonly [number, number, number];
 
@@ -80,6 +85,20 @@ function clampedBounds(
     throw new RangeError(`Text bbox does not intersect the source image for ${element.id}`);
   }
   return { left, top, right, bottom };
+}
+
+function expandBounds(
+  bounds: Bounds,
+  width: number,
+  height: number,
+  padding: number,
+): Bounds {
+  return {
+    left: Math.max(0, bounds.left - padding),
+    top: Math.max(0, bounds.top - padding),
+    right: Math.min(width, bounds.right + padding),
+    bottom: Math.min(height, bounds.bottom + padding),
+  };
 }
 
 function rgbAt(data: Buffer, width: number, x: number, y: number): Rgb {
@@ -172,6 +191,49 @@ function countMaskedPixels(mask: Uint8Array): number {
   return count;
 }
 
+function connectedContrastingForeground(
+  candidates: Uint8Array,
+  width: number,
+  bounds: Bounds,
+  foregroundBounds: Bounds,
+): Uint8Array {
+  const connected = new Uint8Array(candidates.length);
+  const queue: number[] = [];
+  for (let y = bounds.top; y < bounds.bottom; y += 1) {
+    for (let x = bounds.left; x < bounds.right; x += 1) {
+      const index = y * width + x;
+      if (candidates[index] === 0) continue;
+      connected[index] = 255;
+      queue.push(index);
+    }
+  }
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const index = queue[cursor]!;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if (dx === 0 && dy === 0) continue;
+        const nextX = x + dx;
+        const nextY = y + dy;
+        if (
+          nextX < foregroundBounds.left ||
+          nextX >= foregroundBounds.right ||
+          nextY < foregroundBounds.top ||
+          nextY >= foregroundBounds.bottom
+        ) {
+          continue;
+        }
+        const nextIndex = nextY * width + nextX;
+        if (candidates[nextIndex] === 0 || connected[nextIndex] !== 0) continue;
+        connected[nextIndex] = 255;
+        queue.push(nextIndex);
+      }
+    }
+  }
+  return connected;
+}
+
 export async function buildTightTextMask(
   source: Buffer,
   element: TextSlideElement,
@@ -190,6 +252,15 @@ export async function buildTightTextMask(
     .raw()
     .toBuffer({ resolveWithObject: true });
   const bounds = clampedBounds(element, info.width, info.height);
+  const foregroundBounds = expandBounds(
+    bounds,
+    info.width,
+    info.height,
+    Math.min(
+      MAX_OCR_EDGE_FRINGE_PX,
+      Math.max(2, Math.round(element.bbox.height / 6)),
+    ),
+  );
   const surfaceSamples = localSurfaceRing(
     data,
     info.width,
@@ -205,15 +276,18 @@ export async function buildTightTextMask(
     throw new Error("Text mask surface is not locally consistent");
   }
 
-  const foreground = new Uint8Array(info.width * info.height);
+  const candidates = new Uint8Array(info.width * info.height);
   let foregroundPixels = 0;
-  for (let y = bounds.top; y < bounds.bottom; y += 1) {
-    for (let x = bounds.left; x < bounds.right; x += 1) {
-      if (maxChannelDistance(rgbAt(data, info.width, x, y), surfaceRgb) < colorDistance) {
+  for (let y = foregroundBounds.top; y < foregroundBounds.bottom; y += 1) {
+    for (let x = foregroundBounds.left; x < foregroundBounds.right; x += 1) {
+      const color = rgbAt(data, info.width, x, y);
+      if (maxChannelDistance(color, surfaceRgb) < colorDistance) {
         continue;
       }
-      foreground[y * info.width + x] = 255;
-      foregroundPixels += 1;
+      candidates[y * info.width + x] = 255;
+      if (x >= bounds.left && x < bounds.right && y >= bounds.top && y < bounds.bottom) {
+        foregroundPixels += 1;
+      }
     }
   }
   if (foregroundPixels === 0) {
@@ -223,6 +297,21 @@ export async function buildTightTextMask(
   if (foregroundPixels === boxPixels) {
     throw new Error(`Text mask would remove the full OCR box for ${element.id}`);
   }
+  const foreground = connectedContrastingForeground(
+    candidates,
+    info.width,
+    bounds,
+    foregroundBounds,
+  );
+  const glyphColors: Rgb[] = [];
+  for (let y = foregroundBounds.top; y < foregroundBounds.bottom; y += 1) {
+    for (let x = foregroundBounds.left; x < foregroundBounds.right; x += 1) {
+      if (foreground[y * info.width + x] !== 0) {
+        glyphColors.push(rgbAt(data, info.width, x, y));
+      }
+    }
+  }
+  const glyphRgb = channelMedians(glyphColors);
 
   const effectiveDilationPx = Math.min(
     requestedDilationPx,
@@ -233,8 +322,17 @@ export async function buildTightTextMask(
     info.width,
     info.height,
     Math.floor(effectiveDilationPx),
-    bounds,
+    foregroundBounds,
   );
+  for (let y = foregroundBounds.top; y < foregroundBounds.bottom; y += 1) {
+    for (let x = foregroundBounds.left; x < foregroundBounds.right; x += 1) {
+      const outsideBox =
+        x < bounds.left || x >= bounds.right || y < bounds.top || y >= bounds.bottom;
+      if (outsideBox && foreground[y * info.width + x] !== 0) {
+        maskData[y * info.width + x] = 255;
+      }
+    }
+  }
   const maskedBoxPixels = countMaskedPixelsInBounds(maskData, info.width, bounds);
   if (maskedBoxPixels / boxPixels >= MAX_MASKED_BOX_RATIO) {
     throw new Error(`Text mask would remove too much of the OCR box for ${element.id}`);
@@ -247,5 +345,5 @@ export async function buildTightTextMask(
     .png()
     .toBuffer();
 
-  return { mask, maskedPixels, surfaceRgb };
+  return { mask, maskedPixels, surfaceRgb, glyphRgb };
 }

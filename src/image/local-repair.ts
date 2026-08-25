@@ -10,6 +10,7 @@ const MIN_RING_SAMPLES = 16;
 const MAX_RING_CHANNEL_MAD = 18;
 const MAX_RING_SEED_DISTANCE = 64;
 const MAX_FILLED_PIXEL_DISTANCE_P95 = 28;
+const HARMONIC_SMOOTHING_PASSES = 64;
 
 const DIRECTIONS = [
   [0, -1],
@@ -180,7 +181,6 @@ export async function repairLocalRegion(
   }
 
   const output = Buffer.from(sourceDecoded.data);
-  const filledDistances: number[] = [];
   for (const index of maskedIndexes) {
     const seed = nearestSeed[index]!;
     if (seed < 0) {
@@ -188,13 +188,26 @@ export async function repairLocalRegion(
     }
     const outputOffset = index * 4;
     const seedOffset = seed * 4;
-    let distance = 0;
     for (let channel = 0; channel < 3; channel += 1) {
       const value = sourceDecoded.data[seedOffset + channel]!;
       output[outputOffset + channel] = value;
-      distance = Math.max(distance, Math.abs(value - ringMedian[channel]!));
     }
-    filledDistances.push(distance);
+  }
+
+  for (let pass = 0; pass < HARMONIC_SMOOTHING_PASSES; pass += 1) {
+    for (const index of maskedIndexes) {
+      const adjacent = neighbors(index, width, height).filter(
+        (neighbor) => masked[neighbor] !== 0 || nearestSeed[neighbor] !== -1,
+      );
+      const outputOffset = index * 4;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const sum = adjacent.reduce(
+          (total, neighbor) => total + output[neighbor * 4 + channel]!,
+          0,
+        );
+        output[outputOffset + channel] = Math.round(sum / adjacent.length);
+      }
+    }
   }
 
   for (let index = 0; index < pixelCount; index += 1) {
@@ -210,6 +223,13 @@ export async function repairLocalRegion(
     }
   }
 
+  const filledDistances = maskedIndexes.map((index) =>
+    Math.max(
+      ...[0, 1, 2].map((channel) =>
+        Math.abs(output[index * 4 + channel]! - ringMedian[channel]!),
+      ),
+    ),
+  );
   metrics.filledPixelDistanceP95 = percentile95(filledDistances);
   if (metrics.filledPixelDistanceP95 > MAX_FILLED_PIXEL_DISTANCE_P95) {
     return rejected(source, "filled_pixels_too_different", metrics);

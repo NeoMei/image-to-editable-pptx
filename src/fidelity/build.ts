@@ -14,6 +14,11 @@ import { repairLocalRegion } from "../image/local-repair.js";
 import { validateRecomposition } from "../image/recompose.js";
 import { buildTightTextMask } from "../image/text-mask.js";
 
+// Full-size LibreOffice/WPS rendering showed that 0.82 can wrap a four-CJK
+// label whose OCR width is exact. This single ratio keeps those labels on one
+// line while retaining the source glyph height.
+const FIDELITY_TEXT_FONT_SIZE_RATIO = 0.78;
+
 export type FidelityBuildDependencies = {
   buildTextMask: typeof buildTightTextMask;
   repair: typeof repairLocalRegion;
@@ -103,6 +108,21 @@ const defaultDependencies: FidelityBuildDependencies = {
   validateRecomposition,
 };
 
+function adaptiveTextDilation(height: number): number {
+  return Math.min(3, Math.max(1, Math.round(height / 24)));
+}
+
+function rgbToHex(rgb: readonly [number, number, number]): string {
+  return rgb
+    .map((channel) =>
+      Math.max(0, Math.min(255, Math.round(channel)))
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")
+    .toUpperCase();
+}
+
 export async function buildFidelityLayers(
   source: Buffer,
   plan: FidelityPlan,
@@ -116,7 +136,9 @@ export async function buildFidelityLayers(
   const acceptedTextMasks: Buffer[] = [];
 
   for (const candidate of plan.text) {
-    const mask = await dependencies.buildTextMask(source, candidate.element);
+    const mask = await dependencies.buildTextMask(source, candidate.element, {
+      dilationPx: adaptiveTextDilation(candidate.element.bbox.height),
+    });
     const repaired = await dependencies.repair(background, mask.mask);
     if (!repaired.accepted || repaired.metrics.outsideMaskChangedPixels !== 0) {
       throw new Error(`Required text ${candidate.id} could not be repaired safely`);
@@ -124,7 +146,15 @@ export async function buildFidelityLayers(
     background = repaired.image;
     acceptedMasks.push(mask.mask);
     acceptedTextMasks.push(mask.mask);
-    acceptedElements.push(candidate.element);
+    acceptedElements.push({
+      ...candidate.element,
+      color: rgbToHex(mask.glyphRgb),
+      fontSizePx:
+        Math.round(
+          candidate.element.bbox.height * FIDELITY_TEXT_FONT_SIZE_RATIO * 100,
+        ) / 100,
+      bold: true,
+    });
     decisions.push({
       candidateId: candidate.id,
       kind: "text",
