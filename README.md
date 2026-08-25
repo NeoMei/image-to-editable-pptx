@@ -1,6 +1,6 @@
 # 图片式 PPT 增强可编辑原型
 
-这个 Node.js 原型把一张 1280×720 的幻灯片 PNG 拆成可编辑文字、PowerPoint 原生形状和可移动 PNG 资产，再用万相补全被移除对象后的背景，最终导出单页 16:9 PPTX。当前验收目标是《深入理解 AI-Agent》第 7 页。
+这个 Node.js 原型把一张 1280×720 的幻灯片 PNG 重建为单页 16:9 PPTX：OCR 文字是必须成功的可编辑层，只有通过透明提取、文字遮罩重叠、本地修复和重组校验的图标才成为可移动 PNG 资产；面板、色条等结构家具保留在背景中。背景修复完全在本地完成，默认路径不调用万相或其他图像编辑模型。当前验收目标是《深入理解 AI-Agent》第 7 页，其 10 个 OCR 文字候选必须全部成为可编辑文字。
 
 ## 准备
 
@@ -27,7 +27,7 @@ export DASHSCOPE_WORKSPACE_ID='<your-workspace-id>'
 # 只做 OCR 和视觉分析；输出目录必须不存在或为空
 npm run cli -- analyze --image <png> --out <analysis-dir> [--record]
 
-# 使用已有分析结果做资产提取、背景补全和 PPTX 导出
+# 使用已有分析结果做本地保真分层、背景修复和 PPTX 导出
 npm run cli -- build --image <png> --analysis <analysis-dir> --out <output-dir>
 
 # 一次完成 analyze 和 build
@@ -55,12 +55,12 @@ bash scripts/accept-slide-07.sh
 - `analysis-ledger.json`：经验证的分析 provenance、耗时、模型与哈希；
 - `recordings/*.json`：仅在 `--record` 时产生的脱敏、统一 replay 快照；
 - `.image-ppt-layers-output.json`：版本化的 pipeline ownership marker，用于安全识别可由本工具替换的输出目录；
-- `manifest.json`：最终文本、形状、资产与层级规划；
-- `removal-mask.png`：黑白合并移除遮罩；
-- `clean-background.png`：万相补全后的背景；
-- `assets/*.png`：可单独移动和缩放的对象；
+- `manifest.json`：manifest v1；默认保真路径只包含已接受的 OCR 文字和透明图标，不包含结构形状；
+- `removal-mask.png`：已接受文字和图标遮罩的逐像素并集，不包含被拒绝图标；
+- `clean-background.png`：对已接受遮罩做确定性本地修复后的背景；
+- `assets/*.png`：通过全部安全门、可单独移动和缩放的透明图标；矩形资产不会发布；
 - `<source-name>-editable.pptx`：可编辑的宽屏 PowerPoint；
-- `run-ledger.json`：模型 ID、每阶段耗时、万相任务 ID、告警、退化原因、输出路径及所有主要产物的 SHA-256。
+- `run-ledger.json`：ledger v2，包含每个文字/图标候选的接受或保留背景决策、修复/重组指标、模型 ID、阶段耗时、告警、输出路径及所有主要产物的 SHA-256；默认路径的 `taskIds` 为空。
 
 ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key、`Authorization`、access token 或 `x-dashscope-*` 头。Live OCR/Vision 响应会在解析前写入 staging；正常解析后该临时原始响应被移除，如果 schema/JSON 解析失败，脱敏的 `raw-responses/<provider>.json` 与 `parse-errors/<provider>.json` 会一起留在失败运行目录中。
 
@@ -72,27 +72,28 @@ ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key�
 
 ## 发送到阿里云的数据
 
-每次完整 `run` 会进行三类模型调用：
+每次完整 `run` 默认只进行两类模型调用：
 
 1. 向 `qwen3.5-ocr` 发送整页 PNG 的 Base64 Data URL，使用 `advanced_recognition` 获取 `ocr_result.words_info[]` 文字与坐标；
 2. 向 `qwen3-vl-plus` 发送同一张整页 PNG 和固定结构化提示词，用于候选元素分析；
-3. 向 `wanx2.1-imageedit` 发送整页 PNG、本地生成的 removal mask 和固定中文补全提示词。完成后只从 HTTPS、无 userinfo/非默认端口/fragment，且为 `dashscope-result-*.oss-cn-*.aliyuncs.com` 的阿里云 OSS 结果 URL 下载，并禁止跟随重定向。
+
+随后所有文字遮罩、透明图标提取、局部背景修复、重组校验和 PPTX 导出都在本地执行。默认路径不会向万相/图像编辑服务提交源图或遮罩，也不会产生 Wanx task ID。仓库仍保留隔离的可选 legacy Wanx provider 及其安全测试，但 CLI 的 `run`/`build` 和第 7 页验收脚本均不调用它。
 
 文件不会上传到项目自建服务，也不会在用户机器上运行模型。请在使用前确认源图内容符合组织的数据合规要求。
 
 ## 费用估算
 
-每页预期产生 1 次 OCR、1 次视觉理解和 1 次图像编辑计费。OCR/Vision 费用取决于图像折算和输出 token，图像编辑按当时的模型规格计费。为避免把可变价格写成承诺，单页验收建议预留 **¥0.20–¥0.50** 预算；这是运行预算，不是报价，免费额、模型版本和实际 token 都会改变账单。执行前请以阿里云的 [模型列表](https://help.aliyun.com/zh/model-studio/models) 与 [官方计费页](https://help.aliyun.com/zh/model-studio/model-pricing) 为准。
+每页默认产生 1 次 `qwen3.5-ocr` 和 1 次 `qwen3-vl-plus` 调用，不产生图像编辑计费。截至 2026-08-26，阿里云官方页面显示这两个模型均按输入/输出 token 计费，且视觉模型会随单次请求的 token 区间采用不同档位；免费额度、活动、模型版本和价格都可能变化。因此本项目不承诺或虚构固定单页成本。执行前请根据实际图片折算 token、输出 token、地域和账户权益，在 [`qwen3.5-ocr` 模型页](https://help.aliyun.com/zh/model-studio/qwen3-5-ocr) 与 [阿里云百炼官方计费页](https://help.aliyun.com/zh/model-studio/model-pricing) 重新核算。
 
 ## 已知局限
 
 - 只接受精确 1280×720 PNG，只导出单页，没有整套 PPT 批处理、排队或人工校正界面；
 - OCR 文本是权威内容，但字体统一回退为 Microsoft YaHei，不能还原未提供的原始字体文件；
 - 只有垂直间隔不超过较小行高的 75%、左边对齐误差不超过较小估算字号的 50%（最少 4 px）且估算字号比不超过 1.2 的相邻 OCR 行才合并为保留换行的段落；
-- 只有高置信规则面板会转为原生形状；复杂插画仍是独立位图，不会重建内部矢量路径；
-- 本地透明化依赖边缘颜色一致性；质量不足时保守回退为矩形裁剪并记录 `fallbackReason`；
+- 默认保真路径不重建原生结构形状；面板、色条和复杂插画保留在背景中；
+- 图标是可选层。本地透明化依赖边缘颜色一致性，透明比例、边框、文字重叠、修复或重组任一安全门失败时，该图标保留在背景中；矩形回退资产不会进入 manifest 或 PPTX；
 - 本版未集成阿里云 VIAPI 通用分割，不需要第二套 AccessKey/Secret；
-- 万相失败或超时时整页导出失败，不会用仍含文字和对象的原图冒充干净背景；
+- 文字是必须层。第 7 页固定验收要求 10 个 OCR 文字全部通过；任一文字无法安全本地修复时整页失败并保留 failed-run 证据，不会发布部分成功页面；
 - 不同 PowerPoint/WPS 版本的字体替换和文本度量可能造成小范围布局偏差，真实交付前仍需在目标客户端打开验收。
 
 ## 离线验证
@@ -104,4 +105,4 @@ npm run build
 npm run test:compiled
 ```
 
-`npm test` 只运行 TypeScript 源测试；`npm run test:compiled` 在 build 后单独验证编译产物。端到端 pipeline 测试使用脱敏 OCR/Vision fixture 与注入的本地 Wanx 结果，不会访问网络。
+`npm test` 只运行 TypeScript 源测试；`npm run test:compiled` 在 build 后单独验证编译产物。端到端 pipeline 测试使用脱敏 OCR/Vision fixture 与注入的确定性 fidelity builder，真实 fidelity 集成测试使用程序化生成的本地图片；这些测试都不会访问网络或调用万相。

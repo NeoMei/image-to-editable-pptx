@@ -227,3 +227,67 @@ test("extracts icons from the source and rejects destructive OCR overlap", async
     "ocr_text_overlap_above_1_percent",
   );
 });
+
+test("builds ten required synthetic glyph groups with the real defaults", async () => {
+  const width = 1280;
+  const height = 720;
+  const rgb = Buffer.alloc(width * height * 3);
+  for (let index = 0; index < width * height; index += 1) {
+    rgb.set([247, 243, 233], index * 3);
+  }
+  const elements = Array.from({ length: 10 }, (_, index) =>
+    textElement(
+      `synthetic-${index + 1}`,
+      60 + Math.floor(index / 5) * 120,
+    ),
+  ).map((element, index) => ({
+    ...element,
+    bbox: {
+      x: 40 + (index % 5) * 230,
+      y: element.bbox.y,
+      width: 100,
+      height: 24,
+    },
+    zIndex: 100 + index,
+  }));
+  for (const element of elements) {
+    for (let glyph = 0; glyph < 4; glyph += 1) {
+      for (let y = element.bbox.y + 5; y < element.bbox.y + 19; y += 1) {
+        for (let x = element.bbox.x + 8 + glyph * 18; x < element.bbox.x + 14 + glyph * 18; x += 1) {
+          rgb.set([35, 57, 77], (y * width + x) * 3);
+        }
+      }
+    }
+  }
+  const source = await sharp(rgb, {
+    raw: { width, height, channels: 3 },
+  }).png().toBuffer();
+  const plan: FidelityPlan = {
+    canvas: { width, height },
+    text: elements.map((element) => ({
+      kind: "text",
+      id: element.id,
+      required: true,
+      element,
+    })),
+    icons: [],
+    warnings: [],
+  };
+
+  const result = await buildFidelityLayers(source, plan);
+  assert.equal(result.manifest.elements.filter((item) => item.kind === "text").length, 10);
+  assert.equal(result.manifest.elements.some((item) => item.kind === "shape"), false);
+  assert.equal(result.decisions.length, 10);
+  const [before, after, acceptedMask] = await Promise.all([
+    sharp(source).ensureAlpha().raw().toBuffer(),
+    sharp(result.background).ensureAlpha().raw().toBuffer(),
+    sharp(result.combinedMask).greyscale().raw().toBuffer(),
+  ]);
+  for (let index = 0; index < width * height; index += 1) {
+    if (acceptedMask[index]! >= 128) continue;
+    assert.deepEqual(
+      after.subarray(index * 4, index * 4 + 4),
+      before.subarray(index * 4, index * 4 + 4),
+    );
+  }
+});

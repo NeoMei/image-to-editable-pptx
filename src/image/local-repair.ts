@@ -8,6 +8,7 @@ import type {
 
 const MIN_RING_SAMPLES = 16;
 const MAX_RING_CHANNEL_MAD = 18;
+const MAX_RING_SEED_DISTANCE = 64;
 const MAX_FILLED_PIXEL_DISTANCE_P95 = 28;
 
 const DIRECTIONS = [
@@ -28,6 +29,19 @@ function percentile95(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.ceil(sorted.length * 0.95) - 1]!;
+}
+
+function rgbDistance(
+  data: Buffer,
+  offset: number,
+  reference: readonly number[],
+): number {
+  return Math.sqrt(
+    [0, 1, 2].reduce((sum, channel) => {
+      const difference = data[offset + channel]! - reference[channel]!;
+      return sum + difference * difference;
+    }, 0),
+  );
 }
 
 function rejected(
@@ -132,12 +146,24 @@ export async function repairLocalRegion(
     return rejected(source, "surface_variance_too_high", metrics);
   }
 
+  const safeRing = ring.filter((index) => {
+    const offset = index * 4;
+    return (
+      rgbDistance(sourceDecoded.data, offset, ringMedian) <=
+      MAX_RING_SEED_DISTANCE
+    );
+  });
+  metrics.ringSamples = safeRing.length;
+  if (safeRing.length < MIN_RING_SAMPLES) {
+    return rejected(source, "surface_samples_insufficient", metrics);
+  }
+
   const nearestSeed = new Int32Array(pixelCount);
   nearestSeed.fill(-1);
   const queue = new Int32Array(pixelCount);
   let queueHead = 0;
   let queueTail = 0;
-  for (const index of ring) {
+  for (const index of safeRing) {
     nearestSeed[index] = index;
     queue[queueTail] = index;
     queueTail += 1;

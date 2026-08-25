@@ -101,3 +101,36 @@ test("rejects a mask whose sampling ring crosses incompatible surfaces", async (
   assert.equal(result.reason, "surface_variance_too_high");
   assert.deepEqual(result.image, source);
 });
+
+test("ignores extreme ring outliers when seeding a uniform-surface repair", async () => {
+  const width = 20;
+  const height = 12;
+  const surface = [240, 235, 225] as const;
+  const rgb = Buffer.alloc(width * height * 3);
+  for (let index = 0; index < width * height; index += 1) {
+    rgb.set(surface, index * 3);
+  }
+  const mask = Buffer.alloc(width * height);
+  for (let y = 3; y <= 8; y += 1) {
+    for (let x = 4; x <= 15; x += 1) {
+      mask[y * width + x] = 255;
+      rgb.set([30, 30, 30], (y * width + x) * 3);
+    }
+  }
+  for (const x of [8, 9, 10]) {
+    rgb.set([10, 10, 10], (2 * width + x) * 3);
+  }
+  const source = await encodeRgb(rgb, width, height);
+  const encodedMask = await encodeMask(mask, width, height);
+
+  const [first, second] = await Promise.all([
+    repairLocalRegion(source, encodedMask),
+    repairLocalRegion(source, encodedMask),
+  ]);
+
+  assert.equal(first.accepted, true);
+  assert.equal(first.metrics.outsideMaskChangedPixels, 0);
+  assert.ok(first.metrics.ringSamples >= 16);
+  assert.deepEqual(first.image, second.image);
+  assert.deepEqual(first.metrics, second.metrics);
+});
