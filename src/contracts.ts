@@ -174,3 +174,25 @@ export type LocalRepairResult = {
   metrics: LocalRepairMetrics;
   reason?: LocalRepairReason;
 };
+
+export type RecompositionOptions = {
+  source: Buffer;
+  background: Buffer;
+  asset: Buffer;
+  bbox: BBox;
+  ignoredMask?: Buffer;
+};
+
+export type RecompositionMetrics = {
+  comparedPixels: number;
+  meanAbsoluteError: number;
+  p95ChannelDelta: number;
+  changedPixelRatio: number;
+};
+
+export type RecompositionResult = {
+  accepted: boolean;
+  preview: Buffer;
+  metrics: RecompositionMetrics;
+  reason?: "recomposition_mismatch";
+};
