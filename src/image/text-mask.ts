@@ -12,6 +12,9 @@ export type TextMaskResult = {
   maskedPixels: number;
   surfaceRgb: readonly [number, number, number];
   glyphRgb: readonly [number, number, number];
+  glyphBounds: { x: number; y: number; width: number; height: number };
+  inBoxForegroundCoverage: number;
+  estimatedStrokeWidthPx: number;
 };
 
 const DEFAULT_COLOR_DISTANCE = 32;
@@ -23,6 +26,9 @@ const MIN_SURFACE_SAMPLES = 8;
 // contrasting pixels connected to an in-box glyph in this bounded halo;
 // dilation adds no more than its requested radius beyond that fringe.
 const MAX_OCR_EDGE_FRINGE_PX = 8;
+const MAX_CONNECTED_FRINGE_TO_GLYPH_RATIO = 0.25;
+const LINE_LIKE_FRINGE_SPAN_RATIO = 0.5;
+const MAX_LINE_LIKE_FRINGE_THICKNESS_PX = 2;
 
 type Rgb = readonly [number, number, number];
 
@@ -234,6 +240,148 @@ function connectedContrastingForeground(
   return connected;
 }
 
+function foregroundGeometry(
+  foreground: Uint8Array,
+  width: number,
+  bounds: Bounds,
+): {
+  glyphBounds: { x: number; y: number; width: number; height: number };
+  estimatedStrokeWidthPx: number;
+} {
+  let left = bounds.right;
+  let top = bounds.bottom;
+  let right = bounds.left - 1;
+  let bottom = bounds.top - 1;
+  const localRuns: number[] = [];
+  for (let y = bounds.top; y < bounds.bottom; y += 1) {
+    for (let x = bounds.left; x < bounds.right; x += 1) {
+      if (foreground[y * width + x] === 0) continue;
+      left = Math.min(left, x);
+      top = Math.min(top, y);
+      right = Math.max(right, x);
+      bottom = Math.max(bottom, y);
+      let horizontalRun = 1;
+      for (let next = x - 1; next >= bounds.left && foreground[y * width + next] !== 0; next -= 1) horizontalRun += 1;
+      for (let next = x + 1; next < bounds.right && foreground[y * width + next] !== 0; next += 1) horizontalRun += 1;
+      let verticalRun = 1;
+      for (let next = y - 1; next >= bounds.top && foreground[next * width + x] !== 0; next -= 1) verticalRun += 1;
+      for (let next = y + 1; next < bounds.bottom && foreground[next * width + x] !== 0; next += 1) verticalRun += 1;
+      localRuns.push(Math.min(horizontalRun, verticalRun));
+    }
+  }
+  if (right < left || bottom < top || localRuns.length === 0) {
+    throw new Error("Text mask foreground geometry is empty");
+  }
+  return {
+    glyphBounds: {
+      x: left,
+      y: top,
+      width: right - left + 1,
+      height: bottom - top + 1,
+    },
+    estimatedStrokeWidthPx: median(localRuns),
+  };
+}
+
+function outsideFringeComponents(
+  foreground: Uint8Array,
+  width: number,
+  bounds: Bounds,
+  foregroundBounds: Bounds,
+): Array<{ pixels: number; width: number; height: number }> {
+  const visited = new Uint8Array(foreground.length);
+  const components: Array<{ pixels: number; width: number; height: number }> = [];
+  const outside = (x: number, y: number) =>
+    x < bounds.left || x >= bounds.right || y < bounds.top || y >= bounds.bottom;
+  for (let y = foregroundBounds.top; y < foregroundBounds.bottom; y += 1) {
+    for (let x = foregroundBounds.left; x < foregroundBounds.right; x += 1) {
+      const start = y * width + x;
+      if (!outside(x, y) || foreground[start] === 0 || visited[start] !== 0) continue;
+      let left = x;
+      let right = x;
+      let top = y;
+      let bottom = y;
+      let pixels = 0;
+      const queue = [start];
+      visited[start] = 1;
+      for (let cursor = 0; cursor < queue.length; cursor += 1) {
+        const index = queue[cursor]!;
+        const currentX = index % width;
+        const currentY = Math.floor(index / width);
+        pixels += 1;
+        left = Math.min(left, currentX);
+        right = Math.max(right, currentX);
+        top = Math.min(top, currentY);
+        bottom = Math.max(bottom, currentY);
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            if (dx === 0 && dy === 0) continue;
+            const nextX = currentX + dx;
+            const nextY = currentY + dy;
+            if (
+              nextX < foregroundBounds.left ||
+              nextX >= foregroundBounds.right ||
+              nextY < foregroundBounds.top ||
+              nextY >= foregroundBounds.bottom ||
+              !outside(nextX, nextY)
+            ) continue;
+            const nextIndex = nextY * width + nextX;
+            if (foreground[nextIndex] === 0 || visited[nextIndex] !== 0) continue;
+            visited[nextIndex] = 1;
+            queue.push(nextIndex);
+          }
+        }
+      }
+      components.push({
+        pixels,
+        width: right - left + 1,
+        height: bottom - top + 1,
+      });
+    }
+  }
+  return components;
+}
+
+function validateFringeSafety(
+  foreground: Uint8Array,
+  width: number,
+  bounds: Bounds,
+  foregroundBounds: Bounds,
+  inBoxForegroundPixels: number,
+  elementId: string,
+): void {
+  const components = outsideFringeComponents(
+    foreground,
+    width,
+    bounds,
+    foregroundBounds,
+  );
+  const boxWidth = bounds.right - bounds.left;
+  const boxHeight = bounds.bottom - bounds.top;
+  if (
+    components.some(
+      (component) =>
+        (component.height <= MAX_LINE_LIKE_FRINGE_THICKNESS_PX &&
+          component.width / boxWidth >= LINE_LIKE_FRINGE_SPAN_RATIO) ||
+        (component.width <= MAX_LINE_LIKE_FRINGE_THICKNESS_PX &&
+          component.height / boxHeight >= LINE_LIKE_FRINGE_SPAN_RATIO),
+    )
+  ) {
+    throw new Error(
+      `Text mask fringe would capture line-like structure for ${elementId}`,
+    );
+  }
+  const outsidePixels = components.reduce(
+    (total, component) => total + component.pixels,
+    0,
+  );
+  if (outsidePixels / inBoxForegroundPixels > MAX_CONNECTED_FRINGE_TO_GLYPH_RATIO) {
+    throw new Error(
+      `Text mask fringe would remove too much outside the OCR box for ${elementId}`,
+    );
+  }
+}
+
 export async function buildTightTextMask(
   source: Buffer,
   element: TextSlideElement,
@@ -303,6 +451,15 @@ export async function buildTightTextMask(
     bounds,
     foregroundBounds,
   );
+  validateFringeSafety(
+    foreground,
+    info.width,
+    bounds,
+    foregroundBounds,
+    foregroundPixels,
+    element.id,
+  );
+  const geometry = foregroundGeometry(candidates, info.width, bounds);
   const glyphColors: Rgb[] = [];
   for (let y = foregroundBounds.top; y < foregroundBounds.bottom; y += 1) {
     for (let x = foregroundBounds.left; x < foregroundBounds.right; x += 1) {
@@ -345,5 +502,13 @@ export async function buildTightTextMask(
     .png()
     .toBuffer();
 
-  return { mask, maskedPixels, surfaceRgb, glyphRgb };
+  return {
+    mask,
+    maskedPixels,
+    surfaceRgb,
+    glyphRgb,
+    glyphBounds: geometry.glyphBounds,
+    inBoxForegroundCoverage: foregroundPixels / boxPixels,
+    estimatedStrokeWidthPx: geometry.estimatedStrokeWidthPx,
+  };
 }

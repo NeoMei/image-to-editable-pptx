@@ -13,11 +13,7 @@ import { extractAsset } from "../image/extract.js";
 import { repairLocalRegion } from "../image/local-repair.js";
 import { validateRecomposition } from "../image/recompose.js";
 import { buildTightTextMask } from "../image/text-mask.js";
-
-// Full-size LibreOffice/WPS rendering showed that 0.82 can wrap a four-CJK
-// label whose OCR width is exact. This single ratio keeps those labels on one
-// line while retaining the source glyph height.
-const FIDELITY_TEXT_FONT_SIZE_RATIO = 0.78;
+import { inferEditableTextStyle } from "./text-style.js";
 
 export type FidelityBuildDependencies = {
   buildTextMask: typeof buildTightTextMask;
@@ -146,14 +142,15 @@ export async function buildFidelityLayers(
     background = repaired.image;
     acceptedMasks.push(mask.mask);
     acceptedTextMasks.push(mask.mask);
+    const style = inferEditableTextStyle(
+      candidate.element.text,
+      candidate.element.bbox,
+      mask,
+    );
     acceptedElements.push({
       ...candidate.element,
       color: rgbToHex(mask.glyphRgb),
-      fontSizePx:
-        Math.round(
-          candidate.element.bbox.height * FIDELITY_TEXT_FONT_SIZE_RATIO * 100,
-        ) / 100,
-      bold: true,
+      ...style,
     });
     decisions.push({
       candidateId: candidate.id,

@@ -94,6 +94,9 @@ function passingDependencies(
       maskedPixels: 4,
       surfaceRgb: [247, 243, 233],
       glyphRgb: [250, 251, 252],
+      glyphBounds: { x: 22, y: 22, width: 80, height: 20 },
+      inBoxForegroundCoverage: 0.12,
+      estimatedStrokeWidthPx: 1,
     }),
     repair: async () => ({
       image: source,
@@ -164,8 +167,8 @@ test("accepts every required text and only a passing transparent icon", async ()
       fontSizePx: item.fontSizePx,
     })),
     [
-      { text: "ocr-1", color: "FAFBFC", bold: true, fontSizePx: 18.72 },
-      { text: "ocr-2", color: "FAFBFC", bold: true, fontSizePx: 18.72 },
+      { text: "ocr-1", color: "FAFBFC", bold: false, fontSizePx: 18.8 },
+      { text: "ocr-2", color: "FAFBFC", bold: false, fontSizePx: 18.8 },
     ],
   );
 });
@@ -188,6 +191,9 @@ test("passes adaptive text dilation derived from OCR box height", async () => {
       maskedPixels: 4,
       surfaceRgb: [247, 243, 233],
       glyphRgb: [35, 57, 77],
+      glyphBounds: { x: 22, y: 22, width: 80, height: 20 },
+      inBoxForegroundCoverage: 0.12,
+      estimatedStrokeWidthPx: 1,
     };
   };
 

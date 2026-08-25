@@ -4,6 +4,7 @@ import test from "node:test";
 import sharp from "sharp";
 
 import type { TextSlideElement } from "../src/contracts.js";
+import { inferEditableTextStyle } from "../src/fidelity/text-style.js";
 import { buildTightTextMask } from "../src/image/text-mask.js";
 
 function textElement(
@@ -90,6 +91,41 @@ test("infers dark glyph color on a light local surface", async () => {
 
   assert.deepEqual(result.surfaceRgb, [240, 240, 240]);
   assert.deepEqual(result.glyphRgb, [20, 30, 40]);
+});
+
+test("measures thin and thick pre-dilation glyph strokes for style inference", async () => {
+  const width = 40;
+  const height = 30;
+  const element = textElement("stroke-geometry", {
+    x: 10,
+    y: 5,
+    width: 15,
+    height: 18,
+  });
+  const makeSource = async (strokeWidth: number) => {
+    const raw = Buffer.alloc(width * height * 3, 240);
+    for (let y = 6; y < 22; y += 1) {
+      for (let x = 14; x < 14 + strokeWidth; x += 1) {
+        raw.fill(30, (y * width + x) * 3, (y * width + x) * 3 + 3);
+      }
+    }
+    return encodeRgb(raw, width, height);
+  };
+
+  const thin = await buildTightTextMask(await makeSource(1), element, {
+    dilationPx: 0,
+  });
+  const thick = await buildTightTextMask(await makeSource(3), element, {
+    dilationPx: 0,
+  });
+
+  assert.deepEqual(thin.glyphBounds, { x: 14, y: 6, width: 1, height: 16 });
+  assert.deepEqual(thick.glyphBounds, { x: 14, y: 6, width: 3, height: 16 });
+  assert.equal(thin.estimatedStrokeWidthPx, 1);
+  assert.equal(thick.estimatedStrokeWidthPx, 3);
+  assert.ok(thin.inBoxForegroundCoverage < thick.inBoxForegroundCoverage);
+  assert.equal(inferEditableTextStyle("I", element.bbox, thin).bold, false);
+  assert.equal(inferEditableTextStyle("I", element.bbox, thick).bold, true);
 });
 
 test("rejects an OCR box whose perimeter crosses incompatible surfaces", async () => {
@@ -181,25 +217,101 @@ test("bounds dilation to one requested pixel beyond the OCR box", async () => {
   assert.equal(value(3, 4), 255);
 });
 
-test("captures a contrasting glyph fringe immediately outside the OCR box", async () => {
-  const width = 14;
-  const height = 10;
+test("accepts a two-pixel connected glyph fringe at the ratio boundary", async () => {
+  const width = 18;
+  const height = 14;
   const raw = Buffer.alloc(width * height * 3, 30);
-  for (const x of [8, 9]) {
-    raw.fill(240, (4 * width + x) * 3, (4 * width + x) * 3 + 3);
+  for (let y = 3; y < 11; y += 1) {
+    raw.fill(240, (y * width + 8) * 3, (y * width + 8) * 3 + 3);
   }
+  for (const y of [5, 6]) raw.fill(240, (y * width + 9) * 3, (y * width + 9) * 3 + 3);
   const result = await buildTightTextMask(
     await encodeRgb(raw, width, height),
-    textElement("edge-fringe", { x: 4, y: 2, width: 5, height: 6 }),
+    textElement("edge-fringe", { x: 4, y: 2, width: 5, height: 10 }),
     { dilationPx: 0 },
   );
   const { data, info } = await decodeMask(result.mask);
   const value = (x: number, y: number) =>
     data[(y * info.width + x) * info.channels];
 
-  assert.equal(value(8, 4), 255);
-  assert.equal(value(9, 4), 255);
-  assert.equal(value(10, 4), 0);
+  assert.equal(value(8, 5), 255);
+  assert.equal(value(9, 5), 255);
+  assert.equal(value(10, 5), 0);
+});
+
+test("rejects connected fringe whose outside ratio exceeds one quarter", async () => {
+  const width = 18;
+  const height = 14;
+  const raw = Buffer.alloc(width * height * 3, 30);
+  for (let y = 3; y < 11; y += 1) {
+    raw.fill(240, (y * width + 8) * 3, (y * width + 8) * 3 + 3);
+  }
+  for (const y of [5, 6, 7]) raw.fill(240, (y * width + 9) * 3, (y * width + 9) * 3 + 3);
+
+  await assert.rejects(
+    buildTightTextMask(
+      await encodeRgb(raw, width, height),
+      textElement("excess-fringe", { x: 4, y: 2, width: 5, height: 10 }),
+      { dilationPx: 0 },
+    ),
+    /Text mask fringe would remove too much outside the OCR box for excess-fringe/,
+  );
+});
+
+test("rejects a touching horizontal decorative rule before dilation", async () => {
+  const width = 40;
+  const height = 30;
+  const raw = Buffer.alloc(width * height * 3, 240);
+  for (let y = 10; y < 15; y += 1) {
+    for (let x = 12; x < 20; x += 1) raw.fill(30, (y * width + x) * 3, (y * width + x) * 3 + 3);
+  }
+  for (let x = 10; x < 18; x += 1) raw.fill(30, (9 * width + x) * 3, (9 * width + x) * 3 + 3);
+
+  await assert.rejects(
+    buildTightTextMask(
+      await encodeRgb(raw, width, height),
+      textElement("horizontal-rule", { x: 10, y: 10, width: 16, height: 10 }),
+      { dilationPx: 0 },
+    ),
+    /Text mask fringe would capture line-like structure for horizontal-rule/,
+  );
+});
+
+test("rejects a touching vertical decorative rule before dilation", async () => {
+  const width = 40;
+  const height = 30;
+  const raw = Buffer.alloc(width * height * 3, 240);
+  for (let y = 12; y < 20; y += 1) {
+    for (let x = 10; x < 15; x += 1) raw.fill(30, (y * width + x) * 3, (y * width + x) * 3 + 3);
+  }
+  for (let y = 10; y < 18; y += 1) raw.fill(30, (y * width + 9) * 3, (y * width + 9) * 3 + 3);
+
+  await assert.rejects(
+    buildTightTextMask(
+      await encodeRgb(raw, width, height),
+      textElement("vertical-rule", { x: 10, y: 10, width: 10, height: 16 }),
+      { dilationPx: 0 },
+    ),
+    /Text mask fringe would capture line-like structure for vertical-rule/,
+  );
+});
+
+test("preserves a nearby disconnected decorative rule", async () => {
+  const width = 40;
+  const height = 30;
+  const raw = Buffer.alloc(width * height * 3, 240);
+  for (let y = 12; y < 18; y += 1) {
+    for (let x = 14; x < 17; x += 1) raw.fill(30, (y * width + x) * 3, (y * width + x) * 3 + 3);
+  }
+  for (let x = 10; x < 20; x += 1) raw.fill(30, (8 * width + x) * 3, (8 * width + x) * 3 + 3);
+  const result = await buildTightTextMask(
+    await encodeRgb(raw, width, height),
+    textElement("nearby-rule", { x: 10, y: 10, width: 16, height: 10 }),
+    { dilationPx: 0 },
+  );
+  const { data, info } = await decodeMask(result.mask);
+
+  assert.equal(data[(8 * info.width + 14) * info.channels], 0);
 });
 
 test("rejects a competing structural region covering most of the OCR box", async () => {
