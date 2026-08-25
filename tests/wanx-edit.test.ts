@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import type { AppConfig } from "../src/config.js";
@@ -25,6 +26,18 @@ type FetchCall = {
   url: string;
   init: RequestInit | undefined;
 };
+
+test("does not persist signed result URL query parameters in test source", async () => {
+  const source = await readFile(new URL(import.meta.url), "utf8");
+  const signedResultUrlPattern =
+    /https:\/\/[^\s"'`]+[?&](?:Expires|OSSAccessKeyId|Signature)=/i;
+
+  assert.equal(
+    signedResultUrlPattern.test(source),
+    false,
+    "Wanx test source must use unsigned inert result URLs",
+  );
+});
 
 function createSuccessfulTaskFetch(
   taskId: string,
@@ -79,7 +92,7 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
         task_status: "SUCCEEDED",
         results: [
           {
-            url: "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png?Expires=123",
+            url: "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png",
           },
         ],
       },
@@ -144,7 +157,7 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
 
     assert.equal(
       calls[4]?.url,
-      "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png?Expires=123",
+      "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/clean.png",
     );
     assert.equal(calls[4]?.init?.method, "GET");
     assert.deepEqual(calls[4]?.init?.headers, {});
@@ -157,7 +170,7 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
 test("accepts the authenticated Wanx ACDR result bucket observed from Model Studio", async () => {
   const originalFetch = globalThis.fetch;
   const resultUrl =
-    "https://dashscope-5859.oss-cn-wulanchabu-acdr-1.aliyuncs.com/clean.png?Expires=123&OSSAccessKeyId=test&Signature=test";
+    "https://dashscope-5859.oss-cn-wulanchabu-acdr-1.aliyuncs.com/clean.png";
   const downloaded = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   let fetchCount = 0;
 
