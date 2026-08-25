@@ -33,15 +33,28 @@ test("normalizes a four-point OCR location to an axis-aligned bbox", async () =>
   const result = parseQwenOcrResponse(await readFixture());
 
   assert.deepEqual(result.lines[0], {
-    text: "AI-Agent",
-    bbox: { x: 36, y: 32, width: 304, height: 64 },
+    text: "第 4 章 · 工具",
+    bbox: { x: 38, y: 29, width: 201, height: 30 },
     quad: [
-      { x: 40, y: 32 },
-      { x: 340, y: 36 },
-      { x: 336, y: 96 },
-      { x: 36, y: 92 },
+      { x: 38, y: 29 },
+      { x: 239, y: 29 },
+      { x: 239, y: 59 },
+      { x: 38, y: 59 },
     ],
   });
+});
+
+test("contains representative slide 7 title and section text", async () => {
+  const result = parseQwenOcrResponse(await readFixture());
+  const text = new Set(result.lines.map((line) => line.text));
+
+  assert.ok(result.lines.length >= 9);
+  assert.ok(text.has("第 4 章 工具"));
+  assert.ok(text.has("感知工具"));
+  assert.ok(text.has("执行工具"));
+  assert.ok(text.has("协作工具"));
+  assert.ok(text.has("MCP 生态"));
+  assert.ok(text.has("工具是 Agent 的手脚，定义能力边界"));
 });
 
 test("posts the exact OCR request to the validated Beijing endpoint", async () => {
@@ -56,7 +69,7 @@ test("posts the exact OCR request to the validated Beijing endpoint", async () =
   try {
     const result = await recognizeText(Buffer.from([0x89, 0x50, 0x4e, 0x47]), config);
 
-    assert.equal(result.lines.length, 2);
+    assert.equal(result.lines.length, 10);
     assert.equal(calls.length, 1);
     assert.equal(
       calls[0]?.url,

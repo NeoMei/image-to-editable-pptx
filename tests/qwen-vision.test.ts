@@ -42,16 +42,46 @@ test("strips one outer Markdown fence and validates vision elements", async () =
 
   assert.deepEqual(result.elements[0], {
     type: "panel",
-    bbox: { x: 80, y: 160, width: 240, height: 320 },
-    label: "content panel",
-    zIndex: 2,
+    bbox: { x: 60, y: 241, width: 272, height: 343 },
+    label: "perception tools panel",
+    zIndex: 1,
     editableAs: "native-shape",
-    confidence: 0.95,
-    fillColor: "F4EBDD",
-    strokeColor: "23394D",
-    cornerRadius: 16,
+    confidence: 0.99,
+    fillColor: "F7F3E9",
+    strokeColor: "456A84",
+    cornerRadius: 20,
   });
-  assert.equal(result.elements[1]?.type, "icon");
+  assert.ok(result.elements.some((element) => element.type === "icon"));
+});
+
+test("contains four panels and six distinct movable slide 7 assets", async () => {
+  const fixture = await readFixture();
+  const result = parseQwenVisionContent(fixture.choices[0]!.message.content);
+  const panels = result.elements.filter(
+    (element) =>
+      (element.type === "panel" || element.type === "shape") &&
+      element.editableAs === "native-shape" &&
+      element.confidence >= 0.9,
+  );
+  const assetLabels = result.elements
+    .filter(
+      (element) =>
+        (element.type === "icon" || element.type === "illustration") &&
+        element.editableAs === "bitmap",
+    )
+    .map((element) => element.label)
+    .sort();
+
+  assert.equal(panels.length, 4);
+  assert.deepEqual(assetLabels, [
+    "clock",
+    "eye",
+    "lightning",
+    "plug",
+    "speech bubbles",
+    "wrench",
+  ]);
+  assert.equal(new Set(assetLabels).size, 6);
 });
 
 test("rejects nested Markdown fences after stripping only the outer fence", () => {
@@ -110,7 +140,7 @@ test("uses the compatible client with the requested model and constrained prompt
   try {
     const result = await analyzeElements(Buffer.from([0x89, 0x50]), config);
 
-    assert.equal(result.elements.length, 2);
+    assert.equal(result.elements.length, 10);
     assert.equal(calls.length, 1);
     assert.equal(
       calls[0]?.url,
