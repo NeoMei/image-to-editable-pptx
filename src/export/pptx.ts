@@ -29,6 +29,12 @@ export async function exportPptx(
   backgroundPath: string,
   outputPath: string,
 ): Promise<void> {
+  for (const element of manifest.elements) {
+    if (element.kind === "asset" && element.extraction !== "transparent") {
+      throw new Error(`Refusing to export rectangular fidelity asset ${element.id}`);
+    }
+  }
+
   const pptx = new PptxGenConstructor();
   pptx.layout = "LAYOUT_WIDE";
 

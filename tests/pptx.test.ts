@@ -103,7 +103,7 @@ test("exports one editable wide slide with ordered, named PowerPoint layers", as
           id: "icon-two",
           label: "second icon",
           bbox: { x: 900, y: 300, width: 72, height: 72 },
-          extraction: "rectangular",
+          extraction: "transparent",
           assetPath: secondAssetPath,
           zIndex: 4,
         },
@@ -192,6 +192,55 @@ test("exports one editable wide slide with ordered, named PowerPoint layers", as
         ),
       );
     }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("refuses to export a rectangular fidelity asset", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pptx-export-rectangular-"));
+  const backgroundPath = join(directory, "background.png");
+  const assetPath = join(directory, "asset.png");
+  const outputPath = join(directory, "synthetic.pptx");
+
+  try {
+    await Promise.all([
+      sharp({
+        create: {
+          width: 1280,
+          height: 720,
+          channels: 4,
+          background: "#F5EFE4",
+        },
+      }).png().toFile(backgroundPath),
+      sharp({
+        create: {
+          width: 32,
+          height: 32,
+          channels: 4,
+          background: "#CC3300",
+        },
+      }).png().toFile(assetPath),
+    ]);
+    const manifest: SlideManifest = {
+      manifestVersion: 1,
+      canvas: { width: 1280, height: 720 },
+      warnings: [],
+      elements: [{
+        kind: "asset",
+        id: "unsafe-icon",
+        label: "unsafe icon",
+        bbox: { x: 100, y: 100, width: 32, height: 32 },
+        extraction: "rectangular",
+        assetPath,
+        zIndex: 1,
+      }],
+    };
+
+    await assert.rejects(
+      exportPptx(manifest, backgroundPath, outputPath),
+      /Refusing to export rectangular fidelity asset unsafe-icon/,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

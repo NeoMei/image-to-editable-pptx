@@ -16,10 +16,16 @@ import JSZip from "jszip";
 import sharp from "sharp";
 
 import type { AppConfig } from "../src/config.js";
+import type {
+  CandidateDecision,
+  FidelityPlan,
+  SlideElement,
+} from "../src/contracts.js";
 import {
   analyzeSlide,
   buildSlide,
   runPipeline,
+  type FidelityBuild,
 } from "../src/pipeline.js";
 
 const liveConfig: AppConfig = {
@@ -83,6 +89,93 @@ function oversizedInvalidJsonBody(provider: "ocr" | "vision"): string {
   ].join(" ");
 }
 
+const repairMetrics = {
+  maskedPixels: 4,
+  outsideMaskChangedPixels: 0,
+  ringSamples: 20,
+  ringChannelMad: 1,
+  filledPixelDistanceP95: 2,
+};
+
+const recompositionMetrics = {
+  comparedPixels: 100,
+  meanAbsoluteError: 0,
+  p95ChannelDelta: 0,
+  changedPixelRatio: 0,
+};
+
+const deterministicFidelityBuild: FidelityBuild = async (source, plan) => {
+  const elements: SlideElement[] = [
+    ...plan.text.map((candidate) => candidate.element),
+    ...plan.icons.map((candidate) => ({
+      kind: "asset" as const,
+      id: candidate.id,
+      label: candidate.label,
+      bbox: candidate.bbox,
+      extraction: "transparent" as const,
+      assetPath: `assets/${candidate.id}.png`,
+      zIndex: candidate.zIndex,
+    })),
+  ].sort((left, right) => left.zIndex - right.zIndex);
+  const decisions: CandidateDecision[] = [
+    ...plan.text.map((candidate) => ({
+      candidateId: candidate.id,
+      kind: "text" as const,
+      decision: "accepted" as const,
+      bbox: candidate.element.bbox,
+      sourceElementIndexes: [],
+      repairMethod: "local_nearest_surface" as const,
+      extraction: "none" as const,
+      repairMetrics,
+      output: {
+        state: "editable_layer" as const,
+        manifestElementId: candidate.element.id,
+      },
+    })),
+    ...plan.icons.map((candidate) => ({
+      candidateId: candidate.id,
+      kind: "icon" as const,
+      decision: "accepted" as const,
+      bbox: candidate.bbox,
+      sourceElementIndexes: candidate.sourceElementIndexes,
+      repairMethod: "local_nearest_surface" as const,
+      extraction: "transparent" as const,
+      repairMetrics,
+      recompositionMetrics,
+      output: {
+        state: "editable_layer" as const,
+        manifestElementId: candidate.id,
+        assetPath: `assets/${candidate.id}.png`,
+      },
+    })),
+  ];
+  const combinedMask = await sharp(Buffer.alloc(plan.canvas.width * plan.canvas.height), {
+    raw: { ...plan.canvas, channels: 1 },
+  }).png().toBuffer();
+  return {
+    background: source,
+    combinedMask,
+    manifest: {
+      manifestVersion: 1,
+      canvas: plan.canvas,
+      elements,
+      warnings: plan.warnings,
+    },
+    assets: new Map(
+      plan.icons.map((candidate) => [
+        `assets/${candidate.id}.png`,
+        source,
+      ]),
+    ),
+    decisions,
+  };
+};
+
+const failingFidelityBuild = (message: string): FidelityBuild =>
+  async (_source: Buffer, _plan: FidelityPlan) => {
+    throw new Error(message);
+  };
+
 test("runs the complete pipeline from recorded provider fixtures", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-"));
   const imagePath = join(directory, "source-slide-07.png");
@@ -101,6 +194,7 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
       .toBuffer();
     await sharp(source).toFile(imagePath);
 
+    let fidelityBuildCalls = 0;
     const result = await runPipeline({
       imagePath,
       outDir,
@@ -108,10 +202,10 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
         ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
         visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
       },
-      inpaint: async () => ({
-        image: source,
-        taskId: "wanx-replay-task-07",
-      }),
+      fidelityBuild: async (...args) => {
+        fidelityBuildCalls += 1;
+        return deterministicFidelityBuild(...args);
+      },
     });
 
     const expectedFiles = [
@@ -130,30 +224,23 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
 
     const manifest = JSON.parse(
       await readFile(join(outDir, "manifest.json"), "utf8"),
-    ) as { elements: Array<{ kind: string; label?: string }> };
-    const assets = manifest.elements.filter(
-      (element) => element.kind === "asset",
-    );
+    ) as {
+      elements: Array<{ kind: string; label?: string; extraction?: string }>;
+    };
     const nativeShapeLabels = manifest.elements
       .filter((element) => element.kind === "shape")
       .map((element) => element.label)
       .sort();
-    const expectedNativeShapeLabels = [
-      "MCP ecosystem panel",
-      "bottom navy bar",
-      "collaboration tools panel",
-      "event-driven async Agent panel",
-      "execution tools panel",
-      "orange subtitle bar",
-      "perception tools panel",
-      "top section label",
-    ].sort();
-    assert.equal(assets.length, 6);
-    assert.deepEqual(nativeShapeLabels, expectedNativeShapeLabels);
+    assert.equal(fidelityBuildCalls, 1);
+    assert.equal(nativeShapeLabels.length, 0);
+    assert.equal(
+      manifest.elements.filter((element) => element.kind === "text").length,
+      10,
+    );
     assert.ok(
-      assets.every(
-        (element) => !expectedNativeShapeLabels.includes(element.label ?? ""),
-      ),
+      manifest.elements
+        .filter((element) => element.kind === "asset")
+        .every((element) => element.extraction === "transparent"),
     );
 
     const ledgerText = await readFile(
@@ -166,7 +253,8 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
       durationsMs: Record<string, number>;
       taskIds: Record<string, string>;
       warnings: string[];
-      fallbacks: unknown[];
+      ledgerVersion: number;
+      decisions: Array<{ kind: string }>;
       hashes: Record<string, unknown>;
       outputs: Record<string, string>;
     };
@@ -181,9 +269,10 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
         (duration) => Number.isFinite(duration) && duration >= 0,
       ),
     );
-    assert.equal(ledger.taskIds.wanx, "wanx-replay-task-07");
+    assert.equal(ledger.ledgerVersion, 2);
+    assert.equal(ledger.taskIds.wanx, undefined);
+    assert.equal(ledger.decisions.filter((item) => item.kind === "text").length, 10);
     assert.ok(Array.isArray(ledger.warnings));
-    assert.ok(Array.isArray(ledger.fallbacks));
     assert.equal(typeof ledger.hashes.sourceImage, "string");
     assert.equal(typeof ledger.hashes.pptx, "string");
     assert.equal(
@@ -202,14 +291,7 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
       .file("ppt/slides/slide1.xml")!
       .async("string");
     assert.match(slideXml, /<a:t>第 4 章 工具<\/a:t>/);
-    assert.match(slideXml, /name="asset-vision-/);
-    for (const label of expectedNativeShapeLabels) {
-      assert.match(
-        slideXml,
-        new RegExp(`name="shape-vision-\\d+-${label}"`),
-      );
-      assert.doesNotMatch(slideXml, new RegExp(`name="asset-[^"]*${label}"`));
-    }
+    assert.doesNotMatch(slideXml, /name="shape-/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -276,10 +358,7 @@ test("preserves live-like analysis provenance through a split build", async () =
       imagePath,
       analysisDir,
       outDir,
-      inpaint: async () => ({
-        image: source,
-        taskId: "wanx-replay-split-07",
-      }),
+      fidelityBuild: deterministicFidelityBuild,
     });
 
     await Promise.all([
@@ -384,7 +463,7 @@ test("failed standalone build preserves its owned success and retains staged evi
       imagePath,
       analysisDir: firstAnalysisDir,
       outDir,
-      inpaint: async () => ({ image: source, taskId: "first-build" }),
+      fidelityBuild: deterministicFidelityBuild,
     });
     const before = await snapshotTree(outDir);
     const smallerReplay = await writeNormalizedReplay(
@@ -403,9 +482,7 @@ test("failed standalone build preserves its owned success and retains staged evi
         imagePath,
         analysisDir: secondAnalysisDir,
         outDir,
-        inpaint: async () => {
-          throw new Error("simulated split build failure");
-        },
+        fidelityBuild: failingFidelityBuild("simulated split build failure"),
       }),
       /simulated split build failure/,
     );
@@ -416,8 +493,8 @@ test("failed standalone build preserves its owned success and retains staged evi
     const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
     await Promise.all([
       access(join(failedRun, "analysis-ledger.json")),
-      access(join(failedRun, "manifest.json")),
-      access(join(failedRun, "removal-mask.png")),
+      access(join(failedRun, "ocr.json")),
+      access(join(failedRun, "vision.json")),
     ]);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -456,9 +533,9 @@ test("successful smaller standalone build removes stale assets and recordings", 
       imagePath,
       analysisDir: firstAnalysisDir,
       outDir,
-      inpaint: async () => ({ image: source, taskId: "large-build" }),
+      fidelityBuild: deterministicFidelityBuild,
     });
-    assert.equal((await readdir(join(outDir, "assets"))).length, 6);
+    assert.ok((await readdir(join(outDir, "assets"))).length > 0);
     await access(join(outDir, "recordings/ocr.json"));
 
     const smallerReplay = await writeNormalizedReplay(
@@ -476,15 +553,15 @@ test("successful smaller standalone build removes stale assets and recordings", 
       imagePath,
       analysisDir: secondAnalysisDir,
       outDir,
-      inpaint: async () => ({ image: source, taskId: "small-build" }),
+      fidelityBuild: deterministicFidelityBuild,
     });
 
     assert.deepEqual(await readdir(join(outDir, "assets")), []);
     await assert.rejects(access(join(outDir, "recordings")), /ENOENT/);
     const ledger = JSON.parse(
       await readFile(join(outDir, "run-ledger.json"), "utf8"),
-    ) as { taskIds: { wanx: string } };
-    assert.equal(ledger.taskIds.wanx, "small-build");
+    ) as { taskIds: { wanx?: string } };
+    assert.equal(ledger.taskIds.wanx, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -634,7 +711,6 @@ test("retains sanitized malformed live OCR response and parse error in the faile
         imagePath,
         outDir,
         config: liveConfig,
-        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
       }),
       /coordinates require the advanced_recognition task/i,
     );
@@ -710,7 +786,6 @@ test("retains sanitized malformed live Vision response and parse error in the fa
         imagePath,
         outDir,
         config: liveConfig,
-        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
       }),
       /vision response is not valid JSON/i,
     );
@@ -790,7 +865,6 @@ test("captures a bounded sanitized invalid-JSON OCR HTTP body before decoding", 
         imagePath,
         outDir,
         config: liveConfig,
-        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
       }),
       /OCR HTTP response is not valid JSON/i,
     );
@@ -863,7 +937,6 @@ test("captures a bounded sanitized invalid-JSON Vision HTTP body before decoding
         imagePath,
         outDir,
         config: liveConfig,
-        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
       }),
       /Vision HTTP response is not valid JSON/i,
     );
@@ -942,11 +1015,9 @@ test("failed rerun preserves the previous successful target without mixed artifa
           visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
         },
         record: true,
-        inpaint: async () => {
-          throw new Error("simulated Wanx rerun failure");
-        },
+        fidelityBuild: failingFidelityBuild("simulated fidelity rerun failure"),
       }),
-      /simulated Wanx rerun failure/,
+      /simulated fidelity rerun failure/,
     );
 
     assert.deepEqual(await snapshotTree(outDir), before);
@@ -958,7 +1029,6 @@ test("failed rerun preserves the previous successful target without mixed artifa
       access(join(failedRun, "analysis-ledger.json")),
       access(join(failedRun, "ocr.json")),
       access(join(failedRun, "vision.json")),
-      access(join(failedRun, "removal-mask.png")),
     ]);
     await assert.rejects(
       access(join(failedRun, "slide-07-editable.pptx")),
@@ -1001,7 +1071,7 @@ test("refuses to replace an unowned output directory and leaves it unchanged", a
           ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
           visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
         },
-        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
+        fidelityBuild: deterministicFidelityBuild,
       }),
       /Refusing to replace unowned output directory/,
     );
@@ -1044,7 +1114,7 @@ test("atomically replaces an output created and marked by this pipeline", async 
       imagePath,
       outDir,
       replay,
-      inpaint: async () => ({ image: source, taskId: "owned-first" }),
+      fidelityBuild: deterministicFidelityBuild,
     });
     const markerPath = join(outDir, ".image-ppt-layers-output.json");
     assert.deepEqual(JSON.parse(await readFile(markerPath, "utf8")), {
@@ -1057,13 +1127,13 @@ test("atomically replaces an output created and marked by this pipeline", async 
       imagePath,
       outDir,
       replay,
-      inpaint: async () => ({ image: source, taskId: "owned-second" }),
+      fidelityBuild: deterministicFidelityBuild,
     });
 
     const ledger = JSON.parse(
       await readFile(join(outDir, "run-ledger.json"), "utf8"),
-    ) as { taskIds: { wanx: string } };
-    assert.equal(ledger.taskIds.wanx, "owned-second");
+    ) as { taskIds: { wanx?: string } };
+    assert.equal(ledger.taskIds.wanx, undefined);
     assert.deepEqual(JSON.parse(await readFile(markerPath, "utf8")), {
       markerVersion: 1,
       appId: "image-ppt-layers",

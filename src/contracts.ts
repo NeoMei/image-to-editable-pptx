@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+
 export const BBoxSchema = z
   .object({
     x: z.number().min(0).max(1280),
@@ -196,3 +198,99 @@ export type RecompositionResult = {
   metrics: RecompositionMetrics;
   reason?: "recomposition_mismatch";
 };
+
+export const CandidateDecisionSchema = z.object({
+  candidateId: z.string().min(1),
+  kind: z.enum(["text", "icon"]),
+  decision: z.enum(["accepted", "kept_in_background"]),
+  bbox: BBoxSchema,
+  sourceElementIndexes: z.array(z.number().int().nonnegative()),
+  repairMethod: z.enum(["local_nearest_surface", "none"]),
+  extraction: z.enum(["transparent", "none"]),
+  reason: z.enum([
+    "edge_colors_inconsistent",
+    "filled_pixels_too_different",
+    "local_repair_failed",
+    "mask_empty",
+    "opaque_border_ratio_above_2_percent",
+    "ocr_text_overlap_above_1_percent",
+    "recomposition_mismatch",
+    "surface_samples_insufficient",
+    "surface_variance_too_high",
+    "transparent_extraction_failed",
+    "transparent_pixel_ratio_above_92_percent",
+    "transparent_pixel_ratio_below_5_percent",
+  ]).optional(),
+  repairMetrics: z.object({
+    maskedPixels: z.number().int().nonnegative(),
+    outsideMaskChangedPixels: z.number().int().nonnegative(),
+    ringSamples: z.number().int().nonnegative(),
+    ringChannelMad: z.number().nonnegative(),
+    filledPixelDistanceP95: z.number().nonnegative(),
+  }).optional(),
+  recompositionMetrics: z.object({
+    comparedPixels: z.number().int().nonnegative(),
+    meanAbsoluteError: z.number().nonnegative(),
+    p95ChannelDelta: z.number().nonnegative(),
+    changedPixelRatio: z.number().min(0).max(1),
+  }).optional(),
+  output: z.discriminatedUnion("state", [
+    z.object({
+      state: z.literal("editable_layer"),
+      manifestElementId: z.string().min(1),
+      assetPath: z.string().min(1).optional(),
+    }),
+    z.object({ state: z.literal("kept_in_background") }),
+  ]),
+});
+
+export type CandidateDecision = z.infer<typeof CandidateDecisionSchema>;
+
+export const RunLedgerV2Schema = z.object({
+  ledgerVersion: z.literal(2),
+  mode: z.enum(["live", "replay"]),
+  recorded: z.boolean(),
+  models: z.object({
+    ocr: z.string().min(1),
+    vision: z.string().min(1),
+    edit: z.string().min(1).optional(),
+  }),
+  durationsMs: z.object({
+    ocr: z.number().finite().nonnegative(),
+    vision: z.number().finite().nonnegative(),
+    analyze: z.number().finite().nonnegative(),
+    plan: z.number().finite().nonnegative(),
+    repair: z.number().finite().nonnegative(),
+    export: z.number().finite().nonnegative(),
+    total: z.number().finite().nonnegative(),
+  }),
+  taskIds: z.object({
+    wanx: z.string().min(1).optional(),
+  }).strict(),
+  warnings: z.array(z.string()),
+  decisions: z.array(CandidateDecisionSchema),
+  hashes: z.object({
+    sourceImage: Sha256Schema,
+    ocr: Sha256Schema,
+    vision: Sha256Schema,
+    analysisLedger: Sha256Schema,
+    manifest: Sha256Schema,
+    removalMask: Sha256Schema,
+    cleanBackground: Sha256Schema,
+    assets: z.record(z.string(), Sha256Schema),
+    pptx: Sha256Schema,
+  }),
+  outputs: z.object({
+    directory: z.string().min(1),
+    ocr: z.string().min(1),
+    vision: z.string().min(1),
+    analysisLedger: z.string().min(1),
+    manifest: z.string().min(1),
+    removalMask: z.string().min(1),
+    cleanBackground: z.string().min(1),
+    assets: z.string().min(1),
+    pptx: z.string().min(1),
+  }),
+});
+
+export type RunLedgerV2 = z.infer<typeof RunLedgerV2Schema>;

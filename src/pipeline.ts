@@ -8,6 +8,7 @@ import {
   realpath,
   rename,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import {
   basename,
@@ -25,6 +26,8 @@ import { z } from "zod";
 import { loadConfig, type AppConfig } from "./config.js";
 import {
   OcrResultSchema,
+  RunLedgerV2Schema,
+  Sha256Schema,
   SlideManifestSchema,
   VisionResultSchema,
   type OcrResult,
@@ -32,9 +35,11 @@ import {
   type VisionResult,
 } from "./contracts.js";
 import { exportPptx } from "./export/pptx.js";
-import { extractAsset } from "./image/extract.js";
-import { buildRemovalMask } from "./image/mask.js";
-import { planSlide } from "./planner.js";
+import {
+  buildFidelityLayers,
+  type FidelityBuildResult,
+} from "./fidelity/build.js";
+import { planFidelityCandidates } from "./fidelity/candidates.js";
 import {
   parseQwenOcrResponse,
   recognizeText,
@@ -43,7 +48,6 @@ import {
   analyzeElements,
   parseQwenVisionContent,
 } from "./providers/qwen-vision.js";
-import { inpaintBackground } from "./providers/wanx-edit.js";
 import {
   sanitizeHttpResponseBody,
   type ProviderResponseObserver,
@@ -77,8 +81,6 @@ type OwnedOutputDirectory = {
   path: string;
   marker: z.infer<typeof OutputOwnershipMarkerSchema>;
 };
-
-const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const AnalysisLedgerSchema = z
   .object({
@@ -129,11 +131,7 @@ export type ReplayInputs = {
   visionPath: string;
 };
 
-export type Inpaint = (
-  source: Buffer,
-  mask: Buffer,
-  config?: AppConfig,
-) => Promise<{ image: Buffer; taskId: string }>;
+export type FidelityBuild = typeof buildFidelityLayers;
 
 export type PipelineResult = {
   outDir: string;
@@ -148,7 +146,7 @@ export type RunPipelineOptions = {
   replay?: ReplayInputs;
   record?: boolean;
   config?: AppConfig;
-  inpaint?: Inpaint;
+  fidelityBuild?: FidelityBuild;
 };
 
 export type AnalyzeOptions = Pick<
@@ -161,7 +159,7 @@ export type BuildOptions = {
   analysisDir: string;
   outDir: string;
   config?: AppConfig;
-  inpaint?: Inpaint;
+  fidelityBuild?: FidelityBuild;
 };
 
 type AnalysisResult = {
@@ -542,54 +540,36 @@ async function buildFromAnalysis(
   }
 
   const planStartedAt = performance.now();
-  const planned = planSlide(context.analysis.ocr, context.analysis.vision);
+  const fidelityPlan = planFidelityCandidates(
+    context.analysis.ocr,
+    context.analysis.vision,
+  );
   const planDuration = elapsed(planStartedAt);
 
-  const extractStartedAt = performance.now();
-  const finalizedElements = await Promise.all(
-    planned.elements.map(async (element) => {
-      if (element.kind !== "asset") return element;
-      const extracted = await extractAsset(image, element.bbox, {
-        extraction: element.extraction,
-      });
-      await sharp(extracted.image).toFile(safeAssetOutput(outDir, element.assetPath));
-      return {
-        ...element,
-        extraction: extracted.extraction,
-        ...(extracted.fallbackReason === undefined
-          ? {}
-          : { fallbackReason: extracted.fallbackReason }),
-      };
-    }),
+  const repairStartedAt = performance.now();
+  const fidelityResult: FidelityBuildResult = await (
+    options.fidelityBuild ?? buildFidelityLayers
+  )(
+    image,
+    fidelityPlan,
   );
-  const extractDuration = elapsed(extractStartedAt);
-  const manifest = SlideManifestSchema.parse({
-    ...planned,
-    elements: finalizedElements,
-  });
+  const repairDuration = elapsed(repairStartedAt);
+  const manifest = SlideManifestSchema.parse(fidelityResult.manifest);
+  if (manifest.elements.some((element) => element.kind === "shape")) {
+    throw new Error("Fidelity manifests must not contain structural shapes");
+  }
+  await Promise.all(
+    [...fidelityResult.assets].map(([assetPath, asset]) =>
+      writeFile(safeAssetOutput(outDir, assetPath), asset),
+    ),
+  );
   const manifestPath = join(outDir, "manifest.json");
   await writeRecording(manifestPath, manifest);
 
-  const maskStartedAt = performance.now();
-  const mask = await buildRemovalMask(
-    manifest.canvas.width,
-    manifest.canvas.height,
-    manifest.elements,
-  );
   const maskPath = join(outDir, "removal-mask.png");
-  await sharp(mask).toFile(maskPath);
-  const maskDuration = elapsed(maskStartedAt);
-
-  const config = options.config;
-  const inpaint =
-    options.inpaint ??
-    ((source: Buffer, removalMask: Buffer, suppliedConfig?: AppConfig) =>
-      inpaintBackground(source, removalMask, suppliedConfig ?? loadConfig()));
-  const inpaintStartedAt = performance.now();
-  const clean = await inpaint(image, mask, config);
-  const inpaintDuration = elapsed(inpaintStartedAt);
+  await writeFile(maskPath, fidelityResult.combinedMask);
   const cleanBackgroundPath = join(outDir, "clean-background.png");
-  await sharp(clean.image).png().toFile(cleanBackgroundPath);
+  await writeFile(cleanBackgroundPath, fidelityResult.background);
 
   const pptxPath = join(outDir, outputName(imagePath));
   const exportManifest: SlideManifest = {
@@ -619,28 +599,21 @@ async function buildFromAnalysis(
   );
   const ledgerPath = join(outDir, "run-ledger.json");
   const warnings = [...manifest.warnings];
-  const fallbacks = manifest.elements.flatMap((element) =>
-    element.kind === "asset" && element.fallbackReason !== undefined
-      ? [{ elementId: element.id, reason: element.fallbackReason }]
-      : [],
-  );
-  await writeRecording(ledgerPath, {
-    ledgerVersion: 1,
+  const ledger = RunLedgerV2Schema.parse({
+    ledgerVersion: 2,
     mode: context.analysis.ledger.mode,
     recorded: context.analysis.ledger.recorded,
     models: context.analysis.ledger.models,
     durationsMs: {
       ...context.analysis.ledger.durationsMs,
       plan: planDuration,
-      extract: extractDuration,
-      mask: maskDuration,
-      inpaint: inpaintDuration,
+      repair: repairDuration,
       export: exportDuration,
       total: elapsed(context.startedAt),
     },
-    taskIds: { wanx: clean.taskId },
+    taskIds: {},
     warnings: [...context.analysis.ledger.warnings, ...warnings],
-    fallbacks,
+    decisions: fidelityResult.decisions,
     hashes: {
       sourceImage: sha256(image),
       ocr: await sha256File(join(outDir, "ocr.json")),
@@ -649,7 +622,7 @@ async function buildFromAnalysis(
         join(outDir, "analysis-ledger.json"),
       ),
       manifest: await sha256File(manifestPath),
-      removalMask: sha256(mask),
+      removalMask: await sha256File(maskPath),
       cleanBackground: await sha256File(cleanBackgroundPath),
       assets: assetHashes,
       pptx: await sha256File(pptxPath),
@@ -666,6 +639,7 @@ async function buildFromAnalysis(
       pptx: join(publishedOutDir, outputName(imagePath)),
     },
   });
+  await writeRecording(ledgerPath, ledger);
   await writeOwnershipMarker(outDir);
 
   return { outDir, manifestPath, pptxPath, ledgerPath };
@@ -798,9 +772,7 @@ export async function runPipeline(
   });
   const config =
     options.config ??
-    (options.replay === undefined || options.inpaint === undefined
-      ? loadConfig()
-      : undefined);
+    (options.replay === undefined ? loadConfig() : undefined);
   const targetDir = publication.targetDir;
   const targetParent = dirname(targetDir);
   await mkdir(targetParent, { recursive: true });
@@ -822,7 +794,9 @@ export async function runPipeline(
         analysisDir: stagingDir,
         outDir: stagingDir,
         ...(config === undefined ? {} : { config }),
-        ...(options.inpaint === undefined ? {} : { inpaint: options.inpaint }),
+        ...(options.fidelityBuild === undefined
+          ? {}
+          : { fidelityBuild: options.fidelityBuild }),
       },
       { analysis, startedAt, publishedOutDir: targetDir },
     );
