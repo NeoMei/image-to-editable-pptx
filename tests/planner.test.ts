@@ -282,35 +282,49 @@ test("merges adjacent aligned OCR body lines with similar estimated font sizes",
   assert.equal(text.length, 1);
   assert.equal(text[0]?.text, "First paragraph line\nSecond paragraph line");
   assert.deepEqual(text[0]?.bbox, { x: 100, y: 200, width: 420, height: 55 });
+  assert.equal(text[0]?.fontSizePx, 17.64);
 });
 
 test("keeps OCR lines separate when distance, alignment, or font size differs", () => {
-  const cases: OcrResult[] = [
+  const cases: Array<{ ocr: OcrResult; fontSizes: number[] }> = [
     {
-      lines: [
-        ocrLine("far first", { x: 100, y: 100, width: 300, height: 24 }),
-        ocrLine("far second", { x: 102, y: 170, width: 300, height: 24 }),
-      ],
+      ocr: {
+        lines: [
+          ocrLine("far first", { x: 100, y: 100, width: 300, height: 24 }),
+          ocrLine("far second", { x: 102, y: 170, width: 300, height: 24 }),
+        ],
+      },
+      fontSizes: [17.28, 17.28],
     },
     {
-      lines: [
-        ocrLine("aligned first", { x: 100, y: 100, width: 300, height: 24 }),
-        ocrLine("shifted second", { x: 150, y: 130, width: 300, height: 24 }),
-      ],
+      ocr: {
+        lines: [
+          ocrLine("aligned first", { x: 100, y: 100, width: 300, height: 24 }),
+          ocrLine("shifted second", { x: 150, y: 130, width: 300, height: 24 }),
+        ],
+      },
+      fontSizes: [17.28, 17.28],
     },
     {
-      lines: [
-        ocrLine("small first", { x: 100, y: 100, width: 300, height: 20 }),
-        ocrLine("large second", { x: 102, y: 125, width: 300, height: 34 }),
-      ],
+      ocr: {
+        lines: [
+          ocrLine("small first", { x: 100, y: 100, width: 300, height: 20 }),
+          ocrLine("large second", { x: 102, y: 125, width: 300, height: 34 }),
+        ],
+      },
+      fontSizes: [14.4, 24.48],
     },
   ];
 
-  for (const ocr of cases) {
+  for (const { ocr, fontSizes } of cases) {
     const text = planSlide(ocr, { elements: [] }).elements.filter(
       (element) => element.kind === "text",
     );
     assert.equal(text.length, 2);
+    assert.deepEqual(
+      text.map((element) => element.fontSizePx),
+      fontSizes,
+    );
   }
 });
 
@@ -339,6 +353,7 @@ test("plans the slide 7 fixture into title text, panels, and movable assets", as
     "MCP ecosystem panel",
     "bottom navy bar",
     "collaboration tools panel",
+    "event-driven async Agent panel",
     "execution tools panel",
     "orange subtitle bar",
     "perception tools panel",
@@ -347,6 +362,26 @@ test("plans the slide 7 fixture into title text, panels, and movable assets", as
 
   assert.ok(titleText.length >= 1);
   assert.deepEqual(nativeShapeLabels, expectedNativeShapeLabels);
+  assert.deepEqual(
+    Object.fromEntries(
+      panels.map((element) => [element.label, element.bbox]),
+    ),
+    {
+      "top section label": { x: 17, y: 14, width: 242, height: 59 },
+      "orange subtitle bar": { x: 135, y: 162, width: 1024, height: 56 },
+      "perception tools panel": { x: 60, y: 240, width: 273, height: 345 },
+      "execution tools panel": { x: 352, y: 240, width: 261, height: 345 },
+      "collaboration tools panel": { x: 629, y: 240, width: 272, height: 345 },
+      "MCP ecosystem panel": { x: 923, y: 240, width: 300, height: 173 },
+      "event-driven async Agent panel": {
+        x: 923,
+        y: 425,
+        width: 300,
+        height: 163,
+      },
+      "bottom navy bar": { x: 42, y: 607, width: 1198, height: 82 },
+    },
+  );
   assert.equal(assets.length, 6);
   assert.ok(
     assets.every(

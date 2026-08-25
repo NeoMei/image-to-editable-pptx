@@ -6,7 +6,8 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test",
+    "test": "node --import tsx --test \"tests/*.test.ts\"",
+    "test:compiled": "node --test \"dist/tests/*.test.js\"",
     "lint:types": "tsc -p tsconfig.json --noEmit",
     "cli": "tsx src/cli.ts"
   },

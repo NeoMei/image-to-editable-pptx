@@ -71,6 +71,16 @@ async function writeNormalizedReplay(
   return { ocrPath, visionPath };
 }
 
+function oversizedInvalidJsonBody(provider: "ocr" | "vision"): string {
+  return [
+    `not-json-${provider}`,
+    liveConfig.apiKey,
+    "Authorization: Bearer sk-round2-credential-1234567890",
+    "api_key=LTAI0123456789ABCDEF",
+    "x".repeat(70_000),
+  ].join(" ");
+}
+
 test("runs the complete pipeline from recorded provider fixtures", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-"));
   const imagePath = join(directory, "source-slide-07.png");
@@ -130,6 +140,7 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
       "MCP ecosystem panel",
       "bottom navy bar",
       "collaboration tools panel",
+      "event-driven async Agent panel",
       "execution tools panel",
       "orange subtitle bar",
       "perception tools panel",
@@ -718,6 +729,167 @@ test("retains sanitized malformed live Vision response and parse error in the fa
     assert.doesNotMatch(
       raw + parseError,
       /provider-secret-canary|authorization|api[_-]?key|bearer/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("captures a bounded sanitized invalid-JSON OCR HTTP body before decoding", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-invalid-json-ocr-"));
+  const imagePath = join(directory, "slide-07.png");
+  const outDir = join(directory, "output");
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    const visionFixture = JSON.parse(
+      await readFile(resolve("tests/fixtures/qwen-vision-slide-07.json"), "utf8"),
+    ) as { choices: Array<{ message: { content: string } }> };
+
+    globalThis.fetch = async (input) => {
+      if (String(input).endsWith("/chat/completions")) {
+        return Response.json({
+          id: "valid-vision",
+          object: "chat.completion",
+          created: 0,
+          model: liveConfig.visionModel,
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: visionFixture.choices[0]!.message.content,
+              },
+            },
+          ],
+        });
+      }
+      return new Response(oversizedInvalidJsonBody("ocr"), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        config: liveConfig,
+        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
+      }),
+      /OCR HTTP response is not valid JSON/i,
+    );
+
+    const failedRuns = await readdir(`${outDir}.failed-runs`);
+    const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
+    const rawText = await readFile(
+      join(failedRun, "raw-responses/ocr.json"),
+      "utf8",
+    );
+    const raw = JSON.parse(rawText) as {
+      body: string;
+      originalLength: number;
+      truncated: boolean;
+    };
+    const parseError = await readFile(
+      join(failedRun, "parse-errors/ocr.json"),
+      "utf8",
+    );
+    assert.equal(failedRuns.length, 1);
+    assert.equal(raw.truncated, true);
+    assert.ok(raw.originalLength > 65_536);
+    assert.ok(raw.body.length <= 65_536);
+    assert.match(raw.body, /not-json-ocr/);
+    assert.match(parseError, /OCR HTTP response is not valid JSON/);
+    assert.doesNotMatch(
+      rawText + parseError,
+      /provider-secret-canary|sk-round2-credential|LTAI0123456789ABCDEF|authorization|api[_-]?key|bearer/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("captures a bounded sanitized invalid-JSON Vision HTTP body before decoding", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-invalid-json-vision-"));
+  const imagePath = join(directory, "slide-07.png");
+  const outDir = join(directory, "output");
+  const originalFetch = globalThis.fetch;
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    const validOcr = JSON.parse(
+      await readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8"),
+    ) as unknown;
+
+    globalThis.fetch = async (input) => {
+      if (String(input).endsWith("/chat/completions")) {
+        return new Response(oversizedInvalidJsonBody("vision"), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return Response.json(validOcr);
+    };
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        config: liveConfig,
+        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
+      }),
+      /Vision HTTP response is not valid JSON/i,
+    );
+
+    const failedRuns = await readdir(`${outDir}.failed-runs`);
+    const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
+    const rawText = await readFile(
+      join(failedRun, "raw-responses/vision.json"),
+      "utf8",
+    );
+    const raw = JSON.parse(rawText) as {
+      body: string;
+      originalLength: number;
+      truncated: boolean;
+    };
+    const parseError = await readFile(
+      join(failedRun, "parse-errors/vision.json"),
+      "utf8",
+    );
+    assert.equal(failedRuns.length, 1);
+    assert.equal(raw.truncated, true);
+    assert.ok(raw.originalLength > 65_536);
+    assert.ok(raw.body.length <= 65_536);
+    assert.match(raw.body, /not-json-vision/);
+    assert.match(parseError, /Vision HTTP response is not valid JSON/);
+    assert.doesNotMatch(
+      rawText + parseError,
+      /provider-secret-canary|sk-round2-credential|LTAI0123456789ABCDEF|authorization|api[_-]?key|bearer/i,
     );
   } finally {
     globalThis.fetch = originalFetch;

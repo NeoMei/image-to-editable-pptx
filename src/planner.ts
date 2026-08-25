@@ -24,6 +24,7 @@ type OcrCandidate = {
   bbox: BBox;
   sourceIndex: number;
   lastLineBBox: BBox;
+  lineFontSizes: number[];
 };
 
 function clipBBox(
@@ -81,6 +82,16 @@ function estimateFontSize(height: number): number {
   return Math.round(estimate * 100) / 100;
 }
 
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  const value =
+    sorted.length % 2 === 0
+      ? (sorted[middle - 1]! + sorted[middle]!) / 2
+      : sorted[middle]!;
+  return Math.round(value * 100) / 100;
+}
+
 function unionBBox(left: BBox, right: BBox): BBox {
   const x = Math.min(left.x, right.x);
   const y = Math.min(left.y, right.y);
@@ -128,10 +139,17 @@ function mergeAdjacentOcrLines(
       previous.text = `${previous.text}\n${line.text}`;
       previous.bbox = unionBBox(previous.bbox, bbox);
       previous.lastLineBBox = bbox;
+      previous.lineFontSizes.push(estimateFontSize(bbox.height));
       continue;
     }
 
-    merged.push({ text: line.text, bbox, sourceIndex, lastLineBBox: bbox });
+    merged.push({
+      text: line.text,
+      bbox,
+      sourceIndex,
+      lastLineBBox: bbox,
+      lineFontSizes: [estimateFontSize(bbox.height)],
+    });
   }
 
   return merged;
@@ -171,7 +189,7 @@ export function planSlide(
   const mergedOcrCandidates = mergeAdjacentOcrLines(ocrWithClippedBboxes);
   const planned: PlannedElement[] = [];
 
-  for (const { text, bbox, sourceIndex } of mergedOcrCandidates) {
+  for (const { text, bbox, sourceIndex, lineFontSizes } of mergedOcrCandidates) {
     const visualTextHint = visionWithClippedBboxes
       .filter(({ element }) => element.type === "text")
       .map((candidate) => ({
@@ -189,7 +207,7 @@ export function planSlide(
         bbox,
         rotation: 0,
         color: visualTextHint?.fillColor ?? DEFAULT_TEXT_COLOR,
-        fontSizePx: estimateFontSize(bbox.height),
+        fontSizePx: median(lineFontSizes),
         align: "left",
         zIndex: DEFAULT_TEXT_Z_INDEX,
       },

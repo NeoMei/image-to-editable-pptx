@@ -196,7 +196,18 @@ export async function recognizeText(
     throw new Error(`Qwen OCR request failed with status ${response.status}`);
   }
 
-  const payload: unknown = await response.json();
+  const responseBody = await response.text();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(responseBody);
+  } catch (cause) {
+    const error = new Error("Qwen OCR HTTP response is not valid JSON", {
+      cause,
+    });
+    await observer?.recordRawHttpResponse(responseBody);
+    await observer?.recordParseError(error);
+    throw error;
+  }
   await observer?.recordRawResponse(payload);
   try {
     return parseQwenOcrResponse(payload);

@@ -125,35 +125,56 @@ export async function analyzeElements(
   observer?: ProviderResponseObserver,
 ): Promise<VisionResult> {
   const baseURL = requireSafeCompatibleBase(config);
+  let outerHttpParseError: Error | undefined;
   const client = new OpenAI({
     apiKey: config.apiKey,
     baseURL,
     timeout: config.requestTimeoutMs,
     maxRetries: 0,
-    fetch: (input, init) =>
-      fetch(input, {
+    fetch: async (input, init) => {
+      const response = await fetch(input, {
         ...init,
         redirect: "error",
-      }),
+      });
+      const responseBody = await response.clone().text();
+      try {
+        JSON.parse(responseBody);
+      } catch (cause) {
+        outerHttpParseError = new Error(
+          "Qwen Vision HTTP response is not valid JSON",
+          { cause },
+        );
+        await observer?.recordRawHttpResponse(responseBody);
+        await observer?.recordParseError(outerHttpParseError);
+      }
+      return response;
+    },
   });
 
-  const completion = await client.chat.completions.create({
-    model: config.visionModel,
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: VISION_PROMPT },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:image/png;base64,${image.toString("base64")}`,
+  const completion = await client.chat.completions
+    .create({
+      model: config.visionModel,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: VISION_PROMPT },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/png;base64,${image.toString("base64")}`,
+              },
             },
-          },
-        ],
-      },
-    ],
-  });
+          ],
+        },
+      ],
+    })
+    .catch((error: unknown) => {
+      if (outerHttpParseError !== undefined) throw outerHttpParseError;
+      throw error;
+    });
+
+  if (outerHttpParseError !== undefined) throw outerHttpParseError;
 
   await observer?.recordRawResponse(completion);
   try {

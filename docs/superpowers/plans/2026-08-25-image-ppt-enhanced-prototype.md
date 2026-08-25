@@ -327,7 +327,7 @@ Cover these exact behaviors:
 - adjacent aligned OCR body lines with similar estimated font sizes merge, while distant, shifted, or differently sized lines remain separate;
 - bbox values are clipped and an `out_of_bounds_clipped` warning is emitted;
 - elements are sorted by `zIndex`, then stable input order;
-- the slide 7 fixture produces at least one title text, seven semantically named native shapes (top label, subtitle bar, four content panels, bottom bar), and six movable asset candidates.
+- the slide 7 fixture produces at least one title text, eight semantically named native shapes (top label, subtitle bar, three main panels, two separated right-side panels, bottom bar), and six movable asset candidates.
 
 - [ ] **Step 2: Verify tests fail**
 
@@ -341,7 +341,7 @@ Expected: module-not-found failure.
 
 - [ ] **Step 3: Implement minimal deterministic merge**
 
-Use intersection-over-union greater than `0.5` to suppress duplicate text candidates. Estimate text color from the vision hint when present and default to `23394D`. Estimate `fontSizePx` as `bbox.height * 0.72`, clamped to `[14, 88]`. Merge only consecutive OCR lines whose non-negative vertical gap is at most 75% of the smaller line height (minimum tolerance 4 px), whose left edges differ by at most 50% of the smaller estimated font size (minimum tolerance 4 px), and whose estimated font-size ratio is at most `1.2`; join their exact text with a newline and use the coordinate union.
+Use intersection-over-union greater than `0.5` to suppress duplicate text candidates. Estimate text color from the vision hint when present and default to `23394D`. Estimate each source line's `fontSizePx` as `bbox.height * 0.72`, clamped to `[14, 88]`. Merge only consecutive OCR lines whose non-negative vertical gap is at most 75% of the smaller line height (minimum tolerance 4 px), whose left edges differ by at most 50% of the smaller estimated font size (minimum tolerance 4 px), and whose estimated font-size ratio is at most `1.2`; join their exact text with a newline, use the coordinate union, and retain the median per-line estimate as the merged font size.
 
 - [ ] **Step 4: Run planner tests and all offline tests**
 
@@ -615,9 +615,10 @@ Run:
 ```bash
 npm test
 npm run build
+npm run test:compiled
 ```
 
-Expected: exit 0.
+Expected: exit 0. `npm test` runs source tests only; `npm run test:compiled` separately validates the freshly built JavaScript tests.
 
 - [ ] **Step 6: Execute the real API run**
 

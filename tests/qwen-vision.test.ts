@@ -43,15 +43,15 @@ test("strips one outer Markdown fence and validates vision elements", async () =
   assert.deepEqual(
     result.elements.find((element) => element.label === "perception tools panel"),
     {
-    type: "panel",
-    bbox: { x: 60, y: 241, width: 272, height: 343 },
-    label: "perception tools panel",
-    zIndex: 1,
-    editableAs: "native-shape",
-    confidence: 0.99,
-    fillColor: "F7F3E9",
-    strokeColor: "456A84",
-    cornerRadius: 20,
+      type: "panel",
+      bbox: { x: 60, y: 240, width: 273, height: 345 },
+      label: "perception tools panel",
+      zIndex: 1,
+      editableAs: "native-shape",
+      confidence: 0.99,
+      fillColor: "F7F3E9",
+      strokeColor: "456A84",
+      cornerRadius: 20,
     },
   );
   assert.ok(result.elements.some((element) => element.type === "icon"));
@@ -62,13 +62,26 @@ test("contains every recolorable slide 7 structure and six distinct movable asse
   const result = parseQwenVisionContent(fixture.choices[0]!.message.content);
   const nativeShapeLabels = result.elements
     .filter(
-    (element) =>
-      (element.type === "panel" || element.type === "shape") &&
-      element.editableAs === "native-shape" &&
-      element.confidence >= 0.9,
+      (element) =>
+        (element.type === "panel" || element.type === "shape") &&
+        element.editableAs === "native-shape" &&
+        element.confidence >= 0.9,
     )
     .map((element) => element.label)
     .sort();
+  const nativeShapeGeometry = Object.fromEntries(
+    result.elements
+      .filter(
+        (element) =>
+          (element.type === "panel" || element.type === "shape") &&
+          element.editableAs === "native-shape" &&
+          element.confidence >= 0.9,
+      )
+      .map((element) => [
+        element.label,
+        { bbox: element.bbox, cornerRadius: element.cornerRadius },
+      ]),
+  );
   const assetLabels = result.elements
     .filter(
       (element) =>
@@ -84,12 +97,47 @@ test("contains every recolorable slide 7 structure and six distinct movable asse
       "MCP ecosystem panel",
       "bottom navy bar",
       "collaboration tools panel",
+      "event-driven async Agent panel",
       "execution tools panel",
       "orange subtitle bar",
       "perception tools panel",
       "top section label",
     ].sort(),
   );
+  assert.deepEqual(nativeShapeGeometry, {
+    "top section label": {
+      bbox: { x: 17, y: 14, width: 242, height: 59 },
+      cornerRadius: 10,
+    },
+    "orange subtitle bar": {
+      bbox: { x: 135, y: 162, width: 1024, height: 56 },
+      cornerRadius: 8,
+    },
+    "perception tools panel": {
+      bbox: { x: 60, y: 240, width: 273, height: 345 },
+      cornerRadius: 20,
+    },
+    "execution tools panel": {
+      bbox: { x: 352, y: 240, width: 261, height: 345 },
+      cornerRadius: 20,
+    },
+    "collaboration tools panel": {
+      bbox: { x: 629, y: 240, width: 272, height: 345 },
+      cornerRadius: 20,
+    },
+    "MCP ecosystem panel": {
+      bbox: { x: 923, y: 240, width: 300, height: 173 },
+      cornerRadius: 20,
+    },
+    "event-driven async Agent panel": {
+      bbox: { x: 923, y: 425, width: 300, height: 163 },
+      cornerRadius: 20,
+    },
+    "bottom navy bar": {
+      bbox: { x: 42, y: 607, width: 1198, height: 82 },
+      cornerRadius: 10,
+    },
+  });
   assert.deepEqual(assetLabels, [
     "clock",
     "eye",
@@ -157,7 +205,7 @@ test("uses the compatible client with the requested model and constrained prompt
   try {
     const result = await analyzeElements(Buffer.from([0x89, 0x50]), config);
 
-    assert.equal(result.elements.length, 13);
+    assert.equal(result.elements.length, 14);
     assert.equal(calls.length, 1);
     assert.equal(
       calls[0]?.url,

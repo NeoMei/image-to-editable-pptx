@@ -44,7 +44,10 @@ import {
   parseQwenVisionContent,
 } from "./providers/qwen-vision.js";
 import { inpaintBackground } from "./providers/wanx-edit.js";
-import type { ProviderResponseObserver } from "./providers/response-observer.js";
+import {
+  sanitizeHttpResponseBody,
+  type ProviderResponseObserver,
+} from "./providers/response-observer.js";
 import { readRecording, writeRecording } from "./recording.js";
 
 const RawVisionRecordingSchema = z.object({
@@ -375,10 +378,16 @@ function parseErrorRecord(provider: "ocr" | "vision", error: unknown) {
 function responseObserver(
   outDir: string,
   provider: "ocr" | "vision",
+  apiKey: string,
 ): ProviderResponseObserver {
   return {
     recordRawResponse: (payload) =>
       writeRecording(join(outDir, `raw-responses/${provider}.json`), payload),
+    recordRawHttpResponse: (body) =>
+      writeRecording(
+        join(outDir, `raw-responses/${provider}.json`),
+        sanitizeHttpResponseBody(body, apiKey),
+      ),
     recordParseError: (error) =>
       writeRecording(
         join(outDir, `parse-errors/${provider}.json`),
@@ -414,7 +423,7 @@ export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisRes
     const ocrPromise = recognizeText(
       image,
       config,
-      responseObserver(outDir, "ocr"),
+      responseObserver(outDir, "ocr", config.apiKey),
     ).finally(() => {
       ocrDuration = elapsed(ocrStartedAt);
     });
@@ -422,7 +431,7 @@ export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisRes
     const visionPromise = analyzeElements(
       image,
       config,
-      responseObserver(outDir, "vision"),
+      responseObserver(outDir, "vision", config.apiKey),
     ).finally(() => {
       visionDuration = elapsed(visionStartedAt);
     });

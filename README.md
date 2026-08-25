@@ -101,6 +101,7 @@ ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key�
 npm test
 npm run lint:types
 npm run build
+npm run test:compiled
 ```
 
-端到端 pipeline 测试使用脱敏 OCR/Vision fixture 与注入的本地 Wanx 结果，不会访问网络。
+`npm test` 只运行 TypeScript 源测试；`npm run test:compiled` 在 build 后单独验证编译产物。端到端 pipeline 测试使用脱敏 OCR/Vision fixture 与注入的本地 Wanx 结果，不会访问网络。

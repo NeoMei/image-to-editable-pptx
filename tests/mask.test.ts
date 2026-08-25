@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import sharp from "sharp";
 
 import type { SlideElement } from "../src/contracts.js";
 import { buildRemovalMask } from "../src/image/mask.js";
+import { planSlide } from "../src/planner.js";
+import { parseQwenVisionContent } from "../src/providers/qwen-vision.js";
 
 async function maskPixels(mask: Buffer) {
   return sharp(mask).removeAlpha().raw().toBuffer({ resolveWithObject: true });
@@ -128,4 +132,25 @@ test("lets the SVG viewport naturally clip expanded rounded rectangles at an edg
 
   assert.equal(pixel(actualPixels.data, actualPixels.info.width, 0, 0), 255);
   assert.deepEqual(actualPixels.data, expectedPixels.data);
+});
+
+test("masks the inspected slide 7 bars and separated right panels without bridging their gap", async () => {
+  const rawVision = JSON.parse(
+    await readFile(resolve("tests/fixtures/qwen-vision-slide-07.json"), "utf8"),
+  ) as { choices: Array<{ message: { content: string } }> };
+  const vision = parseQwenVisionContent(
+    rawVision.choices[0]!.message.content,
+  );
+  const manifest = planSlide({ lines: [] }, vision);
+  const shapes = manifest.elements.filter((element) => element.kind === "shape");
+  const mask = await buildRemovalMask(1280, 720, shapes);
+  const { data, info } = await maskPixels(mask);
+
+  assert.equal(shapes.length, 8);
+  assert.equal(pixel(data, info.width, 18, 40), 255);
+  assert.equal(pixel(data, info.width, 136, 180), 255);
+  assert.equal(pixel(data, info.width, 44, 650), 255);
+  assert.equal(pixel(data, info.width, 1000, 300), 255);
+  assert.equal(pixel(data, info.width, 1000, 500), 255);
+  assert.equal(pixel(data, info.width, 1000, 419), 0);
 });
