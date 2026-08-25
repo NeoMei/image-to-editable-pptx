@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -26,6 +33,18 @@ function runScript(env: NodeJS.ProcessEnv): Promise<{
     child.on("close", (code) => resolveRun({ code, stdout, stderr }));
   });
 }
+
+test("acceptance script uses only the fidelity-first OCR and Vision path", async () => {
+  const script = await readFile(resolve("scripts/accept-slide-07.sh"), "utf8");
+
+  assert.doesNotMatch(script, /wanx/i);
+  assert.doesNotMatch(script, /inpaint/i);
+  assert.doesNotMatch(script, /DASHSCOPE_EDIT_MODEL/);
+  assert.match(
+    script,
+    /exec npm run cli -- run --image "\$SLIDE_IMAGE" --out output\/slide-07 --record/,
+  );
+});
 
 test("acceptance script preflights both credentials before invoking npm", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-accept-script-"));
