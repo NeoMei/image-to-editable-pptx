@@ -6,6 +6,9 @@ const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 const DASHSCOPE_RESULT_HOST_PATTERN =
   /^dashscope-result-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.oss-cn-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.aliyuncs\.com$/i;
+const DASHSCOPE_OBSERVED_RESULT_HOSTS = new Set([
+  "dashscope-5859.oss-cn-wulanchabu-acdr-1.aliyuncs.com",
+]);
 
 const INPAINT_PROMPT =
   "移除白色遮罩区域中的文字、图标、线条和面板边框，延续周围米白色纸张纹理与自然阴影，不添加任何新文字、符号、物体或装饰。";
@@ -81,7 +84,8 @@ function requireSafeResultUrl(candidate: string): string {
     url.password !== "" ||
     url.port !== "" ||
     url.hash !== "" ||
-    !DASHSCOPE_RESULT_HOST_PATTERN.test(url.hostname)
+    (!DASHSCOPE_RESULT_HOST_PATTERN.test(url.hostname) &&
+      !DASHSCOPE_OBSERVED_RESULT_HOSTS.has(url.hostname))
   ) {
     throw new Error("Expected a safe DashScope OSS result URL");
   }

@@ -10,6 +10,22 @@ import type { ProviderResponseObserver } from "./response-observer.js";
 
 const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+const NORMALIZED_COORDINATE_MAX = 1000;
+const CANVAS_WIDTH = 1280;
+const CANVAS_HEIGHT = 720;
+
+const NormalizedCoordinateSchema = z.number().finite();
+const NormalizedBBoxSchema = z
+  .tuple([
+    NormalizedCoordinateSchema,
+    NormalizedCoordinateSchema,
+    NormalizedCoordinateSchema,
+    NormalizedCoordinateSchema,
+  ])
+  .refine(
+    ([x1, y1, x2, y2]) => x2 > x1 && y2 > y1,
+    "x2/y2 must exceed x1/y1",
+  );
 
 const VisionPayloadSchema = z.object({
   elements: z.array(
@@ -23,7 +39,7 @@ const VisionPayloadSchema = z.object({
         "photo",
         "background",
       ]),
-      bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+      bbox: NormalizedBBoxSchema,
       label: z.string(),
       zIndex: z.number().int(),
       editableAs: z.enum(["text", "native-shape", "bitmap", "background"]),
@@ -36,13 +52,14 @@ const VisionPayloadSchema = z.object({
 });
 
 const VISION_PROMPT = `Analyze this slide and return JSON only, with no prose or Markdown.
-The canvas is exactly 1280 x 720 pixels.
+The source canvas is exactly 1280 x 720 pixels.
 Return {"elements":[...]} and use this exact element type enum:
 text | panel | shape | icon | illustration | photo | background
 For every element return type, bbox as [x1,y1,x2,y2], label, zIndex, editableAs, and confidence.
 editableAs must be one of: text | native-shape | bitmap | background.
 Optional visual hints are fillColor, strokeColor, and cornerRadius.
-Coordinates must remain inside the canvas and x2/y2 must exceed x1/y1.
+Use Qwen3-VL normalized integer coordinates from 0 to 999 for bbox, not source pixels.
+x2/y2 must exceed x1/y1.
 OCR is authoritative for text: do not duplicate OCR text as graphical assets.`;
 
 function requireSafeCompatibleBase(config: AppConfig): string {
@@ -102,15 +119,32 @@ export function parseQwenVisionContent(content: string): VisionResult {
     throw new Error("Invalid Qwen vision response", { cause: error });
   }
 
-  const elements = parsed.elements.map(({ bbox, ...element }) => ({
-    ...element,
-    bbox: {
-      x: bbox[0],
-      y: bbox[1],
-      width: bbox[2] - bbox[0],
-      height: bbox[3] - bbox[1],
-    },
-  }));
+  const elements = parsed.elements.map(({ bbox, ...element }) => {
+    const left = Math.round(
+      (bbox[0] / NORMALIZED_COORDINATE_MAX) * CANVAS_WIDTH,
+    );
+    const top = Math.round(
+      (bbox[1] / NORMALIZED_COORDINATE_MAX) * CANVAS_HEIGHT,
+    );
+    const right = Math.max(
+      left + 1,
+      Math.round((bbox[2] / NORMALIZED_COORDINATE_MAX) * CANVAS_WIDTH),
+    );
+    const bottom = Math.max(
+      top + 1,
+      Math.round((bbox[3] / NORMALIZED_COORDINATE_MAX) * CANVAS_HEIGHT),
+    );
+
+    return {
+      ...element,
+      bbox: {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+      },
+    };
+  });
 
   try {
     return VisionResultSchema.parse({ elements });

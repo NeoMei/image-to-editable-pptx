@@ -57,6 +57,19 @@ test("strips one outer Markdown fence and validates vision elements", async () =
   assert.ok(result.elements.some((element) => element.type === "icon"));
 });
 
+test("converts Qwen3-VL normalized coordinates to the 1280 by 720 canvas", () => {
+  const result = parseQwenVisionContent(
+    '{"elements":[{"type":"panel","bbox":[47,334,259,810],"label":"panel","zIndex":1,"editableAs":"native-shape","confidence":0.99}]}',
+  );
+
+  assert.deepEqual(result.elements[0]?.bbox, {
+    x: 60,
+    y: 240,
+    width: 272,
+    height: 343,
+  });
+});
+
 test("contains every recolorable slide 7 structure and six distinct movable assets", async () => {
   const fixture = await readFixture();
   const result = parseQwenVisionContent(fixture.choices[0]!.message.content);
@@ -110,7 +123,7 @@ test("contains every recolorable slide 7 structure and six distinct movable asse
       cornerRadius: 10,
     },
     "orange subtitle bar": {
-      bbox: { x: 135, y: 162, width: 1024, height: 56 },
+      bbox: { x: 134, y: 162, width: 1024, height: 56 },
       cornerRadius: 8,
     },
     "perception tools panel": {
@@ -122,15 +135,15 @@ test("contains every recolorable slide 7 structure and six distinct movable asse
       cornerRadius: 20,
     },
     "collaboration tools panel": {
-      bbox: { x: 629, y: 240, width: 272, height: 345 },
+      bbox: { x: 628, y: 240, width: 273, height: 345 },
       cornerRadius: 20,
     },
     "MCP ecosystem panel": {
-      bbox: { x: 923, y: 240, width: 300, height: 173 },
+      bbox: { x: 923, y: 240, width: 299, height: 173 },
       cornerRadius: 20,
     },
     "event-driven async Agent panel": {
-      bbox: { x: 923, y: 425, width: 300, height: 163 },
+      bbox: { x: 923, y: 425, width: 299, height: 163 },
       cornerRadius: 20,
     },
     "bottom navy bar": {
@@ -223,6 +236,7 @@ test("uses the compatible client with the requested model and constrained prompt
       /text \| panel \| shape \| icon \| illustration \| photo \| background/,
     );
     assert.match(serializedPrompt, /1280 x 720/);
+    assert.match(serializedPrompt, /normalized integer coordinates from 0 to 999/i);
     assert.match(serializedPrompt, /do not duplicate OCR text as graphical assets/i);
     assert.match(serializedPrompt, /data:image\/png;base64,iVA=/);
   } finally {

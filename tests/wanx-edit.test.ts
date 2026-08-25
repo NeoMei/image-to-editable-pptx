@@ -154,6 +154,45 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
   }
 });
 
+test("accepts the authenticated Wanx ACDR result bucket observed from Model Studio", async () => {
+  const originalFetch = globalThis.fetch;
+  const resultUrl =
+    "https://dashscope-5859.oss-cn-wulanchabu-acdr-1.aliyuncs.com/clean.png?Expires=123&OSSAccessKeyId=test&Signature=test";
+  const downloaded = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  let fetchCount = 0;
+
+  globalThis.fetch = async (input) => {
+    fetchCount += 1;
+    const url = String(input);
+    if (url.endsWith("/image-synthesis")) {
+      return Response.json({ output: { task_id: "task-acdr-result" } });
+    }
+    if (url.endsWith("/tasks/task-acdr-result")) {
+      return Response.json({
+        output: {
+          task_id: "task-acdr-result",
+          task_status: "SUCCEEDED",
+          results: [{ url: resultUrl }],
+        },
+      });
+    }
+    assert.equal(url, resultUrl);
+    return new Response(downloaded, { status: 200 });
+  };
+
+  try {
+    const result = await inpaintBackground(
+      Buffer.from("source"),
+      Buffer.from("mask"),
+      config,
+    );
+    assert.deepEqual(result.image, downloaded);
+    assert.equal(fetchCount, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("rejects provider-controlled result URLs outside the documented DashScope OSS family", async () => {
   const originalFetch = globalThis.fetch;
   const invalidUrls = [

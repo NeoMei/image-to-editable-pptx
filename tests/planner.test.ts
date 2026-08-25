@@ -197,7 +197,7 @@ test("clips Vision parser overflow and drops fully non-intersecting boxes", () =
       elements: [
         {
           type: "panel",
-          bbox: [1260, 700, 1320, 760],
+          bbox: [984, 972, 1031, 1056],
           label: "edge panel",
           zIndex: 1,
           editableAs: "native-shape",
@@ -205,7 +205,7 @@ test("clips Vision parser overflow and drops fully non-intersecting boxes", () =
         },
         {
           type: "icon",
-          bbox: [1300, 100, 1340, 140],
+          bbox: [1016, 139, 1047, 194],
           label: "outside icon",
           zIndex: 2,
           editableAs: "bitmap",
@@ -368,15 +368,15 @@ test("plans the slide 7 fixture into title text, panels, and movable assets", as
     ),
     {
       "top section label": { x: 17, y: 14, width: 242, height: 59 },
-      "orange subtitle bar": { x: 135, y: 162, width: 1024, height: 56 },
+      "orange subtitle bar": { x: 134, y: 162, width: 1024, height: 56 },
       "perception tools panel": { x: 60, y: 240, width: 273, height: 345 },
       "execution tools panel": { x: 352, y: 240, width: 261, height: 345 },
-      "collaboration tools panel": { x: 629, y: 240, width: 272, height: 345 },
-      "MCP ecosystem panel": { x: 923, y: 240, width: 300, height: 173 },
+      "collaboration tools panel": { x: 628, y: 240, width: 273, height: 345 },
+      "MCP ecosystem panel": { x: 923, y: 240, width: 299, height: 173 },
       "event-driven async Agent panel": {
         x: 923,
         y: 425,
-        width: 300,
+        width: 299,
         height: 163,
       },
       "bottom navy bar": { x: 42, y: 607, width: 1198, height: 82 },
