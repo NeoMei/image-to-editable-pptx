@@ -54,6 +54,7 @@ bash scripts/accept-slide-07.sh
 - `vision.json`：统一视觉元素候选；
 - `analysis-ledger.json`：经验证的分析 provenance、耗时、模型与哈希；
 - `recordings/*.json`：仅在 `--record` 时产生的脱敏、统一 replay 快照；
+- `.image-ppt-layers-output.json`：版本化的 pipeline ownership marker，用于安全识别可由本工具替换的输出目录；
 - `manifest.json`：最终文本、形状、资产与层级规划；
 - `removal-mask.png`：黑白合并移除遮罩；
 - `clean-background.png`：万相补全后的背景；
@@ -63,7 +64,11 @@ bash scripts/accept-slide-07.sh
 
 ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key、`Authorization`、access token 或 `x-dashscope-*` 头。
 
-完整 `run` 不会直接改写固定输出目录。它先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。
+完整 `run` 不会直接改写固定输出目录。它先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger、ownership marker 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。
+
+为避免误删用户文件，已存在的输出目录只有在 marker 是目标目录内的普通文件、且其 `markerVersion`/`appId`/`artifactKind` 通过严格 schema 验证时才能被替换。未标记、损坏、伪版本或符号链接 marker 的目录会被拒绝且内容保持不变。临时 backup 也会在移动后重新验证 marker，只有得到该 ownership 证据的 backup 才会递归删除。
+
+输出路径会经过 realpath/canonical 检查。文件系统根目录、空路径、`.`/项目根及其任一祖先、源图本身、源图父目录或其任一祖先都会被拒绝，即使其中放置了伪造 marker 也不例外。已存在的目标本身不能是符号链接，并且父路径中的链接别名会解析到真实位置后再判定，不能用于绕过上述边界。
 
 ## 发送到阿里云的数据
 

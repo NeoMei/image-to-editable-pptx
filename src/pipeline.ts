@@ -2,11 +2,21 @@ import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
+  lstat,
   readFile,
+  realpath,
   rename,
   rm,
 } from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 
 import sharp from "sharp";
 import { z } from "zod";
@@ -46,6 +56,22 @@ const DEFAULT_MODELS = {
   vision: "qwen3-vl-plus",
   edit: "wanx2.1-imageedit",
 } as const;
+
+export const OUTPUT_OWNERSHIP_MARKER =
+  ".image-ppt-layers-output.json";
+
+export const OutputOwnershipMarkerSchema = z
+  .object({
+    markerVersion: z.literal(1),
+    appId: z.literal("image-ppt-layers"),
+    artifactKind: z.literal("published-output"),
+  })
+  .strict();
+
+type OwnedOutputDirectory = {
+  path: string;
+  marker: z.infer<typeof OutputOwnershipMarkerSchema>;
+};
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -155,6 +181,128 @@ function sha256(content: Buffer | string): string {
 
 async function sha256File(path: string): Promise<string> {
   return sha256(await readFile(path));
+}
+
+function isSameOrAncestor(candidate: string, child: string): boolean {
+  const difference = relative(candidate, child);
+  return (
+    difference === "" ||
+    (!difference.startsWith("..") && !isAbsolute(difference))
+  );
+}
+
+async function canonicalizePotentialPath(path: string): Promise<string> {
+  let cursor = resolve(path);
+  const missingSegments: string[] = [];
+
+  while (true) {
+    try {
+      const canonicalExistingPath = await realpath(cursor);
+      return resolve(canonicalExistingPath, ...missingSegments.reverse());
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) throw error;
+      missingSegments.push(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+async function requireOwnedOutputDirectory(
+  directory: string,
+): Promise<OwnedOutputDirectory> {
+  let marker: z.infer<typeof OutputOwnershipMarkerSchema>;
+  try {
+    const markerPath = join(directory, OUTPUT_OWNERSHIP_MARKER);
+    const markerInfo = await lstat(markerPath);
+    if (markerInfo.isSymbolicLink() || !markerInfo.isFile()) {
+      throw new Error("Ownership marker must be a regular file");
+    }
+    marker = await readRecording(
+      markerPath,
+      OutputOwnershipMarkerSchema,
+    );
+  } catch (error) {
+    throw new Error(
+      `Refusing to replace unowned output directory: ${directory}`,
+      { cause: error },
+    );
+  }
+  return { path: directory, marker };
+}
+
+export async function validatePublicationTarget(options: {
+  targetPath: string;
+  sourceImagePath: string;
+}): Promise<{ targetDir: string; owned?: OwnedOutputDirectory }> {
+  if (options.targetPath.trim() === "") {
+    throw new Error("Unsafe output directory: path must not be empty");
+  }
+
+  const absoluteTarget = resolve(options.targetPath);
+  let targetExists = true;
+  let targetIsSymbolicLink = false;
+  let targetIsDirectory = false;
+  try {
+    const targetInfo = await lstat(absoluteTarget);
+    targetIsSymbolicLink = targetInfo.isSymbolicLink();
+    targetIsDirectory = targetInfo.isDirectory();
+  } catch (error) {
+    if (isNotFound(error)) {
+      targetExists = false;
+    } else {
+      throw error;
+    }
+  }
+
+  const [targetDir, sourceImage, cwd] = await Promise.all([
+    canonicalizePotentialPath(absoluteTarget),
+    realpath(options.sourceImagePath),
+    realpath(process.cwd()),
+  ]);
+  if (
+    dirname(targetDir) === targetDir ||
+    isSameOrAncestor(targetDir, cwd) ||
+    isSameOrAncestor(targetDir, sourceImage)
+  ) {
+    throw new Error(`Unsafe output directory: ${targetDir}`);
+  }
+
+  if (targetIsSymbolicLink) {
+    throw new Error(
+      `Unsafe output directory: symbolic-link targets are not allowed: ${absoluteTarget}`,
+    );
+  }
+  if (targetExists && !targetIsDirectory) {
+    throw new Error(
+      `Refusing to replace unowned output directory: ${absoluteTarget}`,
+    );
+  }
+
+  if (!targetExists) return { targetDir };
+  return {
+    targetDir,
+    owned: await requireOwnedOutputDirectory(targetDir),
+  };
+}
+
+async function writeOwnershipMarker(directory: string): Promise<void> {
+  await writeRecording(
+    join(directory, OUTPUT_OWNERSHIP_MARKER),
+    OutputOwnershipMarkerSchema.parse({
+      markerVersion: 1,
+      appId: "image-ppt-layers",
+      artifactKind: "published-output",
+    }),
+  );
+}
+
+async function removeOwnedOutputDirectory(
+  owned: OwnedOutputDirectory,
+): Promise<void> {
+  OutputOwnershipMarkerSchema.parse(owned.marker);
+  await rm(owned.path, { recursive: true, force: true });
 }
 
 async function readReplayOcr(path: string): Promise<OcrResult> {
@@ -455,12 +603,17 @@ async function buildFromAnalysis(
       pptx: join(publishedOutDir, outputName(imagePath)),
     },
   });
+  await writeOwnershipMarker(outDir);
 
   return { outDir, manifestPath, pptxPath, ledgerPath };
 }
 
 export async function buildSlide(options: BuildOptions): Promise<PipelineResult> {
   const startedAt = performance.now();
+  const publication = await validatePublicationTarget({
+    targetPath: options.outDir,
+    sourceImagePath: options.imagePath,
+  });
   const analysisDir = resolve(options.analysisDir);
   const image = await readFile(options.imagePath);
   const ledger = await readRecording(
@@ -484,7 +637,10 @@ export async function buildSlide(options: BuildOptions): Promise<PipelineResult>
       throw new Error(`Analysis provenance hash mismatch: ${key}`);
     }
   }
-  return buildFromAnalysis(options, { analysis, startedAt });
+  return buildFromAnalysis(
+    { ...options, outDir: publication.targetDir },
+    { analysis, startedAt },
+  );
 }
 
 function isNotFound(error: unknown): boolean {
@@ -499,15 +655,25 @@ function isNotFound(error: unknown): boolean {
 async function promoteSuccessfulRun(
   stagingDir: string,
   targetDir: string,
+  sourceImagePath: string,
 ): Promise<void> {
   const backupDir = `${targetDir}.previous-${basename(stagingDir)}`;
   let hadPreviousTarget = false;
+  let ownedBackup: OwnedOutputDirectory | undefined;
 
-  try {
+  const publication = await validatePublicationTarget({
+    targetPath: targetDir,
+    sourceImagePath,
+  });
+  if (publication.owned !== undefined) {
     await rename(targetDir, backupDir);
     hadPreviousTarget = true;
-  } catch (error) {
-    if (!isNotFound(error)) throw error;
+    try {
+      ownedBackup = await requireOwnedOutputDirectory(backupDir);
+    } catch (error) {
+      await rename(backupDir, targetDir);
+      throw error;
+    }
   }
 
   try {
@@ -519,8 +685,8 @@ async function promoteSuccessfulRun(
     throw error;
   }
 
-  if (hadPreviousTarget) {
-    await rm(backupDir, { recursive: true, force: true }).catch(() => {});
+  if (ownedBackup !== undefined) {
+    await removeOwnedOutputDirectory(ownedBackup);
   }
 }
 
@@ -544,12 +710,16 @@ export async function runPipeline(
   options: RunPipelineOptions,
 ): Promise<PipelineResult> {
   const startedAt = performance.now();
+  const publication = await validatePublicationTarget({
+    targetPath: options.outDir,
+    sourceImagePath: options.imagePath,
+  });
   const config =
     options.config ??
     (options.replay === undefined || options.inpaint === undefined
       ? loadConfig()
       : undefined);
-  const targetDir = resolve(options.outDir);
+  const targetDir = publication.targetDir;
   const targetParent = dirname(targetDir);
   await mkdir(targetParent, { recursive: true });
   const stagingDir = await mkdtemp(
@@ -574,7 +744,7 @@ export async function runPipeline(
       },
       { analysis, startedAt, publishedOutDir: targetDir },
     );
-    await promoteSuccessfulRun(stagingDir, targetDir);
+    await promoteSuccessfulRun(stagingDir, targetDir, options.imagePath);
     return {
       outDir: targetDir,
       manifestPath: join(targetDir, "manifest.json"),

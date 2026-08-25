@@ -127,7 +127,7 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
     assert.equal(typeof ledger.hashes.pptx, "string");
     assert.equal(
       ledger.outputs.pptx,
-      join(outDir, "slide-07-editable.pptx"),
+      result.pptxPath,
     );
     assert.doesNotMatch(
       ledgerText,
@@ -352,6 +352,14 @@ test("failed rerun preserves the previous successful target without mixed artifa
       writeFile(join(outDir, "slide-07-editable.pptx"), "old-pptx"),
       writeFile(join(outDir, "run-ledger.json"), '{"old":true}\n'),
       writeFile(join(outDir, "assets/old.png"), "old-asset"),
+      writeFile(
+        join(outDir, ".image-ppt-layers-output.json"),
+        `${JSON.stringify({
+          markerVersion: 1,
+          appId: "image-ppt-layers",
+          artifactKind: "published-output",
+        })}\n`,
+      ),
     ]);
     const before = await snapshotTree(outDir);
 
@@ -385,6 +393,115 @@ test("failed rerun preserves the previous successful target without mixed artifa
     await assert.rejects(
       access(join(failedRun, "slide-07-editable.pptx")),
       /ENOENT/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("refuses to replace an unowned output directory and leaves it unchanged", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-unowned-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    await mkdir(join(outDir, "user-files"), { recursive: true });
+    await Promise.all([
+      writeFile(join(outDir, "sentinel.txt"), "must-survive\n"),
+      writeFile(join(outDir, "user-files/data.bin"), "user-data"),
+    ]);
+    const before = await snapshotTree(outDir);
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+        inpaint: async () => ({ image: source, taskId: "must-not-run" }),
+      }),
+      /Refusing to replace unowned output directory/,
+    );
+
+    assert.deepEqual(await snapshotTree(outDir), before);
+    await assert.rejects(access(`${outDir}.failed-runs`), /ENOENT/);
+    assert.ok(
+      (await readdir(directory)).every(
+        (name) => !name.includes(".staging-") && !name.includes(".previous-"),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("atomically replaces an output created and marked by this pipeline", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-owned-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .png()
+      .toBuffer();
+    await sharp(source).toFile(imagePath);
+    const replay = {
+      ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+      visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+    };
+
+    await runPipeline({
+      imagePath,
+      outDir,
+      replay,
+      inpaint: async () => ({ image: source, taskId: "owned-first" }),
+    });
+    const markerPath = join(outDir, ".image-ppt-layers-output.json");
+    assert.deepEqual(JSON.parse(await readFile(markerPath, "utf8")), {
+      markerVersion: 1,
+      appId: "image-ppt-layers",
+      artifactKind: "published-output",
+    });
+
+    await runPipeline({
+      imagePath,
+      outDir,
+      replay,
+      inpaint: async () => ({ image: source, taskId: "owned-second" }),
+    });
+
+    const ledger = JSON.parse(
+      await readFile(join(outDir, "run-ledger.json"), "utf8"),
+    ) as { taskIds: { wanx: string } };
+    assert.equal(ledger.taskIds.wanx, "owned-second");
+    assert.deepEqual(JSON.parse(await readFile(markerPath, "utf8")), {
+      markerVersion: 1,
+      appId: "image-ppt-layers",
+      artifactKind: "published-output",
+    });
+    const siblings = await readdir(directory);
+    assert.ok(
+      siblings.every((name) => !name.includes(".previous-") && !name.includes(".staging-")),
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
