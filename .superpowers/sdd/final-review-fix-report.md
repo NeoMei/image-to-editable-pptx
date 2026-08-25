@@ -92,6 +92,7 @@
 
 - Starting head: `ca91dddef99ccc5f7de94026d48a61ce8a1c31aa`
 - Implementation commit: `f94a9c4` (`fix: address second final review findings`)
+- Self-review hardening commit: `47086f9` (`fix: redact quoted response credentials`)
 - Network policy: no live API calls were made. Provider tests used mocked `fetch`; pipeline tests used sanitized fixtures and injected local inpainting.
 - Source inspection: the required 1280×720 `source-slide-07.png` was opened at original detail before choosing geometry. It shows the orange bar at approximately `(135,162)..(1159,218)`, bottom navy bar at `(42,607)..(1240,689)`, three main panels, and two separate right-side panels with a visible gap.
 
@@ -129,6 +130,8 @@
    - `npm test -- tests/pipeline.test.ts` -> exit 1, 10/13 pass and 3 expected failures (one fixture geometry plus two malformed outer bodies).
    - `npm test -- tests/package-scripts.test.ts` -> exit 1, 0/1 pass.
 3. Focused GREEN: `node --import tsx --test tests/planner.test.ts tests/mask.test.ts tests/qwen-vision.test.ts tests/pipeline.test.ts tests/package-scripts.test.ts` -> 35/35 pass.
+   - Self-review RED: after adding quoted `"apiKey":"..."` and `"Authorization":"Bearer ..."` canaries, `node --import tsx --test tests/pipeline.test.ts` -> exit 1, 11/13 pass; both outer-body regressions exposed quoted field names and the nonstandard API-key value.
+   - Self-review GREEN: the assignment sanitizer now accepts quoted or unquoted credential keys/values; the same focused pipeline command -> 13/13 pass.
 4. Source-only full suite: `npm test` -> 78/78 pass.
 5. `npm run lint:types` -> exit 0.
 6. `npm run build` -> exit 0.
@@ -141,5 +144,6 @@
 ### Round 2 self-review and concerns
 
 - Self-review traced the normal/invalid outer/invalid inner provider paths, confirmed both provider promises still settle before failed staging moves, and found no bypass of output ownership, canonical-path validation, redirect rejection, or recording sanitization.
+- The self-review quoted-assignment gap was closed with its own RED/GREEN cycle before handoff; final source and compiled suites include those stronger canaries.
 - `dist` is generated and ignored. It was rebuilt only for the explicit compiled validation and is not committed.
 - No Alibaba credentials were available. The official-envelope behavior and failed-response evidence are verified offline with mocked transport, not by a live authenticated call.
