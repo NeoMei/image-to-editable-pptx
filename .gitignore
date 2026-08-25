@@ -1,0 +1,8 @@
+.worktrees/
+.superpowers/
+.codex-tmp/
+node_modules/
+dist/
+output/
+.env
+*.log
