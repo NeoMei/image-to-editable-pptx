@@ -29,3 +29,9 @@ Final clean-install verification: 154/154 source tests, 154/154 compiled tests, 
 Final artifact verification: 10 editable texts, 4 transparent assets, 0 shapes, 1 icon retained in background, 0 warnings/task IDs, 14/14 artifact/ledger reconciliation, 10/10 text span/anchor, no overflow, and WPS edit/move/undo/explicit-no-save smoke.
 Implementation commit: a7770b0.
 Deliverable SHA-256: 6d96f6505196b34712e37c4c891fc06f967035574939472a7e06bda84cbd43c0.
+
+Independent second comprehensive audit (2026-08-26): complete after three fresh review/test passes.
+Confirmed and fixed with RED/GREEN regressions: post-preflight failed-run symlink redirection, secondary retention error masking the primary failure, non-PNG 1280x720 input acceptance, and integrated analyze/build source-replacement provenance mismatch.
+Final clean-install verification: 158/158 source tests, 158/158 compiled tests, typecheck/build/diff-check clean; experimental coverage 97.39% line, 86.71% branch, 98.43% function.
+Fresh artifact verification: 10 editable texts, 4 transparent assets, 0 shapes, 1 icon retained in background, 0 warnings/task IDs, exact decision/manifest/hash reconciliation, 10/10 text span/anchor, no overflow, and WPS title/slogan edit plus icon move/undo/explicit-no-save smoke.
+Fresh deliverable SHA-256: f17cbaa29e8f19cc87dc204c5db0994dd48aa3039dc7205ecd275ae52aaa7a3d.
