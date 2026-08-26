@@ -288,6 +288,17 @@ export async function validatePublicationTarget(options: {
     );
   }
 
+  try {
+    const failedRootInfo = await lstat(`${targetDir}.failed-runs`);
+    if (failedRootInfo.isSymbolicLink() || !failedRootInfo.isDirectory()) {
+      throw new Error(
+        `Unsafe failed-run directory: ${targetDir}.failed-runs`,
+      );
+    }
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+  }
+
   if (!targetExists) return { targetDir };
   return {
     targetDir,

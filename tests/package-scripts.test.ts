@@ -18,3 +18,11 @@ test("scopes source and compiled test scripts to their own trees", async () => {
     'node --test "dist/tests/*.test.js"',
   );
 });
+
+test("uses the patched Sharp line for untrusted slide images", async () => {
+  const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+
+  assert.equal(packageJson.dependencies.sharp, "^0.35.3");
+});

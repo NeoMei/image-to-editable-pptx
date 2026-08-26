@@ -85,3 +85,23 @@ test("does not accept a symlinked ownership marker", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("rejects a symlinked failed-run directory before publication starts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-publication-failed-root-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const targetPath = join(directory, "output");
+  const external = join(directory, "external-failed-runs");
+
+  try {
+    await writeFile(imagePath, "source-image", "utf8");
+    await mkdir(external);
+    await symlink(external, `${targetPath}.failed-runs`);
+
+    await assert.rejects(
+      validatePublicationTarget({ targetPath, sourceImagePath: imagePath }),
+      /Unsafe failed-run directory/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

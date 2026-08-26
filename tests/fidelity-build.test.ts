@@ -236,6 +236,30 @@ test("keeps a failed icon in the background and continues", async () => {
   assert.equal(result.decisions.at(-1)?.decision, "kept_in_background");
 });
 
+test("rejects an icon repair that changes pixels outside its mask", async () => {
+  const { source, mask, transparentAsset } = await fixtures();
+  const dependencies = passingDependencies(source, mask, transparentAsset);
+  let repairCalls = 0;
+  dependencies.repair = async () => {
+    repairCalls += 1;
+    return {
+      image: source,
+      accepted: true,
+      metrics: {
+        ...repairMetrics,
+        outsideMaskChangedPixels: repairCalls === 3 ? 1 : 0,
+      },
+    };
+  };
+
+  const result = await buildFidelityLayers(source, makePlan(1), dependencies);
+
+  assert.equal(result.manifest.elements.some((item) => item.kind === "asset"), false);
+  assert.deepEqual(result.background, source);
+  assert.equal(result.decisions.at(-1)?.decision, "kept_in_background");
+  assert.equal(result.decisions.at(-1)?.reason, "outside_mask_changed");
+});
+
 test("extracts icons from the source and rejects destructive OCR overlap", async () => {
   const { source, transparentAsset } = await fixtures();
   const rawMask = Buffer.alloc(1280 * 720);

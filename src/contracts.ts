@@ -216,6 +216,7 @@ export const CandidateDecisionSchema = z.object({
     "mask_empty",
     "opaque_border_ratio_above_2_percent",
     "ocr_text_overlap_above_1_percent",
+    "outside_mask_changed",
     "recomposition_mismatch",
     "surface_samples_insufficient",
     "surface_variance_too_high",

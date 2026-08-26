@@ -62,11 +62,11 @@ bash scripts/accept-slide-07.sh
 - `<source-name>-editable.pptx`：可编辑的宽屏 PowerPoint；
 - `run-ledger.json`：ledger v2，包含每个文字/图标候选的接受或保留背景决策、修复/重组指标、模型 ID、阶段耗时、告警、输出路径及所有主要产物的 SHA-256；默认路径的 `taskIds` 为空。
 
-ledger 和 JSON 录制使用递归脱敏写入器，不写入 API Key、`Authorization`、access token、Bearer 凭证、带签名查询的 URL 或 `x-dashscope-*` 头。Live OCR/Vision 响应会在解析前做值级脱敏和确定性大小/深度/节点界限后写入 staging；正常解析后该临时原始响应被移除，如果 schema/JSON 解析失败，脱敏的 `raw-responses/<provider>.json` 与 `parse-errors/<provider>.json` 会一起留在失败运行目录中。
+ledger、ownership marker 和 JSON 录制使用递归脱敏写入器，并以仅当前用户可读写的 `0600` 权限创建；不会写入 API Key、`Authorization`、access token、Bearer 凭证、带签名查询的 URL 或 `x-dashscope-*`/`x-acs-*`/`x-oss-*` 头。Live OCR/Vision 响应会在解析前做值级脱敏和确定性大小/深度/节点界限后写入 staging；无法解析为 JSON 时也复用同一套文本脱敏规则。正常解析后该临时原始响应被移除，如果 schema/JSON 解析失败，脱敏的 `raw-responses/<provider>.json` 与 `parse-errors/<provider>.json` 会一起留在失败运行目录中。
 
 `run` 和独立 `build` 都不会直接改写固定输出目录。它们先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger、ownership marker 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。成功的小 manifest 重跑会整体替换旧目录，因此不会残留旧 asset 或 recording。
 
-为避免误删用户文件，已存在的输出目录只有在 marker 是目标目录内的普通文件、且其 `markerVersion`/`appId`/`artifactKind` 通过严格 schema 验证时才能被替换。未标记、损坏、伪版本或符号链接 marker 的目录会被拒绝且内容保持不变。临时 backup 也会在移动后重新验证 marker，只有得到该 ownership 证据的 backup 才会递归删除。
+为避免误删用户文件，已存在的输出目录只有在 marker 是目标目录内的普通文件、且其 `markerVersion`/`appId`/`artifactKind` 通过严格 schema 验证时才能被替换。未标记、损坏、伪版本或符号链接 marker 的目录会被拒绝且内容保持不变。`<output-dir>.failed-runs` 如果已存在，也必须是普通目录，符号链接或其他文件类型会在 staging/网络操作之前被拒绝。临时 backup 会在移动后重新验证 marker，只有得到该 ownership 证据的 backup 才会递归删除。
 
 输出路径会经过 realpath/canonical 检查。文件系统根目录、空路径、`.`/项目根及其任一祖先、源图本身、源图父目录或其任一祖先都会被拒绝，即使其中放置了伪造 marker 也不例外。已存在的目标本身不能是符号链接，并且父路径中的链接别名会解析到真实位置后再判定，不能用于绕过上述边界。
 

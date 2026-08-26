@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -213,11 +220,32 @@ test("round-trips a sanitized fixture through a supplied Zod schema", async () =
     });
 
     const parsed = await readRecording(recordingPath, schema);
+    const mode = (await stat(recordingPath)).mode & 0o777;
 
     assert.deepEqual(parsed, {
       requestId: "request-123",
       output: { text: "hello" },
     });
+    assert.equal(mode, 0o600);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("refuses to follow a pre-existing recording symlink", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-recording-symlink-"));
+  const externalPath = join(directory, "external.json");
+  const recordingPath = join(directory, "fixture.json");
+
+  try {
+    await writeFile(externalPath, "external-content", "utf8");
+    await symlink(externalPath, recordingPath);
+
+    await assert.rejects(
+      writeRecording(recordingPath, { safe: "recording" }),
+      /ELOOP|EEXIST/,
+    );
+    assert.equal(await readFile(externalPath, "utf8"), "external-content");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

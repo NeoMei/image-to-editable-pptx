@@ -208,7 +208,10 @@ export async function buildFidelityLayers(
       continue;
     }
     const repaired = await dependencies.repair(background, mask);
-    if (!repaired.accepted) {
+    if (
+      !repaired.accepted ||
+      repaired.metrics.outsideMaskChangedPixels !== 0
+    ) {
       decisions.push({
         candidateId: candidate.id,
         kind: "icon",
@@ -217,7 +220,10 @@ export async function buildFidelityLayers(
         sourceElementIndexes: candidate.sourceElementIndexes,
         repairMethod: "local_nearest_surface",
         extraction: "transparent",
-        reason: repaired.reason ?? "local_repair_failed",
+        reason:
+          repaired.metrics.outsideMaskChangedPixels !== 0
+            ? "outside_mask_changed"
+            : repaired.reason ?? "local_repair_failed",
         repairMetrics: repaired.metrics,
         output: { state: "kept_in_background" },
       });

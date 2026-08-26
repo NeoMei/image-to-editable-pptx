@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { z } from "zod";
@@ -59,11 +60,20 @@ const PROVIDER_CREDENTIAL =
   /\b(?:sk-[a-z0-9_-]{8,}|LTAI[a-z0-9]{12,})\b/gi;
 const PROVIDER_SECRET_HEADER_ASSIGNMENT =
   /\b(?:x-dashscope|x-acs|x-aliyun|x-alibaba|x-oss)-[a-z0-9-]+\s*[:=]\s*[^\s,;}"']+/gi;
+const QUOTED_CREDENTIAL_VALUE_ASSIGNMENT =
+  /(["'])([^"'\\\r\n]{1,64})\1\s*[:=]\s*(["'])([^"'\\\r\n]{0,8192})\3/gi;
+const QUOTED_CREDENTIAL_ASSIGNMENT =
+  /(["'])([^"'\\\r\n]{1,64})\1\s*[:=]\s*(["']?)(?:bearer\s+)?[^\s,;}"']+\3/gi;
+const BARE_CREDENTIAL_ASSIGNMENT =
+  /\b([a-z][a-z0-9._-]{0,63})\s*[:=]\s*(["']?)(?:bearer\s+)?[^\s,;}"']+\2/gi;
 const SIGNED_QUERY_KEY =
   /(?:signature|accesskey|securitytoken|expires)/i;
 const URL_CANDIDATE = /https?:\/\/[^\s<>"']+/gi;
 
-function redactProviderString(value: string, configuredApiKey: string): string {
+export function redactProviderText(
+  value: string,
+  configuredApiKey: string,
+): string {
   let sanitized = value;
   if (configuredApiKey.length > 0) {
     sanitized = sanitized.split(configuredApiKey).join("[REDACTED]");
@@ -71,6 +81,24 @@ function redactProviderString(value: string, configuredApiKey: string): string {
   sanitized = sanitized
     .replace(PROVIDER_BEARER, "[REDACTED]")
     .replace(PROVIDER_CREDENTIAL, "[REDACTED]");
+  const redactAssignment = (match: string, key: string): string =>
+    isSensitiveKey(key) || PROVIDER_SECRET_HEADER.test(key)
+      ? "[REDACTED]"
+      : match;
+  sanitized = sanitized
+    .replace(
+      QUOTED_CREDENTIAL_VALUE_ASSIGNMENT,
+      (match, _keyQuote: string, key: string) =>
+        redactAssignment(match, key),
+    )
+    .replace(
+      QUOTED_CREDENTIAL_ASSIGNMENT,
+      (match, _quote: string, key: string) => redactAssignment(match, key),
+    )
+    .replace(
+      BARE_CREDENTIAL_ASSIGNMENT,
+      (match, key: string) => redactAssignment(match, key),
+    );
   sanitized = sanitized.replace(URL_CANDIDATE, (candidate) => {
     try {
       const url = new URL(candidate);
@@ -132,7 +160,7 @@ export function sanitizeProviderRecording(
       return boundString("[TRUNCATED_DEPTH_LIMIT]", 23, "value");
     }
     if (typeof value === "string") {
-      const sanitized = redactProviderString(value, configuredApiKey);
+      const sanitized = redactProviderText(value, configuredApiKey);
       return boundString(
         sanitized,
         MAX_PROVIDER_RECORDING_STRING_CHARS,
@@ -206,7 +234,7 @@ export function sanitizeProviderRecording(
           });
           continue;
         }
-        const redactedKey = redactProviderString(key, configuredApiKey);
+        const redactedKey = redactProviderText(key, configuredApiKey);
         let outputKey = boundString(
           redactedKey === key ? key : `[REDACTED_KEY_${index}]`,
           MAX_PROVIDER_RECORDING_KEY_CHARS,
@@ -309,7 +337,20 @@ export async function writeRecording(
   }
 
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${serialized}\n`, "utf8");
+  const file = await open(
+    path,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_TRUNC |
+      constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    await file.chmod(0o600);
+    await file.writeFile(`${serialized}\n`, "utf8");
+  } finally {
+    await file.close();
+  }
 }
 
 export async function readRecording<T>(
