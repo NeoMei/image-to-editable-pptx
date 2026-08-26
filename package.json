@@ -23,7 +23,7 @@
     "build": "tsc -p tsconfig.json",
     "measure:text-span": "tsx scripts/measure-text-span.ts",
     "test": "node --import tsx --test \"tests/*.test.ts\"",
-    "test:compiled": "node --test \"dist/tests/*.test.js\"",
+    "test:compiled": "node --experimental-detect-module --test \"dist/tests/*.test.js\"",
     "lint:types": "tsc -p tsconfig.json --noEmit",
     "cli": "tsx src/cli.ts"
   },

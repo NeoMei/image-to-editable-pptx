@@ -68,6 +68,46 @@ function createSuccessfulTaskFetch(
   };
 }
 
+function rejectWhenAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(watchdog);
+      reject(signal.reason);
+    };
+    const watchdog = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new Error("Expected the deadline signal to abort"));
+    }, 1_000);
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function streamThatErrorsWhenAborted(
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      const onAbort = () => {
+        clearTimeout(watchdog);
+        controller.error(signal.reason);
+      };
+      const watchdog = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        controller.error(new Error("Expected the deadline signal to abort"));
+      }, 1_000);
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    },
+  });
+}
+
 test("submits masked PNGs, polls pending and running states, then downloads the succeeded image", async () => {
   const originalFetch = globalThis.fetch;
   const calls: FetchCall[] = [];
@@ -332,14 +372,7 @@ test("classifies an in-flight poll deadline abort as timeout and preserves task_
 
     const signal = init?.signal;
     assert.ok(signal);
-    return new Promise<Response>((_resolve, reject) => {
-      const rejectWithSignalReason = () => reject(signal.reason);
-      if (signal.aborted) {
-        rejectWithSignalReason();
-        return;
-      }
-      signal.addEventListener("abort", rejectWithSignalReason, { once: true });
-    });
+    return rejectWhenAborted(signal);
   };
 
   try {
@@ -375,18 +408,7 @@ test("classifies a poll response body deadline abort as timeout and preserves ta
 
     const signal = init?.signal;
     assert.ok(signal);
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) {
-        const failBodyWithSignalReason = () => controller.error(signal.reason);
-        if (signal.aborted) {
-          failBodyWithSignalReason();
-          return;
-        }
-        signal.addEventListener("abort", failBodyWithSignalReason, {
-          once: true,
-        });
-      },
-    });
+    const body = streamThatErrorsWhenAborted(signal);
     return new Response(body, {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -451,16 +473,7 @@ test("classifies an in-flight result download deadline abort as timeout and pres
     async (_input, init) => {
       const signal = init?.signal;
       assert.ok(signal);
-      return new Promise<Response>((_resolve, reject) => {
-        const rejectWithSignalReason = () => reject(signal.reason);
-        if (signal.aborted) {
-          rejectWithSignalReason();
-          return;
-        }
-        signal.addEventListener("abort", rejectWithSignalReason, {
-          once: true,
-        });
-      });
+      return rejectWhenAborted(signal);
     },
   );
 
@@ -491,19 +504,7 @@ test("classifies a result download body deadline abort as timeout and preserves 
     async (_input, init) => {
       const signal = init?.signal;
       assert.ok(signal);
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          const failBodyWithSignalReason = () =>
-            controller.error(signal.reason);
-          if (signal.aborted) {
-            failBodyWithSignalReason();
-            return;
-          }
-          signal.addEventListener("abort", failBodyWithSignalReason, {
-            once: true,
-          });
-        },
-      });
+      const body = streamThatErrorsWhenAborted(signal);
       return new Response(body, {
         status: 200,
         headers: { "Content-Type": "image/png" },

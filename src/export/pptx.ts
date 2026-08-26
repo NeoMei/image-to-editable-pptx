@@ -5,11 +5,22 @@ import type { BBox, SlideManifest } from "../contracts.js";
 const SLIDE_WIDTH_INCHES = 13.333;
 const SLIDE_HEIGHT_INCHES = 7.5;
 
-// PptxGenJS 4.0.1's declaration file is interpreted as CommonJS by NodeNext,
-// adding a type-only extra `default` layer that is absent from its ESM runtime.
+// tsx on Node 22.6 exposes PptxGenJS as `{ default: constructor }`, while
+// newer Node runtimes expose the constructor directly. Normalize both shapes.
 type PptxGenConstructor = typeof PptxGenJS.default.default;
-const PptxGenConstructor =
-  PptxGenJS.default as unknown as PptxGenConstructor;
+const runtimeDefault: unknown = PptxGenJS.default;
+const runtimeConstructor =
+  typeof runtimeDefault === "function"
+    ? runtimeDefault
+    : typeof runtimeDefault === "object" &&
+        runtimeDefault !== null &&
+        "default" in runtimeDefault
+      ? runtimeDefault.default
+      : undefined;
+if (typeof runtimeConstructor !== "function") {
+  throw new TypeError("PptxGenJS did not expose a constructor");
+}
+const PptxGenConstructor = runtimeConstructor as PptxGenConstructor;
 
 const pxToX = (px: number): number => (px * SLIDE_WIDTH_INCHES) / 1280;
 const pxToY = (px: number): number => (px * SLIDE_HEIGHT_INCHES) / 720;

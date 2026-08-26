@@ -22,7 +22,7 @@ test("scopes source and compiled test scripts to their own trees", async () => {
   );
   assert.equal(
     packageJson.scripts["test:compiled"],
-    'node --test "dist/tests/*.test.js"',
+    'node --experimental-detect-module --test "dist/tests/*.test.js"',
   );
 });
 
