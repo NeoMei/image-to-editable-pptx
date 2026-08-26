@@ -359,6 +359,11 @@ function configuredModels(config?: AppConfig): {
 
 async function inspectSourceImage(image: Buffer): Promise<void> {
   const metadata = await sharp(image).metadata();
+  if (metadata.format !== "png") {
+    throw new Error(
+      `Source image must be a PNG; received ${metadata.format ?? "unknown"}`,
+    );
+  }
   if (metadata.width !== 1280 || metadata.height !== 720) {
     throw new Error(
       `Source image must be exactly 1280x720 pixels; received ${metadata.width ?? "unknown"}x${metadata.height ?? "unknown"}`,
@@ -551,6 +556,9 @@ async function buildFromAnalysis(
   const imagePath = resolve(options.imagePath);
   const image = await readFile(imagePath);
   await inspectSourceImage(image);
+  if (sha256(image) !== context.analysis.ledger.hashes.sourceImage) {
+    throw new Error("Analysis provenance hash mismatch: sourceImage");
+  }
   const assetsDir = join(outDir, "assets");
   await mkdir(assetsDir, { recursive: true });
   await Promise.all([
@@ -756,6 +764,15 @@ function isNotFound(error: unknown): boolean {
   );
 }
 
+function isAlreadyExists(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "EEXIST"
+  );
+}
+
 async function promoteSuccessfulRun(
   stagingDir: string,
   targetDir: string,
@@ -799,7 +816,20 @@ async function retainFailedRun(
   targetDir: string,
 ): Promise<void> {
   const failedRoot = `${targetDir}.failed-runs`;
-  await mkdir(failedRoot, { recursive: true });
+  try {
+    await mkdir(failedRoot, { mode: 0o700 });
+  } catch (error) {
+    if (!isAlreadyExists(error)) return;
+  }
+  let failedRootInfo;
+  try {
+    failedRootInfo = await lstat(failedRoot);
+  } catch {
+    return;
+  }
+  if (failedRootInfo.isSymbolicLink() || !failedRootInfo.isDirectory()) {
+    return;
+  }
   const failedDir = join(failedRoot, basename(stagingDir));
   try {
     await rename(stagingDir, failedDir);

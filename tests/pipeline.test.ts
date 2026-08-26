@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -291,6 +294,90 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
       .async("string");
     assert.match(slideXml, /<a:t>第 4 章 工具<\/a:t>/);
     assert.doesNotMatch(slideXml, /name="shape-/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects a non-PNG source even when it has the required dimensions and extension", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-source-format-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "analysis");
+
+  try {
+    const jpeg = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    })
+      .jpeg()
+      .toBuffer();
+    await writeFile(imagePath, jpeg);
+
+    await assert.rejects(
+      analyzeSlide({
+        imagePath,
+        outDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+      }),
+      /Source image must be a PNG; received jpeg/,
+    );
+    await assert.rejects(access(outDir));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects a source image replaced between integrated analysis and build", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-source-race-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    const [analyzedSource, replacementSource] = await Promise.all([
+      sharp({
+        create: {
+          width: 1280,
+          height: 720,
+          channels: 3,
+          background: "#f7f3e9",
+        },
+      }).png().toBuffer(),
+      sharp({
+        create: {
+          width: 1280,
+          height: 720,
+          channels: 3,
+          background: "#23394d",
+        },
+      }).png().toBuffer(),
+    ]);
+    await writeFile(imagePath, analyzedSource);
+
+    const replay = {
+      get ocrPath(): string {
+        writeFileSync(imagePath, replacementSource);
+        return resolve("tests/fixtures/qwen-ocr-slide-07.json");
+      },
+      visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+    };
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay,
+        fidelityBuild: deterministicFidelityBuild,
+      }),
+      /Analysis provenance hash mismatch: sourceImage/,
+    );
+    await assert.rejects(access(outDir));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1039,6 +1126,81 @@ test("failed rerun preserves the previous successful target without mixed artifa
       /ENOENT/,
     );
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("does not follow a failed-run symlink introduced after publication preflight", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-failed-root-race-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+  const external = join(directory, "external-failed-runs");
+
+  try {
+    await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    }).png().toFile(imagePath);
+    await mkdir(external);
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+        fidelityBuild: async () => {
+          await symlink(external, `${outDir}.failed-runs`);
+          throw new Error("simulated post-preflight failure");
+        },
+      }),
+      /simulated post-preflight failure/,
+    );
+
+    assert.deepEqual(await readdir(external), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("does not mask the primary build error when failed-run retention is unavailable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-failed-retention-error-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    }).png().toFile(imagePath);
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+        fidelityBuild: async () => {
+          await chmod(directory, 0o500);
+          throw new Error("primary build failure");
+        },
+      }),
+      /primary build failure/,
+    );
+  } finally {
+    await chmod(directory, 0o700);
     await rm(directory, { recursive: true, force: true });
   }
 });
