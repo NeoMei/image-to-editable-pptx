@@ -123,6 +123,80 @@ test("removes nested credentials and DashScope headers before recording", async 
   }
 });
 
+test("redacts normalized sensitive-key aliases in nested objects and arrays", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-recording-aliases-"));
+  const recordingPath = join(directory, "response.json");
+  const canaries = [
+    "opaque-api-underscore-canary-6419",
+    "opaque-access-camel-canary-7528",
+    "opaque-secret-case-canary-8637",
+    "opaque-api-hyphen-canary-9746",
+    "opaque-access-hyphen-canary-1855",
+    "opaque-client-secret-canary-2964",
+  ];
+
+  try {
+    const sanitized = sanitizeProviderRecording(
+      {
+        nested: {
+          api_key: canaries[0],
+          accessToken: canaries[1],
+          Secret: canaries[2],
+        },
+        items: [
+          { "API-KEY": canaries[3] },
+          { "access-token": canaries[4] },
+          { client_secret: canaries[5] },
+        ],
+        harmless: {
+          tokenCount: 12,
+          apiKeyStatus: "kept",
+          secretSauce: "kept",
+          monkey: "kept",
+        },
+      },
+      "unrelated-configured-key",
+    );
+    assert.deepEqual(sanitized.payload, {
+      nested: {
+        api_key: "[REDACTED]",
+        accessToken: "[REDACTED]",
+        Secret: "[REDACTED]",
+      },
+      items: [
+        { "API-KEY": "[REDACTED]" },
+        { "access-token": "[REDACTED]" },
+        { client_secret: "[REDACTED]" },
+      ],
+      harmless: {
+        tokenCount: 12,
+        apiKeyStatus: "kept",
+        secretSauce: "kept",
+        monkey: "kept",
+      },
+    });
+    await writeRecording(recordingPath, sanitized);
+
+    const text = await readFile(recordingPath, "utf8");
+    const persisted = JSON.parse(text) as {
+      payload: Record<string, unknown>;
+    };
+    assert.doesNotMatch(text, new RegExp(canaries.join("|"), "i"));
+    assert.deepEqual(persisted.payload, {
+      nested: {},
+      items: [{}, {}, {}],
+      harmless: {
+        tokenCount: 12,
+        apiKeyStatus: "kept",
+        secretSauce: "kept",
+        monkey: "kept",
+      },
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("round-trips a sanitized fixture through a supplied Zod schema", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-recording-"));
   const recordingPath = join(directory, "fixture.json");

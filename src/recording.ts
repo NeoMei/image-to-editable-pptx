@@ -3,9 +3,28 @@ import { dirname } from "node:path";
 
 import type { z } from "zod";
 
-const SENSITIVE_KEY = /^(?:authorization|apiKey|access_token)$/i;
+const SENSITIVE_KEY_ALIASES = new Set([
+  "authorization",
+  "apikey",
+  "apisecret",
+  "accesstoken",
+  "accesskey",
+  "accesskeyid",
+  "accesskeysecret",
+  "secretaccesskey",
+  "clientsecret",
+  "credential",
+  "password",
+  "privatekey",
+  "secret",
+]);
 const PROVIDER_SECRET_HEADER =
   /^(?:x-dashscope-|x-acs-|x-aliyun-|x-alibaba-|x-oss-)/i;
+
+function isSensitiveKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[\s._-]+/g, "");
+  return SENSITIVE_KEY_ALIASES.has(normalized);
+}
 
 type JsonValue =
   | null
@@ -172,7 +191,21 @@ export function sanitizeProviderRecording(
           state.truncatedNodes += entries.length - index;
           break;
         }
-        if (SENSITIVE_KEY.test(key) || PROVIDER_SECRET_HEADER.test(key)) continue;
+        if (PROVIDER_SECRET_HEADER.test(key)) continue;
+        if (isSensitiveKey(key)) {
+          const outputKey = boundString(
+            key,
+            MAX_PROVIDER_RECORDING_KEY_CHARS,
+            "key",
+          );
+          Object.defineProperty(object, outputKey, {
+            configurable: true,
+            enumerable: true,
+            value: boundString("[REDACTED]", 10, "value"),
+            writable: true,
+          });
+          continue;
+        }
         const redactedKey = redactProviderString(key, configuredApiKey);
         let outputKey = boundString(
           redactedKey === key ? key : `[REDACTED_KEY_${index}]`,
@@ -255,15 +288,10 @@ function sanitize(value: unknown, ancestors = new WeakSet<object>()): JsonValue 
     }
 
     return Object.fromEntries(
-      Object.entries(value)
-        .filter(
-          ([key]) =>
-            !SENSITIVE_KEY.test(key) && !PROVIDER_SECRET_HEADER.test(key),
-        )
-        .map(([key, nestedValue]) => [
-          key,
-          sanitize(nestedValue, ancestors),
-        ]),
+      Object.entries(value).flatMap(([key, nestedValue]) => {
+        if (PROVIDER_SECRET_HEADER.test(key) || isSensitiveKey(key)) return [];
+        return [[key, sanitize(nestedValue, ancestors)]];
+      }),
     );
   } finally {
     ancestors.delete(value);

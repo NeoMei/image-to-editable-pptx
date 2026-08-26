@@ -35,6 +35,14 @@ All RED runs were deliberate new regressions against the pre-fix behavior; imple
 - The stored envelope includes only the sanitized payload plus deterministic truncation counts/flags. Limits are 8,192 characters per value, 256 characters per property name, 65,536 aggregate recorded string characters, 4,096 visited nodes, and depth 16. Signed URLs are replaced in full.
 - `responseObserver.recordRawResponse` now sanitizes with the configured key before `writeRecording`; the existing invalid-body sanitizer remains unchanged.
 
+#### Final-review sensitive-key alias follow-up
+
+- Root cause: the sensitive-key rule matched only three literal spellings, so common case/separator aliases could carry opaque, non-credential-shaped values past the value-pattern sanitizer.
+- RED command: `node --import tsx --test tests/recording.test.ts`; result 5 passed / 1 failed, with all six opaque nested object/array alias probes surviving.
+- GREEN command: the same focused suite; result 6 passed / 0 failed.
+- Keys are normalized only by lowercasing and removing spaces, dots, underscores, and hyphens, then compared against a bounded exact alias set. Covered aliases include API key/secret, access token/key/id/secret, client secret, authorization, credential, password, private key, and exact `secret`. Broad terms such as bare `token` or `key` are intentionally excluded.
+- The provider sanitizer retains the original diagnostic key but replaces its value with `[REDACTED]`; the generic recording writer subsequently removes sensitive fields. Nested object and array values cannot persist. Near-miss diagnostic keys (`tokenCount`, `apiKeyStatus`, `secretSauce`, and `monkey`) remain unchanged, demonstrating the rule is not substring-based.
+
 ### Important 3: typography tracking fidelity
 
 - RED: 4 focused style/contract/export assertions failed because tracking was absent.
@@ -81,10 +89,11 @@ Evidence corrections:
 - Focused affected suite:
   - command: `node --import tsx --test tests/accept-script.test.ts tests/cli.test.ts tests/pipeline.test.ts tests/recording.test.ts tests/contracts.test.ts tests/pptx.test.ts tests/text-style.test.ts tests/text-span.test.ts tests/fidelity-candidates.test.ts tests/asset-mask.test.ts tests/local-repair.test.ts`
   - result: 67 passed, 0 failed.
-- Source suite: `npm test` → 147 passed, 0 failed.
+- Final alias-focused suite: `node --import tsx --test tests/recording.test.ts` → 6 passed, 0 failed.
+- Source suite: `npm test` → 148 passed, 0 failed.
 - Typecheck: `npm run lint:types` → exit 0.
 - Build: `npm run build` → exit 0.
-- Compiled suite: `npm run test:compiled` → 147 passed, 0 failed.
+- Compiled suite: `npm run test:compiled` → 148 passed, 0 failed.
 - Patch hygiene: `git diff --check` → exit 0.
 - Artifact/production literal scan → 0 matching files; synthetic test canaries are intentionally confined to 3 test files.
 
