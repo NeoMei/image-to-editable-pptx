@@ -35,3 +35,11 @@ Confirmed and fixed with RED/GREEN regressions: post-preflight failed-run symlin
 Final clean-install verification: 158/158 source tests, 158/158 compiled tests, typecheck/build/diff-check clean; experimental coverage 97.39% line, 86.71% branch, 98.43% function.
 Fresh artifact verification: 10 editable texts, 4 transparent assets, 0 shapes, 1 icon retained in background, 0 warnings/task IDs, exact decision/manifest/hash reconciliation, 10/10 text span/anchor, no overflow, and WPS title/slogan edit plus icon move/undo/explicit-no-save smoke.
 Fresh deliverable SHA-256: f17cbaa29e8f19cc87dc204c5db0994dd48aa3039dc7205ecd275ae52aaa7a3d.
+
+Third independent comprehensive audit (2026-08-26): complete after a fresh baseline plus three new review/test passes.
+Confirmed and fixed with RED/GREEN regressions: orphan fidelity assets that could be published without ledger hashes, and accepted manifest elements that could be published without a matching per-candidate decision.
+Implementation commit: a413c2c.
+Final clean-install verification: 160/160 source tests, 160/160 compiled tests, typecheck/build/diff-check clean; experimental coverage 96.61% line, 85.75% branch, 98.45% function.
+Fresh artifact verification: 10 editable texts, 4 transparent assets, 0 shapes, 1 icon retained in background, 0 warnings/task IDs, exact decision/manifest/asset/hash reconciliation, 10/10 text span/anchor, no overflow, and full-resolution visual inspection.
+WPS exact-file verification: title/slogan edit, eye/radar asset move, three undo operations, explicit `不保存`, unchanged hash, and successful reopen with restored content.
+Fresh deliverable SHA-256: 5c869e7c6d58da8518958bcf571802151a2907cd4acdcb42ffa81d68f4060fd2.
