@@ -43,6 +43,22 @@ test("preserves optional bold text style in manifest v1", () => {
   assert.equal(parsed.elements[0]?.bold, true);
 });
 
+test("preserves optional bounded text tracking in manifest v1", () => {
+  const styledManifest = structuredClone(validManifest);
+  Object.assign(styledManifest.elements[0]!, { charSpacingPx: 3 });
+
+  const parsed = SlideManifestSchema.parse(styledManifest);
+
+  assert.equal(parsed.elements[0]?.kind, "text");
+  assert.equal(parsed.elements[0]?.charSpacingPx, 3);
+  assert.throws(() =>
+    SlideManifestSchema.parse({
+      ...styledManifest,
+      elements: [{ ...styledManifest.elements[0]!, charSpacingPx: 36.01 }],
+    }),
+  );
+});
+
 test("rejects a bbox that extends beyond the slide canvas", () => {
   const invalidManifest = structuredClone(validManifest);
   invalidManifest.elements[0]!.bbox = {

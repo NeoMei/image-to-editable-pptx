@@ -9,6 +9,7 @@ export type TextStyleMaskMetrics = {
 export type EditableTextStyle = {
   fontSizePx: number;
   bold: boolean;
+  charSpacingPx: number;
 };
 
 const CJK_OR_FULL_WIDTH_ADVANCE = 1;
@@ -25,6 +26,9 @@ const MIN_ADVANCE_UNITS = 0.25;
 const MIN_FONT_SIZE_PX = 0.1;
 const MAX_FONT_SIZE_PX = 512;
 const BOLD_GEOMETRY_SCORE_THRESHOLD = 0.12;
+export const MAX_EDITABLE_TEXT_CHAR_SPACING_PX = 36;
+const DISPLAY_TEXT_MIN_FONT_SIZE_PX = 48;
+const DISPLAY_TEXT_ADVANCE_SCALE = 0.78;
 
 function isCjkOrFullWidth(character: string): boolean {
   const codePoint = character.codePointAt(0) ?? 0;
@@ -59,6 +63,21 @@ function normalizedTextLines(text: string): string[] {
   return text.replace(/\r\n?/g, "\n").split("\n");
 }
 
+function lineAdvanceUnits(line: string): number {
+  return Array.from(line).reduce(
+    (total, character) => total + characterAdvance(character),
+    0,
+  );
+}
+
+function visibleGapCount(line: string): number {
+  const characters = Array.from(line);
+  if (characters.filter((character) => !/\s/u.test(character)).length < 2) {
+    return 0;
+  }
+  return Math.max(0, characters.length - 1);
+}
+
 export function inferEditableTextStyle(
   text: string,
   bbox: BBox,
@@ -71,12 +90,7 @@ export function inferEditableTextStyle(
   const lineCount = Math.max(1, lines.length);
   const widestLineAdvanceUnits = Math.max(
     MIN_ADVANCE_UNITS,
-    ...lines.map((line) =>
-      Array.from(line).reduce(
-        (total, character) => total + characterAdvance(character),
-        0,
-      ),
-    ),
+    ...lines.map(lineAdvanceUnits),
   );
   const perLineGlyphHeight = glyphHeight / lineCount;
   const availableLineBoxHeight = boxHeight / lineCount;
@@ -103,9 +117,34 @@ export function inferEditableTextStyle(
   );
   const normalizedStrokeWidth = strokeWidth / perLineGlyphHeight;
   const boldGeometryScore = normalizedStrokeWidth * (1 + coverage);
+  const measuredSpan = Math.min(
+    boxWidth,
+    finitePositive(maskMetrics.glyphBounds.width, 0),
+  );
+  const feasibleTracking = lines.flatMap((line) => {
+    const gaps = visibleGapCount(line);
+    if (gaps === 0) return [];
+    const advanceUnits = lineAdvanceUnits(line);
+    const trackingAdvanceUnits =
+      advanceUnits *
+      (fontSizePx >= DISPLAY_TEXT_MIN_FONT_SIZE_PX
+        ? DISPLAY_TEXT_ADVANCE_SCALE
+        : 1);
+    const targetSpan =
+      measuredSpan * (advanceUnits / widestLineAdvanceUnits);
+    return [
+      Math.max(0, (targetSpan - fontSizePx * trackingAdvanceUnits) / gaps),
+    ];
+  });
+  const charSpacingPx = clamp(
+    feasibleTracking.length === 0 ? 0 : Math.min(...feasibleTracking),
+    0,
+    MAX_EDITABLE_TEXT_CHAR_SPACING_PX,
+  );
 
   return {
     fontSizePx,
     bold: boldGeometryScore >= BOLD_GEOMETRY_SCORE_THRESHOLD,
+    charSpacingPx: Math.round(charSpacingPx * 100) / 100,
   };
 }

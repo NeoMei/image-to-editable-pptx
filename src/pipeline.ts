@@ -52,7 +52,11 @@ import {
   sanitizeHttpResponseBody,
   type ProviderResponseObserver,
 } from "./providers/response-observer.js";
-import { readRecording, writeRecording } from "./recording.js";
+import {
+  readRecording,
+  sanitizeProviderRecording,
+  writeRecording,
+} from "./recording.js";
 
 const RawVisionRecordingSchema = z.object({
   choices: z.array(
@@ -147,6 +151,7 @@ export type RunPipelineOptions = {
   record?: boolean;
   config?: AppConfig;
   fidelityBuild?: FidelityBuild;
+  requiredTextCount?: number;
 };
 
 export type AnalyzeOptions = Pick<
@@ -158,8 +163,8 @@ export type BuildOptions = {
   imagePath: string;
   analysisDir: string;
   outDir: string;
-  config?: AppConfig;
   fidelityBuild?: FidelityBuild;
+  requiredTextCount?: number;
 };
 
 type AnalysisResult = {
@@ -380,7 +385,10 @@ function responseObserver(
 ): ProviderResponseObserver {
   return {
     recordRawResponse: (payload) =>
-      writeRecording(join(outDir, `raw-responses/${provider}.json`), payload),
+      writeRecording(
+        join(outDir, `raw-responses/${provider}.json`),
+        sanitizeProviderRecording(payload, apiKey),
+      ),
     recordRawHttpResponse: (body) =>
       writeRecording(
         join(outDir, `raw-responses/${provider}.json`),
@@ -500,6 +508,22 @@ function outputName(imagePath: string): string {
   return `${stem}-editable.pptx`;
 }
 
+function assertRequiredTextCount(
+  stage: "planned" | "accepted",
+  actual: number,
+  requiredTextCount?: number,
+): void {
+  if (requiredTextCount === undefined) return;
+  if (!Number.isSafeInteger(requiredTextCount) || requiredTextCount <= 0) {
+    throw new RangeError("requiredTextCount must be a positive integer");
+  }
+  if (actual !== requiredTextCount) {
+    throw new Error(
+      `Required text count mismatch: ${stage} ${actual}, required ${requiredTextCount}`,
+    );
+  }
+}
+
 function safeAssetOutput(outDir: string, assetPath: string): string {
   if (!/^assets\/[a-zA-Z0-9._-]+\.png$/.test(assetPath)) {
     throw new Error(`Unsafe generated asset path: ${assetPath}`);
@@ -544,6 +568,11 @@ async function buildFromAnalysis(
     context.analysis.ocr,
     context.analysis.vision,
   );
+  assertRequiredTextCount(
+    "planned",
+    fidelityPlan.text.length,
+    options.requiredTextCount,
+  );
   const planDuration = elapsed(planStartedAt);
 
   const repairStartedAt = performance.now();
@@ -558,6 +587,11 @@ async function buildFromAnalysis(
   if (manifest.elements.some((element) => element.kind === "shape")) {
     throw new Error("Fidelity manifests must not contain structural shapes");
   }
+  assertRequiredTextCount(
+    "accepted",
+    manifest.elements.filter((element) => element.kind === "text").length,
+    options.requiredTextCount,
+  );
   await Promise.all(
     [...fidelityResult.assets].map(([assetPath, asset]) =>
       writeFile(safeAssetOutput(outDir, assetPath), asset),
@@ -796,7 +830,9 @@ export async function runPipeline(
         imagePath: options.imagePath,
         analysisDir: stagingDir,
         outDir: stagingDir,
-        ...(config === undefined ? {} : { config }),
+        ...(options.requiredTextCount === undefined
+          ? {}
+          : { requiredTextCount: options.requiredTextCount }),
         ...(options.fidelityBuild === undefined
           ? {}
           : { fidelityBuild: options.fidelityBuild }),

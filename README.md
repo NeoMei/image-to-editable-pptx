@@ -21,17 +21,17 @@ export DASHSCOPE_WORKSPACE_ID='<your-workspace-id>'
 
 ## CLI
 
-三种模式都会在发起网络请求前验证两个必需环境变量。
+`analyze` 和 `run` 会在发起网络请求前验证两个必需环境变量；纯本地 `build` 不读取或要求 live 凭证。
 
 ```bash
 # 只做 OCR 和视觉分析；输出目录必须不存在或为空
 npm run cli -- analyze --image <png> --out <analysis-dir> [--record]
 
 # 使用已有分析结果做本地保真分层、背景修复和 PPTX 导出
-npm run cli -- build --image <png> --analysis <analysis-dir> --out <output-dir>
+npm run cli -- build --image <png> --analysis <analysis-dir> --out <output-dir> [--required-text-count <n>]
 
 # 一次完成 analyze 和 build
-npm run cli -- run --image <png> --out <output-dir> [--record]
+npm run cli -- run --image <png> --out <output-dir> [--required-text-count <n>] [--record]
 ```
 
 不论是否加 `--record`，分析目录都会保存经 schema 验证和递归脱敏后的统一 `ocr.json`/`vision.json`，以及 `analysis-ledger.json`。该 analysis ledger 保存 live/replay 模式、模型 ID、OCR/Vision/总分析耗时、告警、record 标记和输入/结果 SHA-256。后续 `build` 会先验证该 ledger 与三项哈希，再将其 provenance 原样带入最终 run ledger，不会把 split build 伪记成 replay/0 ms。为避免混入旧分析结果，独立 `analyze` 只接受新目录或空目录。
@@ -62,7 +62,7 @@ bash scripts/accept-slide-07.sh
 - `<source-name>-editable.pptx`：可编辑的宽屏 PowerPoint；
 - `run-ledger.json`：ledger v2，包含每个文字/图标候选的接受或保留背景决策、修复/重组指标、模型 ID、阶段耗时、告警、输出路径及所有主要产物的 SHA-256；默认路径的 `taskIds` 为空。
 
-ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key、`Authorization`、access token 或 `x-dashscope-*` 头。Live OCR/Vision 响应会在解析前写入 staging；正常解析后该临时原始响应被移除，如果 schema/JSON 解析失败，脱敏的 `raw-responses/<provider>.json` 与 `parse-errors/<provider>.json` 会一起留在失败运行目录中。
+ledger 和 JSON 录制使用递归脱敏写入器，不写入 API Key、`Authorization`、access token、Bearer 凭证、带签名查询的 URL 或 `x-dashscope-*` 头。Live OCR/Vision 响应会在解析前做值级脱敏和确定性大小/深度/节点界限后写入 staging；正常解析后该临时原始响应被移除，如果 schema/JSON 解析失败，脱敏的 `raw-responses/<provider>.json` 与 `parse-errors/<provider>.json` 会一起留在失败运行目录中。
 
 `run` 和独立 `build` 都不会直接改写固定输出目录。它们先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger、ownership marker 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。成功的小 manifest 重跑会整体替换旧目录，因此不会残留旧 asset 或 recording。
 
@@ -93,10 +93,18 @@ ledger 和 JSON 录制使用同一个递归脱敏写入器，不写入 API Key�
 - 默认保真路径不重建原生结构形状；面板、色条、纹理和复杂插画保留在背景中；
 - 图标是可选层，可以保留在背景中。本地透明化依赖边缘颜色一致性，透明比例、边框、文字重叠、修复或重组任一安全门失败时，该图标保留在背景中；矩形回退资产不会进入 manifest 或 PPTX；
 - 本版未集成阿里云 VIAPI 通用分割，不需要第二套 AccessKey/Secret；
-- 文字是必须层。第 7 页固定验收要求 10 个 OCR 文字全部通过；任一文字无法安全本地修复时整页失败并保留 failed-run 证据，不会发布部分成功页面；
+- 文字是必须层。第 7 页固定验收通过 `--required-text-count 10` 在导出和发布前同时校验计划/接受数量；任一文字无法安全本地修复或数量不符时整页失败并保留 failed-run 证据，不会覆盖上一个成功页面；
 - 不同 PowerPoint/WPS 版本的字体替换和文本度量可能造成小范围布局偏差，真实交付前仍需在目标客户端打开验收。
 
 ## 离线验证
+
+从源图和目标客户端的 1280×720 渲染图逐文字检查水平前景跨度与左锚点（默认容差分别为 48px 和 12px）：
+
+```bash
+npm run measure:text-span -- --source <source.png> --render <render.png> --manifest <manifest.json> --out <evidence.json>
+```
+
+命令会覆盖 manifest 中全部文字层，任何文字无前景、跨度/锚点超差或没有文字层都会退出非零。
 
 ```bash
 npm test

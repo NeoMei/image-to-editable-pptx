@@ -86,6 +86,7 @@ test("exports one editable wide slide with ordered, named PowerPoint layers", as
           rotation: 0,
           color: "23394D",
           fontSizePx: 32,
+          charSpacingPx: 3,
           bold: true,
           align: "center",
           zIndex: 2,
@@ -132,6 +133,16 @@ test("exports one editable wide slide with ordered, named PowerPoint layers", as
     assert.match(slideXml, /<a:prstGeom prst="rect">/);
     assert.match(slideXml, /typeface="Microsoft YaHei"/);
     assert.match(slideXml, /<a:rPr\b[^>]*\bb="1"/);
+    assert.match(slideXml, /<a:rPr\b[^>]*\bspc="225"/);
+    const trackedTextXml = slideXml.slice(
+      slideXml.lastIndexOf("<p:sp>", slideXml.indexOf('name="text-title"')),
+      slideXml.indexOf("</p:sp>", slideXml.indexOf('name="text-title"')) +
+        "</p:sp>".length,
+    );
+    assert.equal(
+      xmlAttribute(trackedTextXml, "a:ext", "cx"),
+      Math.round(((480 + 16) * 13.333 * EMU_PER_INCH) / 1280),
+    );
     assert.match(slideXml, /<a:bodyPr\b[^>]*\banchor="ctr"/);
     assert.doesNotMatch(slideXml, /<a:(?:normAutofit|spAutoFit)\b/);
 

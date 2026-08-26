@@ -764,6 +764,12 @@ test("retains sanitized malformed live Vision response and parse error in the fa
           model: liveConfig.visionModel,
           apiKey: "provider-secret-canary",
           Authorization: "Bearer provider-secret-canary",
+          detail: "provider-secret-canary",
+          diagnostics: [
+            "Bearer nested-bearer-canary-123456789",
+            "sk-nested-credential-canary-123456789",
+            "https://bucket.oss-cn-beijing.aliyuncs.com/file.png?X-OSS-Signature=nested-signature-canary&Expires=999999#nested-fragment-canary",
+          ],
           choices: [
             {
               index: 0,
@@ -803,7 +809,7 @@ test("retains sanitized malformed live Vision response and parse error in the fa
     assert.match(parseError, /not valid JSON/);
     assert.doesNotMatch(
       raw + parseError,
-      /provider-secret-canary|authorization|api[_-]?key|bearer/i,
+      /provider-secret-canary|nested-bearer-canary|nested-credential-canary|nested-signature-canary|nested-fragment-canary|X-OSS-Signature|Expires=999999|authorization|api[_-]?key|bearer/i,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -1030,6 +1036,132 @@ test("failed rerun preserves the previous successful target without mixed artifa
     ]);
     await assert.rejects(
       access(join(failedRun, "slide-07-editable.pptx")),
+      /ENOENT/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("required text count rejects a nine-text rerun before publication and retains evidence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-required-text-count-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    const source = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    }).png().toBuffer();
+    await sharp(source).toFile(imagePath);
+    const replay = {
+      ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+      visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+    };
+    await runPipeline({
+      imagePath,
+      outDir,
+      replay,
+      requiredTextCount: 10,
+      fidelityBuild: deterministicFidelityBuild,
+    });
+    const before = await snapshotTree(outDir);
+    const normalizedOcr = JSON.parse(
+      await readFile(join(outDir, "ocr.json"), "utf8"),
+    ) as { lines: unknown[] };
+    const normalizedVision = JSON.parse(
+      await readFile(join(outDir, "vision.json"), "utf8"),
+    );
+    const nineTextReplay = await writeNormalizedReplay(
+      directory,
+      { ...normalizedOcr, lines: normalizedOcr.lines.slice(0, 9) },
+      normalizedVision,
+    );
+    let fidelityBuildCalled = false;
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay: nineTextReplay,
+        requiredTextCount: 10,
+        fidelityBuild: async (...args) => {
+          fidelityBuildCalled = true;
+          return deterministicFidelityBuild(...args);
+        },
+      }),
+      /required text count mismatch.*planned 9.*required 10/i,
+    );
+
+    assert.equal(fidelityBuildCalled, false);
+    assert.deepEqual(await snapshotTree(outDir), before);
+    const failedRuns = await readdir(`${outDir}.failed-runs`);
+    assert.equal(failedRuns.length, 1);
+    const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
+    await Promise.all([
+      access(join(failedRun, "analysis-ledger.json")),
+      access(join(failedRun, "ocr.json")),
+      access(join(failedRun, "vision.json")),
+    ]);
+    await assert.rejects(access(join(failedRun, "manifest.json")), /ENOENT/);
+    await assert.rejects(
+      access(join(failedRun, "slide-07-editable.pptx")),
+      /ENOENT/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("required text count validates accepted manifest texts before export", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-accepted-text-count-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    }).png().toFile(imagePath);
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+        requiredTextCount: 10,
+        fidelityBuild: async (...args) => {
+          const result = await deterministicFidelityBuild(...args);
+          const firstTextId = result.manifest.elements.find(
+            (element) => element.kind === "text",
+          )?.id;
+          result.manifest.elements = result.manifest.elements.filter(
+            (element) => element.kind !== "text" || element.id !== firstTextId,
+          );
+          return result;
+        },
+      }),
+      /required text count mismatch.*accepted 9.*required 10/i,
+    );
+    const failedRuns = await readdir(`${outDir}.failed-runs`);
+    assert.equal(failedRuns.length, 1);
+    const failedRun = join(`${outDir}.failed-runs`, failedRuns[0]!);
+    await assert.rejects(
+      access(join(failedRun, "slide-07-editable.pptx")),
+      /ENOENT/,
+    );
+    await assert.rejects(
+      access(join(failedRun, ".image-ppt-layers-output.json")),
       /ENOENT/,
     );
   } finally {

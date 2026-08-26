@@ -6,7 +6,84 @@ import test from "node:test";
 
 import { z } from "zod";
 
-import { readRecording, writeRecording } from "../src/recording.js";
+import {
+  MAX_PROVIDER_RECORDING_STRING_CHARS,
+  MAX_PROVIDER_RECORDING_TOTAL_STRING_CHARS,
+  readRecording,
+  sanitizeProviderRecording,
+  writeRecording,
+} from "../src/recording.js";
+
+test("sanitizes and deterministically bounds nested provider values", () => {
+  const configuredKey = "configured-provider-key-canary-987654321";
+  const signedQueryCanary = "signed-query-canary-must-not-survive";
+  const hugeCanary = "huge-tail-canary-must-not-survive";
+  const hugeKeyCanary = "huge-key-tail-canary-must-not-survive";
+  let deep: unknown = "safe-leaf";
+  for (let index = 0; index < 32; index += 1) deep = { nested: deep };
+  const recording = sanitizeProviderRecording(
+    {
+      message: {
+        content: configuredKey,
+        detail: "Bearer bearer-value-canary-123456789",
+        url: `https://bucket.oss-cn-beijing.aliyuncs.com/object.png?X-OSS-Signature=${signedQueryCanary}&Expires=999999#fragment-canary`,
+      },
+      items: [
+        { value: "sk-credential-shaped-canary-123456789" },
+        { note: "x-dashscope-api-key: dashscope-header-canary-123456789" },
+        { detail: "X-Acs-AccessKey-Id: alibaba-header-canary-123456789" },
+        { content: "X-OSS-Security-Token: oss-header-canary-123456789" },
+        {
+          content:
+            "safe-prefix-" +
+            "x".repeat(MAX_PROVIDER_RECORDING_STRING_CHARS * 2) +
+            hugeCanary,
+        },
+      ],
+      deep,
+      wide: Array.from({ length: 100 }, () =>
+        "y".repeat(MAX_PROVIDER_RECORDING_STRING_CHARS),
+      ),
+      [`${configuredKey}-${"k".repeat(1_000)}-${hugeKeyCanary}`]: "safe",
+    },
+    configuredKey,
+  );
+  const nodeBounded = sanitizeProviderRecording(
+    { many: Array.from({ length: 5_000 }, (_, index) => index) },
+    configuredKey,
+  );
+  const keyBounded = sanitizeProviderRecording(
+    {
+      [`safe-${"k".repeat(1_000)}-${hugeKeyCanary}`]: "safe",
+      [configuredKey]: "safe",
+    },
+    configuredKey,
+  );
+  const text = JSON.stringify(recording);
+  const allText = text + JSON.stringify(keyBounded);
+  const reparsed = JSON.parse(text) as typeof recording;
+
+  assert.deepEqual(reparsed, recording);
+  assert.equal(recording.sanitization.truncated, true);
+  assert.ok(recording.sanitization.truncatedStrings > 0);
+  assert.ok(recording.sanitization.visitedNodes > 0);
+  assert.ok(text.length < 100_000);
+  assert.ok(nodeBounded.sanitization.truncatedNodes > 0);
+  assert.ok(recording.sanitization.truncatedDepth > 0);
+  assert.ok(keyBounded.sanitization.truncatedKeys > 0);
+  assert.ok(recording.sanitization.truncatedTotalStrings > 0);
+  assert.ok(
+    recording.sanitization.recordedStringChars <=
+      MAX_PROVIDER_RECORDING_TOTAL_STRING_CHARS,
+  );
+  const nodePayload = nodeBounded.payload as { many: unknown[] };
+  assert.ok(nodePayload.many.length <= 4_096);
+  assert.doesNotMatch(
+    allText,
+    /configured-provider-key-canary|bearer-value-canary|signed-query-canary|fragment-canary|credential-shaped-canary|dashscope-header-canary|alibaba-header-canary|oss-header-canary|huge-tail-canary|huge-key-tail-canary|X-OSS-Signature|Expires=999999/i,
+  );
+  assert.match(text, /REDACTED/);
+});
 
 test("removes nested credentials and DashScope headers before recording", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-recording-"));

@@ -43,6 +43,7 @@ export const SlideElementSchema = z.discriminatedUnion("kind", [
     rotation: z.number(),
     color: z.string(),
     fontSizePx: z.number().positive(),
+    charSpacingPx: z.number().min(0).max(36).optional(),
     bold: z.boolean().optional(),
     align: z.enum(["left", "center", "right"]),
     zIndex: z.number().int(),

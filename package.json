@@ -6,6 +6,7 @@
   "engines": { "node": ">=22.6" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "measure:text-span": "tsx scripts/measure-text-span.ts",
     "test": "node --import tsx --test \"tests/*.test.ts\"",
     "test:compiled": "node --test \"dist/tests/*.test.js\"",
     "lint:types": "tsc -p tsconfig.json --noEmit",

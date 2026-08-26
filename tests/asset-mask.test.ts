@@ -80,3 +80,30 @@ test("rejects an asset whose dimensions do not match the candidate bbox", async 
     new Error("Asset dimensions do not match candidate bbox"),
   );
 });
+
+test("clips an asset mask safely at every canvas edge", async () => {
+  const asset = await sharp({
+    create: {
+      width: 4,
+      height: 4,
+      channels: 4,
+      background: "#23394d",
+    },
+  }).png().toBuffer();
+  const mask = await buildAssetRemovalMask(
+    asset,
+    { x: 0, y: 0, width: 4, height: 4 },
+    { width: 3, height: 3 },
+    0,
+  );
+  const { data, info } = await sharp(mask)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  assert.equal(info.width, 3);
+  assert.equal(info.height, 3);
+  assert.equal(data[0], 255);
+  assert.equal(data[(1 * 3 + 1) * info.channels], 255);
+  assert.equal(data[(2 * 3 + 2) * info.channels], 255);
+});

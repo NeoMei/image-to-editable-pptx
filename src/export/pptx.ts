@@ -14,6 +14,7 @@ const PptxGenConstructor =
 const pxToX = (px: number): number => (px * SLIDE_WIDTH_INCHES) / 1280;
 const pxToY = (px: number): number => (px * SLIDE_HEIGHT_INCHES) / 720;
 const pxToPt = (px: number): number => (px * 72) / 96;
+const TRACKED_TEXT_BOX_SLACK_PX = 16;
 
 function position(bbox: BBox): { x: number; y: number; w: number; h: number } {
   return {
@@ -22,6 +23,23 @@ function position(bbox: BBox): { x: number; y: number; w: number; h: number } {
     w: pxToX(bbox.width),
     h: pxToY(bbox.height),
   };
+}
+
+function textPosition(
+  bbox: BBox,
+  canvasWidth: number,
+  charSpacingPx?: number,
+): { x: number; y: number; w: number; h: number } {
+  if (charSpacingPx === undefined || charSpacingPx === 0) {
+    return position(bbox);
+  }
+  return position({
+    ...bbox,
+    width: Math.min(
+      canvasWidth - bbox.x,
+      bbox.width + TRACKED_TEXT_BOX_SLACK_PX,
+    ),
+  });
 }
 
 export async function exportPptx(
@@ -59,10 +77,17 @@ export async function exportPptx(
     switch (element.kind) {
       case "text":
         slide.addText(element.text, {
-          ...position(element.bbox),
+          ...textPosition(
+            element.bbox,
+            manifest.canvas.width,
+            element.charSpacingPx,
+          ),
           objectName: `text-${element.id}`,
           fontFace: "Microsoft YaHei",
           fontSize: pxToPt(element.fontSizePx),
+          ...(element.charSpacingPx === undefined
+            ? {}
+            : { charSpacing: pxToPt(element.charSpacingPx) }),
           ...(element.bold === undefined ? {} : { bold: element.bold }),
           color: element.color,
           align: element.align,

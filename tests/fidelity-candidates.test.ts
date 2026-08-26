@@ -98,6 +98,92 @@ test("keeps decorative and uncertain bitmaps in the background", () => {
   assert.deepEqual(plan.icons[0]?.sourceElementIndexes, [1, 2]);
 });
 
+test("includes exact major-candidate confidence, dimension, and area boundaries", () => {
+  const boundaryElements: VisionResult["elements"] = [
+    {
+      type: "icon",
+      bbox: { x: 700, y: 20, width: 40, height: 40 },
+      label: "confidence boundary",
+      zIndex: 1,
+      editableAs: "bitmap",
+      confidence: 0.8,
+    },
+    {
+      type: "icon",
+      bbox: { x: 760, y: 20, width: 24, height: 80 },
+      label: "width boundary",
+      zIndex: 2,
+      editableAs: "bitmap",
+      confidence: 0.9,
+    },
+    {
+      type: "icon",
+      bbox: { x: 820, y: 20, width: 80, height: 24 },
+      label: "height boundary",
+      zIndex: 3,
+      editableAs: "bitmap",
+      confidence: 0.9,
+    },
+    {
+      type: "icon",
+      bbox: { x: 920, y: 20, width: 40, height: 40 },
+      label: "area boundary",
+      zIndex: 4,
+      editableAs: "bitmap",
+      confidence: 0.9,
+    },
+  ];
+
+  const plan = planFidelityCandidates(ocr, { elements: boundaryElements });
+
+  assert.deepEqual(
+    plan.icons.map((candidate) => candidate.label),
+    boundaryElements.map((element) => element.label),
+  );
+});
+
+test("applies major-candidate gates after clipping", () => {
+  const plan = planFidelityCandidates(ocr, {
+    elements: [
+      {
+        type: "icon",
+        bbox: { x: -16, y: 20, width: 40, height: 80 },
+        label: "exact clipped width",
+        zIndex: 1,
+        editableAs: "bitmap",
+        confidence: 0.8,
+      },
+      {
+        type: "icon",
+        bbox: { x: -17, y: 120, width: 40, height: 80 },
+        label: "below clipped width",
+        zIndex: 2,
+        editableAs: "bitmap",
+        confidence: 0.9,
+      },
+      {
+        type: "icon",
+        bbox: { x: 1200, y: 20, width: 100, height: 20 },
+        label: "below clipped height and area",
+        zIndex: 3,
+        editableAs: "bitmap",
+        confidence: 0.9,
+      },
+    ],
+  });
+
+  assert.deepEqual(plan.icons.map((candidate) => candidate.label), [
+    "exact clipped width",
+  ]);
+  assert.deepEqual(plan.icons[0]?.bbox, {
+    x: 0,
+    y: 20,
+    width: 24,
+    height: 80,
+  });
+  assert.deepEqual(plan.warnings, ["out_of_bounds_clipped"]);
+});
+
 test("plans exactly ten required text candidates from the slide 7 OCR fixture", async () => {
   const rawOcr = JSON.parse(
     await readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8"),

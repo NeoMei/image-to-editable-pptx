@@ -30,4 +30,4 @@ if [[ ! -f "$SLIDE_IMAGE" ]]; then
 fi
 
 cd "$PROJECT_ROOT"
-exec npm run cli -- run --image "$SLIDE_IMAGE" --out output/slide-07 --record
+exec npm run cli -- run --image "$SLIDE_IMAGE" --out output/slide-07 --required-text-count 10 --record

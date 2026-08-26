@@ -14,8 +14,8 @@ import {
 
 const USAGE = `Usage:
   npm run cli -- analyze --image <png> --out <dir> [--record]
-  npm run cli -- build --image <png> --analysis <dir> --out <dir>
-  npm run cli -- run --image <png> --out <dir> [--record]`;
+  npm run cli -- build --image <png> --analysis <dir> --out <dir> [--required-text-count <n>]
+  npm run cli -- run --image <png> --out <dir> [--required-text-count <n>] [--record]`;
 
 type AnalyzeCommand = {
   command: "analyze";
@@ -30,6 +30,7 @@ type BuildCommand = {
   analysis: string;
   out: string;
   record: false;
+  requiredTextCount?: number;
 };
 
 type RunCommand = {
@@ -37,6 +38,7 @@ type RunCommand = {
   image: string;
   out: string;
   record: boolean;
+  requiredTextCount?: number;
 };
 
 export type CliCommand = AnalyzeCommand | BuildCommand | RunCommand;
@@ -75,7 +77,8 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
     if (
       argument !== "--image" &&
       argument !== "--out" &&
-      argument !== "--analysis"
+      argument !== "--analysis" &&
+      argument !== "--required-text-count"
     ) {
       throw usageError(`Unknown option: ${argument}`);
     }
@@ -97,17 +100,43 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
   }
 
   const analysis = values.get("--analysis");
+  const requiredTextCountValue = values.get("--required-text-count");
+  const requiredTextCount = requiredTextCountValue === undefined
+    ? undefined
+    : Number(requiredTextCountValue);
+  if (
+    requiredTextCount !== undefined &&
+    (!Number.isSafeInteger(requiredTextCount) || requiredTextCount <= 0)
+  ) {
+    throw usageError("--required-text-count must be a positive integer.");
+  }
+  if (command === "analyze" && requiredTextCount !== undefined) {
+    throw usageError("--required-text-count is only valid for build and run.");
+  }
   if (command === "build") {
     if (analysis === undefined) {
       throw usageError("Build requires --analysis.");
     }
     if (record) throw usageError("--record is not valid for build.");
-    return { command, image, analysis, out, record: false };
+    return {
+      command,
+      image,
+      analysis,
+      out,
+      record: false,
+      ...(requiredTextCount === undefined ? {} : { requiredTextCount }),
+    };
   }
   if (analysis !== undefined) {
     throw usageError("--analysis is only valid for build.");
   }
-  return { command, image, out, record };
+  return {
+    command,
+    image,
+    out,
+    record,
+    ...(requiredTextCount === undefined ? {} : { requiredTextCount }),
+  };
 }
 
 function withConfig<T extends { config?: AppConfig }>(
@@ -123,10 +152,10 @@ export async function runCli(
   dependencies: CliDependencies = defaultDependencies,
 ): Promise<void> {
   const command = parseCliArgs(args);
-  const config = loadConfig(env);
-
   switch (command.command) {
     case "analyze":
+    {
+      const config = loadConfig(env);
       await dependencies.analyze(
         withConfig<AnalyzeOptions>(
           {
@@ -138,30 +167,37 @@ export async function runCli(
         ),
       );
       break;
+    }
     case "build":
       await dependencies.build(
-        withConfig<BuildOptions>(
-          {
-            imagePath: command.image,
-            analysisDir: command.analysis,
-            outDir: command.out,
-          },
-          config,
-        ),
+        {
+          imagePath: command.image,
+          analysisDir: command.analysis,
+          outDir: command.out,
+          ...(command.requiredTextCount === undefined
+            ? {}
+            : { requiredTextCount: command.requiredTextCount }),
+        },
       );
       break;
     case "run":
+    {
+      const config = loadConfig(env);
       await dependencies.run(
         withConfig<RunPipelineOptions>(
           {
             imagePath: command.image,
             outDir: command.out,
             record: command.record,
+            ...(command.requiredTextCount === undefined
+              ? {}
+              : { requiredTextCount: command.requiredTextCount }),
           },
           config,
         ),
       );
       break;
+    }
   }
 }
 

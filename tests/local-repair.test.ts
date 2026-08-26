@@ -75,6 +75,7 @@ test("does not change any pixel outside the mask", async () => {
     sharp(source).ensureAlpha().raw().toBuffer(),
     sharp(result.image).ensureAlpha().raw().toBuffer(),
   ]);
+  assert.equal(result.accepted, true);
   for (let index = 0; index < width * height; index += 1) {
     if (mask[index] !== 0) continue;
     assert.deepEqual(
@@ -107,6 +108,36 @@ test("rejects a mask whose sampling ring crosses incompatible surfaces", async (
   );
   assert.equal(result.accepted, false);
   assert.equal(result.reason, "surface_variance_too_high");
+  assert.deepEqual(result.image, source);
+});
+
+test("rejects a repair whose filled-pixel p95 exceeds 28", async () => {
+  const width = 12;
+  const height = 12;
+  const rgb = Buffer.alloc(width * height * 3, 100);
+  const mask = Buffer.alloc(width * height);
+  for (let y = 4; y <= 7; y += 1) {
+    for (let x = 4; x <= 7; x += 1) mask[y * width + x] = 255;
+  }
+  const ring: Array<readonly [number, number]> = [];
+  for (let y = 3; y <= 8; y += 1) {
+    for (let x = 3; x <= 8; x += 1) {
+      if (x >= 4 && x <= 7 && y >= 4 && y <= 7) continue;
+      ring.push([x, y]);
+    }
+  }
+  for (const [x, y] of ring.slice(0, 5)) {
+    rgb[(y * width + x) * 3] = 160;
+  }
+  const source = await encodeRgb(rgb, width, height);
+  const result = await repairLocalRegion(
+    source,
+    await encodeMask(mask, width, height),
+  );
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "filled_pixels_too_different");
+  assert.ok(result.metrics.filledPixelDistanceP95 > 28);
   assert.deepEqual(result.image, source);
 });
 

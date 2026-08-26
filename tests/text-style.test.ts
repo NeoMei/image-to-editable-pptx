@@ -112,3 +112,66 @@ test("classifies multiline bold from per-line stroke geometry", () => {
   assert.equal(singleLine.bold, true);
   assert.equal(twoLines.bold, singleLine.bold);
 });
+
+test("infers zero or positive tracking from measured CJK, Latin, and mixed spans", () => {
+  const geometry = (width: number) =>
+    metrics({ glyphBounds: { x: 4, y: 5, width, height: 20 } });
+
+  assert.equal(
+    inferEditableTextStyle("工具", bbox, geometry(30)).charSpacingPx,
+    0,
+  );
+  assert.ok(
+    inferEditableTextStyle("工具", bbox, geometry(50)).charSpacingPx > 0,
+  );
+  assert.ok(
+    inferEditableTextStyle("AB", bbox, geometry(50)).charSpacingPx > 0,
+  );
+  assert.ok(
+    inferEditableTextStyle("工A", bbox, geometry(50)).charSpacingPx > 0,
+  );
+});
+
+test("tracking handles whitespace and single characters conservatively", () => {
+  const wide = metrics({
+    glyphBounds: { x: 4, y: 5, width: 80, height: 20 },
+  });
+  assert.ok(inferEditableTextStyle("A B", bbox, wide).charSpacingPx > 0);
+  assert.equal(inferEditableTextStyle("A", bbox, wide).charSpacingPx, 0);
+  assert.equal(inferEditableTextStyle(" ", bbox, wide).charSpacingPx, 0);
+});
+
+test("bounds extreme tracking by a named generic limit", () => {
+  const style = inferEditableTextStyle(
+    "AB",
+    { x: 0, y: 0, width: 1_000, height: 40 },
+    metrics({ glyphBounds: { x: 0, y: 0, width: 900, height: 20 } }),
+  );
+  assert.equal(style.charSpacingPx, 36);
+});
+
+test("uses a generic display-text advance scale for widely tracked headings", () => {
+  const style = inferEditableTextStyle(
+    "第4章工具",
+    { x: 0, y: 0, width: 529, height: 92 },
+    metrics({ glyphBounds: { x: 4, y: 5, width: 521, height: 83 } }),
+  );
+
+  assert.ok(style.fontSizePx >= 48);
+  assert.ok(style.charSpacingPx > 30);
+  assert.ok(style.charSpacingPx <= 36);
+});
+
+test("multiline tracking chooses one deterministic bounded value", () => {
+  const calculate = () =>
+    inferEditableTextStyle(
+      "工具生态\nAB",
+      { x: 0, y: 0, width: 120, height: 80 },
+      metrics({ glyphBounds: { x: 0, y: 0, width: 100, height: 60 } }),
+    ).charSpacingPx;
+  const tracking = calculate();
+
+  assert.ok(tracking >= 0);
+  assert.ok(tracking <= 36);
+  assert.equal(tracking, calculate());
+});

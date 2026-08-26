@@ -42,7 +42,7 @@ test("acceptance script uses only the fidelity-first OCR and Vision path", async
   assert.doesNotMatch(script, /DASHSCOPE_EDIT_MODEL/);
   assert.match(
     script,
-    /^exec npm run cli -- run --image "\$SLIDE_IMAGE" --out output\/slide-07 --record$/m,
+    /^exec npm run cli -- run --image "\$SLIDE_IMAGE" --out output\/slide-07 --required-text-count 10 --record$/m,
   );
 });
 
