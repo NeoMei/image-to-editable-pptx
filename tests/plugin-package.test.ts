@@ -52,6 +52,23 @@ test("ships a discoverable skill without scaffold placeholders", async () => {
   assert.match(license, /^MIT License$/m);
 });
 
+test("documents an OpenCode-compatible skill installation", async () => {
+  const [readme, skill] = await Promise.all([
+    readFile("README.md", "utf8"),
+    readFile("skills/image-to-editable-pptx/SKILL.md", "utf8"),
+  ]);
+
+  assert.match(readme, /^## 安装 OpenCode Skill$/m);
+  assert.match(readme, /\$HOME\/\.agents\/skills\/image-to-editable-pptx/);
+  assert.match(readme, /opencode debug skill/);
+  assert.match(
+    readme,
+    /OpenCode.*Codex Marketplace.*不兼容|Codex Marketplace.*OpenCode.*不兼容/s,
+  );
+  assert.match(skill, /supports Codex and OpenCode/);
+  assert.match(skill, /physical path.*symbolic link|symbolic link.*physical path/is);
+});
+
 async function readJson(path: string): Promise<Record<string, any>> {
   return JSON.parse(await readFile(path, "utf8")) as Record<string, any>;
 }

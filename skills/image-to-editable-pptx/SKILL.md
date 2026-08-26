@@ -7,9 +7,11 @@ description: Convert a 1280×720 slide PNG into a high-fidelity editable PPTX us
 
 Reconstruct the supplied slide image with visual fidelity first: every accepted OCR line becomes editable text, reliably isolated icons may become movable PNG layers, and panels, bars, borders, textures, and uncertain graphics remain in the background.
 
+This Agent Skill supports Codex and OpenCode on macOS or Linux with Node.js 22.6 or newer.
+
 ## Run the converter
 
-1. Resolve the plugin root as two directory levels above the directory containing this `SKILL.md` file. Work from that plugin root for package commands.
+1. Resolve the physical path of this `SKILL.md` first, following any symbolic link; then treat the plugin root as two directory levels above its physical containing directory. Confirm that root contains `package.json`, and work from it for package commands.
 2. Require Node.js 22.6 or newer. If dependencies are absent, run `npm ci --include=dev` in the plugin root. Do not install global packages.
 3. Confirm the source is an exact 1280×720 PNG. Explain the current single-slide limitation if the user provides another format or size.
 4. Choose a durable output directory outside the installed plugin cache. It must not be the source image or an ancestor of the source, and it must not be the current project root or one of its ancestors. Never overwrite an unmarked directory.

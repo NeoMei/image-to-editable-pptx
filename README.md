@@ -17,6 +17,21 @@ codex plugin add image-to-editable-pptx@image-to-editable-pptx
 
 安装后重启 Codex，并在新任务中说“把这张幻灯片图片转成高保真可编辑 PPTX”。首次运行需要 Node.js 22.6 或更高版本，插件会在本地安装锁定的 npm 依赖。新分析还需要在运行环境中配置 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_WORKSPACE_ID`；凭证不应写入仓库或命令文本。
 
+## 安装 OpenCode Skill
+
+OpenCode 与 Codex Marketplace 的插件安装协议不兼容，不能使用上面的 `codex plugin` 命令。不过 OpenCode 原生支持 `.agents/skills/<name>/SKILL.md`，因此可以把同一仓库作为全局 Agent Skill 使用：
+
+```bash
+git clone https://github.com/NeoMei/image-to-editable-pptx.git "$HOME/.local/share/image-to-editable-pptx"
+cd "$HOME/.local/share/image-to-editable-pptx"
+npm ci
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/skills/image-to-editable-pptx" "$HOME/.agents/skills/image-to-editable-pptx"
+opencode debug skill
+```
+
+在最后一条命令的输出中确认存在 `image-to-editable-pptx`，然后重启 OpenCode，并说“把这张幻灯片图片转成高保真可编辑 PPTX”。如果目标链接已经存在，不要覆盖；先确认它是否指向本仓库。更新时进入克隆目录执行 `git pull --ff-only` 和 `npm ci`。运行要求及百炼环境变量与 Codex 版本相同。
+
 ## 准备
 
 需要 Node.js 22.6 或更高版本（测试脚本使用该版本起支持的原生 glob），然后安装依赖：
