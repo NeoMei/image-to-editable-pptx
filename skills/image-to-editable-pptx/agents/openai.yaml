@@ -1,0 +1,4 @@
+interface:
+  display_name: "Image to Editable PPTX"
+  short_description: "Turn slide images into editable PPTX files"
+  default_prompt: "Convert this slide image into a high-fidelity editable PPTX."

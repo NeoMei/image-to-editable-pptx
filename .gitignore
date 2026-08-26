@@ -1,6 +1,7 @@
 .worktrees/
 .superpowers/
 .codex-tmp/
+.tmp-canva-ppt-*/
 node_modules/
 dist/
 output/

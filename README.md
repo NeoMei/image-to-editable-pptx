@@ -1,6 +1,21 @@
-# 图片式 PPT 增强可编辑原型
+# Image to Editable PPTX
+
+> High-fidelity image-to-editable slides
+>
+> 高保真图片式 PPT 可编辑重构
 
 这个 Node.js 原型把一张 1280×720 的幻灯片 PNG 重建为单页 16:9 PPTX：OCR 文字是必须成功的可编辑层，只有通过透明提取、文字遮罩重叠、本地修复和重组校验的图标才成为可移动 PNG 资产；面板、色条和纹理等结构家具保留在背景中。背景修复完全在本地完成，默认路径不调用万相或其他图像编辑模型。当前验收目标是《深入理解 AI-Agent》第 7 页，其 10 个 OCR 文字候选必须全部成为可编辑文字。
+
+## 安装 Codex 插件
+
+添加这个 GitHub marketplace，再安装插件：
+
+```bash
+codex plugin marketplace add NeoMei/image-to-editable-pptx
+codex plugin add image-to-editable-pptx@image-to-editable-pptx
+```
+
+安装后重启 Codex，并在新任务中说“把这张幻灯片图片转成高保真可编辑 PPTX”。首次运行需要 Node.js 22.6 或更高版本，插件会在本地安装锁定的 npm 依赖。新分析还需要在运行环境中配置 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_WORKSPACE_ID`；凭证不应写入仓库或命令文本。
 
 ## 准备
 
@@ -54,7 +69,7 @@ bash scripts/accept-slide-07.sh
 - `vision.json`：统一视觉元素候选；
 - `analysis-ledger.json`：经验证的分析 provenance、耗时、模型与哈希；
 - `recordings/*.json`：仅在 `--record` 时产生的脱敏、统一 replay 快照；
-- `.image-ppt-layers-output.json`：版本化的 pipeline ownership marker，用于安全识别可由本工具替换的输出目录；
+- `.image-to-editable-pptx-output.json`：版本化的 pipeline ownership marker，用于安全识别可由本工具替换的输出目录；旧版 `.image-ppt-layers-output.json` 仍可识别，下次成功重跑时会迁移为新标记；
 - `manifest.json`：manifest v1；默认保真路径只包含已接受的 OCR 文字和透明图标，不包含结构形状；
 - `removal-mask.png`：已接受文字和图标遮罩的逐像素并集，不包含被拒绝图标；
 - `clean-background.png`：对已接受遮罩做确定性本地修复后的背景；

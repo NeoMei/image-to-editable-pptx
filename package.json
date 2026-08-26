@@ -1,6 +1,21 @@
 {
-  "name": "image-ppt-layers",
+  "name": "image-to-editable-pptx",
   "version": "0.1.0",
+  "description": "Convert slide images into high-fidelity PPTX files with editable text and selected elements.",
+  "author": "NeoMei",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NeoMei/image-to-editable-pptx.git"
+  },
+  "homepage": "https://github.com/NeoMei/image-to-editable-pptx#readme",
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "ocr",
+    "editable-slides",
+    "codex-plugin"
+  ],
   "private": true,
   "type": "module",
   "engines": { "node": ">=22.6" },

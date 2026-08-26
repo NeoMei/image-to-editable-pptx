@@ -1,0 +1,21 @@
+{
+  "name": "image-to-editable-pptx",
+  "interface": {
+    "displayName": "Image to Editable PPTX"
+  },
+  "plugins": [
+    {
+      "name": "image-to-editable-pptx",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/NeoMei/image-to-editable-pptx.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

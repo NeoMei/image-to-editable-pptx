@@ -73,9 +73,20 @@ const DEFAULT_MODELS = {
 } as const;
 
 export const OUTPUT_OWNERSHIP_MARKER =
+  ".image-to-editable-pptx-output.json";
+
+const LEGACY_OUTPUT_OWNERSHIP_MARKER =
   ".image-ppt-layers-output.json";
 
 export const OutputOwnershipMarkerSchema = z
+  .object({
+    markerVersion: z.literal(1),
+    appId: z.literal("image-to-editable-pptx"),
+    artifactKind: z.literal("published-output"),
+  })
+  .strict();
+
+const LegacyOutputOwnershipMarkerSchema = z
   .object({
     markerVersion: z.literal(1),
     appId: z.literal("image-ppt-layers"),
@@ -83,9 +94,14 @@ export const OutputOwnershipMarkerSchema = z
   })
   .strict();
 
+const RecognizedOutputOwnershipMarkerSchema = z.union([
+  OutputOwnershipMarkerSchema,
+  LegacyOutputOwnershipMarkerSchema,
+]);
+
 type OwnedOutputDirectory = {
   path: string;
-  marker: z.infer<typeof OutputOwnershipMarkerSchema>;
+  marker: z.infer<typeof RecognizedOutputOwnershipMarkerSchema>;
 };
 
 export const AnalysisLedgerSchema = z
@@ -222,17 +238,33 @@ async function canonicalizePotentialPath(path: string): Promise<string> {
 async function requireOwnedOutputDirectory(
   directory: string,
 ): Promise<OwnedOutputDirectory> {
-  let marker: z.infer<typeof OutputOwnershipMarkerSchema>;
+  let marker: z.infer<typeof RecognizedOutputOwnershipMarkerSchema>;
   try {
-    const markerPath = join(directory, OUTPUT_OWNERSHIP_MARKER);
-    const markerInfo = await lstat(markerPath);
-    if (markerInfo.isSymbolicLink() || !markerInfo.isFile()) {
-      throw new Error("Ownership marker must be a regular file");
+    const currentMarkerPath = join(directory, OUTPUT_OWNERSHIP_MARKER);
+    try {
+      const markerInfo = await lstat(currentMarkerPath);
+      if (markerInfo.isSymbolicLink() || !markerInfo.isFile()) {
+        throw new Error("Ownership marker must be a regular file");
+      }
+      marker = await readRecording(
+        currentMarkerPath,
+        OutputOwnershipMarkerSchema,
+      );
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      const legacyMarkerPath = join(
+        directory,
+        LEGACY_OUTPUT_OWNERSHIP_MARKER,
+      );
+      const markerInfo = await lstat(legacyMarkerPath);
+      if (markerInfo.isSymbolicLink() || !markerInfo.isFile()) {
+        throw new Error("Ownership marker must be a regular file");
+      }
+      marker = await readRecording(
+        legacyMarkerPath,
+        LegacyOutputOwnershipMarkerSchema,
+      );
     }
-    marker = await readRecording(
-      markerPath,
-      OutputOwnershipMarkerSchema,
-    );
   } catch (error) {
     throw new Error(
       `Refusing to replace unowned output directory: ${directory}`,
@@ -313,7 +345,7 @@ async function writeOwnershipMarker(directory: string): Promise<void> {
     join(directory, OUTPUT_OWNERSHIP_MARKER),
     OutputOwnershipMarkerSchema.parse({
       markerVersion: 1,
-      appId: "image-ppt-layers",
+      appId: "image-to-editable-pptx",
       artifactKind: "published-output",
     }),
   );
@@ -322,7 +354,7 @@ async function writeOwnershipMarker(directory: string): Promise<void> {
 async function removeOwnedOutputDirectory(
   owned: OwnedOutputDirectory,
 ): Promise<void> {
-  OutputOwnershipMarkerSchema.parse(owned.marker);
+  RecognizedOutputOwnershipMarkerSchema.parse(owned.marker);
   await rm(owned.path, { recursive: true, force: true });
 }
 

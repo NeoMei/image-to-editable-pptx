@@ -1,0 +1,32 @@
+{
+  "name": "image-to-editable-pptx",
+  "version": "0.1.0",
+  "description": "Convert slide images into high-fidelity PPTX files with editable text and selected elements.",
+  "author": {
+    "name": "NeoMei",
+    "url": "https://github.com/NeoMei"
+  },
+  "homepage": "https://github.com/NeoMei/image-to-editable-pptx#readme",
+  "repository": "https://github.com/NeoMei/image-to-editable-pptx",
+  "license": "MIT",
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "ocr",
+    "editable-slides",
+    "codex-plugin"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Image to Editable PPTX",
+    "shortDescription": "Turn slide images into editable PPTX files.",
+    "longDescription": "Reconstruct a 1280×720 slide image as a high-fidelity PPTX with editable OCR text and only reliably extracted movable icons.",
+    "developerName": "NeoMei",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "websiteURL": "https://github.com/NeoMei/image-to-editable-pptx",
+    "defaultPrompt": "Convert this slide image into a high-fidelity editable PPTX."
+  }
+}

@@ -27,6 +27,7 @@ import type {
 import {
   analyzeSlide,
   buildSlide,
+  OUTPUT_OWNERSHIP_MARKER,
   runPipeline,
   type FidelityBuild,
 } from "../src/pipeline.js";
@@ -1323,7 +1324,7 @@ test("required text count validates accepted manifest texts before export", asyn
       /ENOENT/,
     );
     await assert.rejects(
-      access(join(failedRun, ".image-ppt-layers-output.json")),
+      access(join(failedRun, OUTPUT_OWNERSHIP_MARKER)),
       /ENOENT/,
     );
   } finally {
@@ -1482,10 +1483,14 @@ test("atomically replaces an output created and marked by this pipeline", async 
       replay,
       fidelityBuild: deterministicFidelityBuild,
     });
-    const markerPath = join(outDir, ".image-ppt-layers-output.json");
+    assert.equal(
+      OUTPUT_OWNERSHIP_MARKER,
+      ".image-to-editable-pptx-output.json",
+    );
+    const markerPath = join(outDir, OUTPUT_OWNERSHIP_MARKER);
     assert.deepEqual(JSON.parse(await readFile(markerPath, "utf8")), {
       markerVersion: 1,
-      appId: "image-ppt-layers",
+      appId: "image-to-editable-pptx",
       artifactKind: "published-output",
     });
 
@@ -1502,7 +1507,7 @@ test("atomically replaces an output created and marked by this pipeline", async 
     assert.equal(ledger.taskIds.wanx, undefined);
     assert.deepEqual(JSON.parse(await readFile(markerPath, "utf8")), {
       markerVersion: 1,
-      appId: "image-ppt-layers",
+      appId: "image-to-editable-pptx",
       artifactKind: "published-output",
     });
     const siblings = await readdir(directory);

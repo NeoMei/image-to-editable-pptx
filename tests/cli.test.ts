@@ -119,6 +119,10 @@ test("rejects missing credentials before dispatching a command", async () => {
 
 test("rejects incomplete and command-specific options", () => {
   assert.throws(
+    () => parseCliArgs([]),
+    /Image to Editable PPTX\n\nUsage:/,
+  );
+  assert.throws(
     () => parseCliArgs(["run", "--image", "slide.png"]),
     /Usage:/,
   );

@@ -12,7 +12,9 @@ import {
   type RunPipelineOptions,
 } from "./pipeline.js";
 
-const USAGE = `Usage:
+const USAGE = `Image to Editable PPTX
+
+Usage:
   npm run cli -- analyze --image <png> --out <dir> [--record]
   npm run cli -- build --image <png> --analysis <dir> --out <dir> [--required-text-count <n>]
   npm run cli -- run --image <png> --out <dir> [--required-text-count <n>] [--record]`;
