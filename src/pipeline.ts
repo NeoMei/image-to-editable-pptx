@@ -25,11 +25,13 @@ import { z } from "zod";
 
 import { loadConfig, type AppConfig } from "./config.js";
 import {
+  CandidateDecisionSchema,
   OcrResultSchema,
   RunLedgerV2Schema,
   Sha256Schema,
   SlideManifestSchema,
   VisionResultSchema,
+  type FidelityPlan,
   type OcrResult,
   type SlideManifest,
   type VisionResult,
@@ -547,6 +549,132 @@ function safeAssetOutput(outDir: string, assetPath: string): string {
   return join(outDir, assetPath);
 }
 
+function validateFidelityResult(
+  plan: FidelityPlan,
+  result: FidelityBuildResult,
+  manifest: SlideManifest,
+): void {
+  const expectedCandidates = new Map<string, "text" | "icon">();
+  for (const candidate of [...plan.text, ...plan.icons]) {
+    if (expectedCandidates.has(candidate.id)) {
+      throw new Error(`Duplicate fidelity candidate ID: ${candidate.id}`);
+    }
+    expectedCandidates.set(candidate.id, candidate.kind);
+  }
+
+  const manifestElements = new Map<string, SlideManifest["elements"][number]>();
+  for (const element of manifest.elements) {
+    if (manifestElements.has(element.id)) {
+      throw new Error(`Duplicate fidelity manifest element ID: ${element.id}`);
+    }
+    manifestElements.set(element.id, element);
+  }
+
+  const decisions = z.array(CandidateDecisionSchema).parse(result.decisions);
+  const decisionsByCandidate = new Map(
+    decisions.map((decision) => [decision.candidateId, decision] as const),
+  );
+  if (decisionsByCandidate.size !== decisions.length) {
+    throw new Error("Duplicate fidelity decision candidate ID");
+  }
+  for (const candidateId of expectedCandidates.keys()) {
+    if (!decisionsByCandidate.has(candidateId)) {
+      throw new Error(`Missing fidelity decision for candidate: ${candidateId}`);
+    }
+  }
+
+  const coveredManifestElements = new Set<string>();
+  for (const decision of decisions) {
+    const expectedKind = expectedCandidates.get(decision.candidateId);
+    if (expectedKind === undefined) {
+      throw new Error(
+        `Unexpected fidelity decision candidate: ${decision.candidateId}`,
+      );
+    }
+    if (decision.kind !== expectedKind) {
+      throw new Error(
+        `Fidelity decision kind mismatch for candidate: ${decision.candidateId}`,
+      );
+    }
+    if (decision.decision === "kept_in_background") {
+      if (expectedKind === "text") {
+        throw new Error(
+          `Required text candidate was kept in background: ${decision.candidateId}`,
+        );
+      }
+      if (decision.output.state !== "kept_in_background") {
+        throw new Error(
+          `Fidelity decision output mismatch for candidate: ${decision.candidateId}`,
+        );
+      }
+      continue;
+    }
+    if (decision.output.state !== "editable_layer") {
+      throw new Error(
+        `Fidelity decision output mismatch for candidate: ${decision.candidateId}`,
+      );
+    }
+    const element = manifestElements.get(decision.output.manifestElementId);
+    if (element === undefined) {
+      throw new Error(
+        `Fidelity decision references missing manifest element: ${decision.output.manifestElementId}`,
+      );
+    }
+    if (
+      (expectedKind === "text" && element.kind !== "text") ||
+      (expectedKind === "icon" && element.kind !== "asset")
+    ) {
+      throw new Error(
+        `Fidelity manifest kind mismatch for candidate: ${decision.candidateId}`,
+      );
+    }
+    if (coveredManifestElements.has(element.id)) {
+      throw new Error(`Fidelity manifest element is covered twice: ${element.id}`);
+    }
+    coveredManifestElements.add(element.id);
+
+    if (element.kind === "text" && decision.output.assetPath !== undefined) {
+      throw new Error(
+        `Text fidelity decision must not reference an asset: ${decision.candidateId}`,
+      );
+    }
+    if (element.kind === "asset") {
+      if (element.extraction !== "transparent") {
+        throw new Error(
+          `Fidelity asset must use transparent extraction: ${element.id}`,
+        );
+      }
+      if (decision.output.assetPath !== element.assetPath) {
+        throw new Error(
+          `Fidelity asset path mismatch for candidate: ${decision.candidateId}`,
+        );
+      }
+    }
+  }
+
+  for (const elementId of manifestElements.keys()) {
+    if (!coveredManifestElements.has(elementId)) {
+      throw new Error(`Untracked fidelity manifest element: ${elementId}`);
+    }
+  }
+
+  const manifestAssetPaths = new Set(
+    manifest.elements.flatMap((element) =>
+      element.kind === "asset" ? [element.assetPath] : [],
+    ),
+  );
+  for (const assetPath of result.assets.keys()) {
+    if (!manifestAssetPaths.has(assetPath)) {
+      throw new Error(`Untracked fidelity asset: ${assetPath}`);
+    }
+  }
+  for (const assetPath of manifestAssetPaths) {
+    if (!result.assets.has(assetPath)) {
+      throw new Error(`Missing fidelity asset: ${assetPath}`);
+    }
+  }
+}
+
 async function buildFromAnalysis(
   options: BuildOptions,
   context: BuildContext,
@@ -611,6 +739,7 @@ async function buildFromAnalysis(
     manifest.elements.filter((element) => element.kind === "text").length,
     options.requiredTextCount,
   );
+  validateFidelityResult(fidelityPlan, fidelityResult, manifest);
   await Promise.all(
     [...fidelityResult.assets].map(([assetPath, asset]) =>
       writeFile(safeAssetOutput(outDir, assetPath), asset),

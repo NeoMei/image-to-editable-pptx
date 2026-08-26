@@ -1331,6 +1331,80 @@ test("required text count validates accepted manifest texts before export", asyn
   }
 });
 
+test("rejects an untracked fidelity asset before publication", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-untracked-asset-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    }).png().toFile(imagePath);
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+        fidelityBuild: async (...args) => {
+          const result = await deterministicFidelityBuild(...args);
+          result.assets.set("assets/orphan.png", args[0]);
+          return result;
+        },
+      }),
+      /untracked fidelity asset: assets\/orphan\.png/i,
+    );
+    await assert.rejects(access(outDir), /ENOENT/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects a fidelity decision ledger that does not cover the manifest", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-incomplete-decisions-"));
+  const imagePath = join(directory, "source-slide-07.png");
+  const outDir = join(directory, "slide-07");
+
+  try {
+    await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 3,
+        background: "#f7f3e9",
+      },
+    }).png().toFile(imagePath);
+
+    await assert.rejects(
+      runPipeline({
+        imagePath,
+        outDir,
+        replay: {
+          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+        },
+        fidelityBuild: async (...args) => {
+          const result = await deterministicFidelityBuild(...args);
+          result.decisions = result.decisions.slice(1);
+          return result;
+        },
+      }),
+      /missing fidelity decision for candidate: ocr-1/i,
+    );
+    await assert.rejects(access(outDir), /ENOENT/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("refuses to replace an unowned output directory and leaves it unchanged", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-unowned-"));
   const imagePath = join(directory, "source-slide-07.png");
