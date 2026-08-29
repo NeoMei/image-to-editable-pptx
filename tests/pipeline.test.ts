@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import {
   access,
@@ -19,6 +20,11 @@ import JSZip from "jszip";
 import sharp from "sharp";
 
 import type { AppConfig } from "../src/config.js";
+import {
+  readAnalysisPackage,
+  writeAnalysisPackageV2,
+  type AnalysisPackageV2,
+} from "../src/analysis/package.js";
 import type {
   CandidateDecision,
   FidelityPlan,
@@ -45,6 +51,10 @@ const liveConfig: AppConfig = {
   requestTimeoutMs: 120_000,
   pollIntervalMs: 0,
 };
+
+function sha256(value: Buffer | string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 async function snapshotTree(
   directory: string,
@@ -363,6 +373,140 @@ test("rejects an invalid source before invoking OCR or Vision", async () => {
   }
 });
 
+test("live analyze records one OCR, one full Vision, bounded regional Vision, and disabled completion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-v2-live-analysis-"));
+  const imagePath = join(directory, "source.png");
+  const analysisDir = join(directory, "analysis");
+  const originalFetch = globalThis.fetch;
+  let ocrCalls = 0;
+  let fullVisionCalls = 0;
+  let regionalVisionCalls = 0;
+
+  try {
+    await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 4,
+        background: "#f7f3e9",
+      },
+    }).png().toFile(imagePath);
+    const [ocrFixture, sceneFixture] = await Promise.all([
+      readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8").then(JSON.parse),
+      readFile(resolve("tests/fixtures/qwen-scene-generic.json"), "utf8").then(JSON.parse),
+    ]);
+    const boundedConfig: AppConfig = {
+      ...liveConfig,
+      maxRegionAnalysis: 1,
+      maxOcclusionCompletions: 0,
+    };
+
+    globalThis.fetch = async (input, init) => {
+      if (String(input).endsWith("/chat/completions")) {
+        const request = JSON.parse(String(init?.body)) as {
+          messages: Array<{
+            content: Array<{ type: string; text?: string }>;
+          }>;
+        };
+        const prompt = request.messages[0]?.content.find(
+          ({ type }) => type === "text",
+        )?.text ?? "";
+        if (prompt.includes("supplied regional crop")) regionalVisionCalls += 1;
+        else fullVisionCalls += 1;
+        return Response.json(sceneFixture);
+      }
+      ocrCalls += 1;
+      return Response.json(ocrFixture);
+    };
+
+    await analyzeSlide({
+      imagePath,
+      outDir: analysisDir,
+      config: boundedConfig,
+    });
+
+    assert.deepEqual(
+      { ocrCalls, fullVisionCalls, regionalVisionCalls },
+      { ocrCalls: 1, fullVisionCalls: 1, regionalVisionCalls: 1 },
+    );
+    const packageLedger = await readAnalysisPackage(analysisDir);
+    assert.equal(packageLedger.analysisVersion, 2);
+    assert.deepEqual(packageLedger.requests, {
+      ocr: 1,
+      fullVision: 1,
+      regionalVision: 1,
+      completion: 0,
+    });
+    assert.equal(packageLedger.refinements.length, 1);
+    assert.equal(packageLedger.completions.length, 0);
+    const ledgerText = await readFile(
+      join(analysisDir, "analysis-ledger.json"),
+      "utf8",
+    );
+    assert.doesNotMatch(
+      ledgerText,
+      /provider-secret-canary|data:image|base64|authorization|signed[_-]?url/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("integrated live run consumes and preserves its verified v2 staging package", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-v2-live-run-"));
+  const imagePath = join(directory, "source.png");
+  const outDir = join(directory, "output");
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  try {
+    await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 4,
+        background: "#f7f3e9",
+      },
+    }).png().toFile(imagePath);
+    const [ocrFixture, sceneFixture] = await Promise.all([
+      readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8").then(JSON.parse),
+      readFile(resolve("tests/fixtures/qwen-scene-generic.json"), "utf8").then(JSON.parse),
+    ]);
+    globalThis.fetch = async (input) => {
+      fetchCalls += 1;
+      return Response.json(
+        String(input).endsWith("/chat/completions")
+          ? sceneFixture
+          : ocrFixture,
+      );
+    };
+
+    const result = await runPipeline({
+      imagePath,
+      outDir,
+      config: {
+        ...liveConfig,
+        maxRegionAnalysis: 0,
+        maxOcclusionCompletions: 0,
+      },
+      fidelityBuild: deterministicFidelityBuild,
+    });
+
+    assert.equal(fetchCalls, 2);
+    assert.equal(result.pptxPath.endsWith("/output/slide-editable.pptx"), true);
+    const packageLedger = await readAnalysisPackage(outDir);
+    assert.equal(packageLedger.analysisVersion, 2);
+    await Promise.all([
+      access(join(outDir, "source.rgba")),
+      access(join(outDir, "scene-graph.json")),
+      access(result.pptxPath),
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("rejects a source image replaced between integrated analysis and build", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-source-race-"));
   const imagePath = join(directory, "source-slide-07.png");
@@ -503,6 +647,127 @@ test("preserves live-like analysis provenance through a split build", async () =
     assert.equal(ledger.durationsMs.analyze, 33);
     assert.ok(ledger.warnings.includes("live-analysis-warning"));
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("builds offline from a verified v2 package without an external source image", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-v2-offline-"));
+  const analysisDir = join(directory, "analysis");
+  const outDir = join(directory, "output");
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+
+  try {
+    await mkdir(analysisDir);
+    const sourceBytes = await sharp({
+      create: {
+        width: 1280,
+        height: 720,
+        channels: 4,
+        background: "#f7f3e9",
+      },
+    }).png().toBuffer();
+    const rgba = await sharp(sourceBytes).ensureAlpha().raw().toBuffer();
+    const canvas = {
+      format: "png" as const,
+      width: 1280,
+      height: 720,
+      rgba,
+      sourceBytes,
+    };
+    const packageOcr = { lines: [] };
+    const packageScene = {
+      graphVersion: 1 as const,
+      canvas: { width: 1280, height: 720 },
+      nodes: [
+        {
+          id: "background",
+          role: "background" as const,
+          bbox: { x: 0, y: 0, width: 1, height: 1 },
+          confidence: 1,
+          zIndex: 0,
+          label: "complete canvas",
+          extractionHints: [],
+        },
+      ],
+      relations: [],
+    };
+    const analysisLedger: AnalysisPackageV2 = {
+      analysisVersion: 2,
+      mode: "replay",
+      recorded: true,
+      canvas: packageScene.canvas,
+      source: {
+        path: "source.rgba",
+        sha256: sha256(rgba),
+        originalSha256: sha256(sourceBytes),
+        format: "png",
+      },
+      ocr: {
+        path: "ocr.json",
+        sha256: sha256(`${JSON.stringify(packageOcr, null, 2)}\n`),
+      },
+      scene: {
+        path: "scene-graph.json",
+        sha256: sha256(`${JSON.stringify(packageScene, null, 2)}\n`),
+      },
+      refinements: [],
+      completions: [],
+      requests: { ocr: 1, fullVision: 1, regionalVision: 0, completion: 0 },
+      models: {
+        ocr: "qwen3.5-ocr",
+        fullVision: "qwen3-vl-plus",
+        regionalVision: "qwen3-vl-plus",
+      },
+      durationsMs: {
+        ocr: 1,
+        fullVision: 1,
+        regionalVision: 0,
+        completion: 0,
+        analyze: 2,
+      },
+      warnings: [],
+    };
+    await writeAnalysisPackageV2({
+      directory: analysisDir,
+      canvas,
+      ocr: packageOcr,
+      scene: packageScene,
+      refinements: [],
+      completions: [],
+      ledger: analysisLedger,
+    });
+
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      throw new Error("offline build attempted network access");
+    };
+
+    const result = await buildSlide({
+      analysisDir,
+      outDir,
+    });
+
+    assert.equal(fetchCalls, 0);
+    await Promise.all([
+      access(result.pptxPath),
+      access(join(outDir, "scene-graph.json")),
+      access(join(outDir, "analysis-ledger.json")),
+    ]);
+    const copiedAnalysisLedger = JSON.parse(
+      await readFile(join(outDir, "analysis-ledger.json"), "utf8"),
+    ) as {
+      requests: Record<string, number>;
+      source: { originalSha256: string };
+    };
+    assert.deepEqual(copiedAnalysisLedger.requests, analysisLedger.requests);
+    assert.equal(
+      copiedAnalysisLedger.source.originalSha256,
+      analysisLedger.source.originalSha256,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -907,7 +1172,7 @@ test("retains sanitized malformed live Vision response and parse error in the fa
         outDir,
         config: liveConfig,
       }),
-      /vision response is not valid JSON/i,
+      /(?:qwen scene|vision) response is not valid JSON/i,
     );
 
     const failedRuns = await readdir(`${outDir}.failed-runs`);
@@ -1058,7 +1323,7 @@ test("captures a bounded sanitized invalid-JSON Vision HTTP body before decoding
         outDir,
         config: liveConfig,
       }),
-      /Vision HTTP response is not valid JSON/i,
+      /(?:Qwen scene|Vision) HTTP response is not valid JSON/i,
     );
 
     const failedRuns = await readdir(`${outDir}.failed-runs`);
@@ -1081,7 +1346,10 @@ test("captures a bounded sanitized invalid-JSON Vision HTTP body before decoding
     assert.ok(raw.originalLength > 65_536);
     assert.ok(raw.body.length <= 65_536);
     assert.match(raw.body, /not-json-vision/);
-    assert.match(parseError, /Vision HTTP response is not valid JSON/);
+    assert.match(
+      parseError,
+      /(?:Qwen scene|Vision) HTTP response is not valid JSON/,
+    );
     assert.doesNotMatch(
       rawText + parseError,
       /provider-secret-canary|sk-round2-credential|LTAI0123456789ABCDEF|quoted-round2|authorization|api[_-]?key|bearer/i,

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   lstat,
@@ -8,6 +9,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   writeFile,
 } from "node:fs/promises";
 import {
@@ -23,6 +25,15 @@ import {
 import sharp from "sharp";
 import { z } from "zod";
 
+import {
+  ANALYSIS_LEDGER_NAME,
+  readAnalysisPackage,
+  readVerifiedAnalysisArtifact,
+  writeAnalysisPackageV2,
+  type AnalysisArtifact,
+  type AnalysisPackageV2,
+  type CompletionArtifact,
+} from "./analysis/package.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import {
   CandidateDecisionSchema,
@@ -44,13 +55,23 @@ import {
 import { planFidelityCandidates } from "./fidelity/candidates.js";
 import { decodeSourceImage, type SourceCanvas } from "./image/source.js";
 import {
+  chooseSemanticMask,
+  deriveSemanticMasks,
+  type MaskCandidate,
+} from "./image/semantic-mask.js";
+import {
+  completeOccludedCandidate,
+  OcclusionCompletionBudget,
+} from "./occlusion/complete.js";
+import { analyzeScene, refineSceneRegions } from "./providers/qwen-scene.js";
+import {
   parseQwenOcrResponse,
   recognizeText,
 } from "./providers/qwen-ocr.js";
 import {
-  analyzeElements,
   parseQwenVisionContent,
 } from "./providers/qwen-vision.js";
+import { createWanxOcclusionCompletionProvider } from "./providers/wanx-edit.js";
 import {
   sanitizeHttpResponseBody,
   type ProviderResponseObserver,
@@ -58,8 +79,11 @@ import {
 import {
   readRecording,
   sanitizeProviderRecording,
+  sanitizeRecordingPayload,
   writeRecording,
 } from "./recording.js";
+import { SceneGraphSchema, type SceneGraph } from "./scene/contracts.js";
+import { planSemanticLayers } from "./scene/plan.js";
 
 const RawVisionRecordingSchema = z.object({
   choices: z.array(
@@ -179,18 +203,30 @@ export type AnalyzeOptions = Pick<
 >;
 
 export type BuildOptions = {
-  imagePath: string;
+  imagePath?: string;
   analysisDir: string;
   outDir: string;
   fidelityBuild?: FidelityBuild;
   requiredTextCount?: number;
 };
 
-type AnalysisResult = {
+type AnalysisResultV1 = {
+  analysisVersion: 1;
   ocr: OcrResult;
   vision: VisionResult;
   ledger: AnalysisLedger;
 };
+
+type AnalysisResultV2 = {
+  analysisVersion: 2;
+  source: SourceCanvas;
+  ocr: OcrResult;
+  scene: SceneGraph;
+  ledger: AnalysisPackageV2;
+  directory: string;
+};
+
+type AnalysisResult = AnalysisResultV1 | AnalysisResultV2;
 
 type BuildContext = {
   analysis: AnalysisResult;
@@ -277,7 +313,8 @@ async function requireOwnedOutputDirectory(
 
 export async function validatePublicationTarget(options: {
   targetPath: string;
-  sourceImagePath: string;
+  sourceImagePath?: string;
+  protectedPaths?: string[];
 }): Promise<{ targetDir: string; owned?: OwnedOutputDirectory }> {
   if (options.targetPath.trim() === "") {
     throw new Error("Unsafe output directory: path must not be empty");
@@ -299,15 +336,23 @@ export async function validatePublicationTarget(options: {
     }
   }
 
-  const [targetDir, sourceImage, cwd] = await Promise.all([
+  const [targetDir, cwd, sourceImage, ...protectedPaths] = await Promise.all([
     canonicalizePotentialPath(absoluteTarget),
-    realpath(options.sourceImagePath),
     realpath(process.cwd()),
+    options.sourceImagePath === undefined
+      ? Promise.resolve(undefined)
+      : realpath(options.sourceImagePath),
+    ...(options.protectedPaths ?? []).map((path) => realpath(path)),
   ]);
   if (
     dirname(targetDir) === targetDir ||
     isSameOrAncestor(targetDir, cwd) ||
-    isSameOrAncestor(targetDir, sourceImage)
+    (sourceImage !== undefined && isSameOrAncestor(targetDir, sourceImage)) ||
+    protectedPaths.some(
+      (path) =>
+        isSameOrAncestor(targetDir, path) ||
+        isSameOrAncestor(path, targetDir),
+    )
   ) {
     throw new Error(`Unsafe output directory: ${targetDir}`);
   }
@@ -442,112 +487,434 @@ function responseObserver(
     recordParseError: (error) =>
       writeRecording(
         join(outDir, `parse-errors/${provider}.json`),
-        parseErrorRecord(provider, error),
+        sanitizeRecordingPayload(parseErrorRecord(provider, error)),
       ),
   };
 }
 
-export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisResult> {
+async function writeRefinementArtifacts(
+  outDir: string,
+  result: Awaited<ReturnType<typeof refineSceneRegions>>,
+): Promise<AnalysisArtifact[]> {
+  if (result.requests.length === 0) return [];
+  const directory = join(outDir, "refinements");
+  await mkdir(directory, { recursive: true });
+  return Promise.all(
+    result.requests.map(async (request, index) => {
+      const path = `refinements/refinement-${String(index + 1).padStart(3, "0")}.json`;
+      const rejectedWarning =
+        `regional_refinement_rejected:${request.reason}:${request.targetNodeIds.join(",")}`;
+      await writeRecording(join(outDir, path), {
+        request,
+        accepted: !result.warnings.includes(rejectedWarning),
+      });
+      return {
+        path,
+        sha256: await sha256File(join(outDir, path)),
+        crop: request.crop,
+      };
+    }),
+  );
+}
+
+async function blankCanvasMask(source: SourceCanvas): Promise<Buffer> {
+  return sharp(Buffer.alloc(source.width * source.height), {
+    raw: { width: source.width, height: source.height, channels: 1 },
+  })
+    .png()
+    .toBuffer();
+}
+
+async function canonicalCrop(
+  source: SourceCanvas,
+  bbox: MaskCandidate["bbox"],
+): Promise<Buffer> {
+  return sharp(source.rgba, {
+    raw: { width: source.width, height: source.height, channels: 4 },
+  })
+    .extract({
+      left: Math.round(bbox.x),
+      top: Math.round(bbox.y),
+      width: Math.round(bbox.width),
+      height: Math.round(bbox.height),
+    })
+    .png()
+    .toBuffer();
+}
+
+async function projectMask(
+  mask: MaskCandidate,
+  target: MaskCandidate["bbox"],
+): Promise<Buffer> {
+  const decoded = await sharp(mask.mask)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const width = Math.round(target.width);
+  const height = Math.round(target.height);
+  const alpha = Buffer.alloc(width * height);
+  const sourceLeft = Math.round(mask.bbox.x);
+  const sourceTop = Math.round(mask.bbox.y);
+  const targetLeft = Math.round(target.x);
+  const targetTop = Math.round(target.y);
+  for (let y = 0; y < decoded.info.height; y += 1) {
+    const targetY = sourceTop + y - targetTop;
+    if (targetY < 0 || targetY >= height) continue;
+    for (let x = 0; x < decoded.info.width; x += 1) {
+      const targetX = sourceLeft + x - targetLeft;
+      if (targetX < 0 || targetX >= width) continue;
+      alpha[targetY * width + targetX] =
+        decoded.data[(y * decoded.info.width + x) * decoded.info.channels + 3]!;
+    }
+  }
+  return sharp(alpha, { raw: { width, height, channels: 1 } })
+    .png()
+    .toBuffer();
+}
+
+async function writeCompletionBinary(path: string, content: Buffer): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, content, { flag: "wx", mode: 0o600 });
+  await chmodPrivate(path);
+}
+
+async function chmodPrivate(path: string): Promise<void> {
+  await chmod(path, 0o600);
+}
+
+async function completeEligibleCandidates(input: {
+  outDir: string;
+  source: SourceCanvas;
+  ocr: OcrResult;
+  scene: SceneGraph;
+  config: AppConfig;
+}): Promise<{ artifacts: CompletionArtifact[]; requests: number }> {
+  const limit = input.config.maxOcclusionCompletions ?? 4;
+  const budget = new OcclusionCompletionBudget(limit);
+  if (limit === 0) return { artifacts: [], requests: 0 };
+
+  const plan = planSemanticLayers(input.scene, input.ocr);
+  const unrelatedTextMask = await blankCanvasMask(input.source);
+  const masks = new Map<string, MaskCandidate>();
+  for (const candidate of plan.candidates) {
+    const proposals = await deriveSemanticMasks(input.source, candidate);
+    const selected = chooseSemanticMask(proposals, unrelatedTextMask);
+    if (selected !== undefined) masks.set(candidate.id, selected);
+  }
+  const candidateIdByNodeId = new Map<string, string>();
+  for (const candidate of plan.candidates) {
+    for (const nodeId of candidate.nodeIds) {
+      candidateIdByNodeId.set(nodeId, candidate.id);
+    }
+  }
+
+  const provider = createWanxOcclusionCompletionProvider(input.config);
+  let requests = 0;
+  const countedProvider = {
+    async complete(request: Parameters<typeof provider.complete>[0]) {
+      requests += 1;
+      return provider.complete(request);
+    },
+  };
+  const artifacts: CompletionArtifact[] = [];
+  for (const candidate of plan.candidates) {
+    if (candidate.occlusion === undefined) continue;
+    const visible = masks.get(candidate.id);
+    if (visible === undefined) continue;
+    const occluderMasks = new Map<string, Buffer>();
+    let completeMaskSet = true;
+    for (const occluderNodeId of candidate.occlusion.occluderIds) {
+      const occluderCandidateId = candidateIdByNodeId.get(occluderNodeId);
+      const occluder =
+        occluderCandidateId === undefined
+          ? undefined
+          : masks.get(occluderCandidateId);
+      if (occluder === undefined) {
+        completeMaskSet = false;
+        break;
+      }
+      occluderMasks.set(
+        occluderNodeId,
+        await projectMask(occluder, visible.bbox),
+      );
+    }
+    if (!completeMaskSet) continue;
+
+    const completed = await completeOccludedCandidate(
+      {
+        candidate,
+        canvas: input.scene.canvas,
+        cropBounds: visible.bbox,
+        crop: await canonicalCrop(input.source, visible.bbox),
+        visibleMask: visible.mask,
+        occluderMasks,
+        semanticContext: [
+          `candidate-kind:${candidate.kind}`,
+          `relation-count:${candidate.relations.length}`,
+        ],
+        budget,
+        timeoutMs: input.config.requestTimeoutMs,
+      },
+      countedProvider,
+    );
+    if (completed === undefined) continue;
+    const sequence = String(artifacts.length + 1).padStart(3, "0");
+    const path = `completions/completion-${sequence}.png`;
+    const visibleMaskPath =
+      `completions/completion-${sequence}-visible-mask.png`;
+    const generatedMaskPath =
+      `completions/completion-${sequence}-generated-mask.png`;
+    await Promise.all([
+      writeCompletionBinary(join(input.outDir, path), completed.image),
+      writeCompletionBinary(
+        join(input.outDir, visibleMaskPath),
+        completed.visibleMask,
+      ),
+      writeCompletionBinary(
+        join(input.outDir, generatedMaskPath),
+        completed.generatedMask,
+      ),
+    ]);
+    artifacts.push({
+      path,
+      sha256: sha256(completed.image),
+      crop: visible.bbox,
+      candidateId: candidate.id,
+      visibleMaskPath,
+      generatedMaskPath,
+      reviewRequired: true,
+      provenance: completed.provenance,
+    });
+  }
+  return { artifacts, requests };
+}
+
+async function analyzeIntoDirectory(
+  options: AnalyzeOptions,
+  decodedSource?: SourceCanvas,
+): Promise<AnalysisResult> {
   const startedAt = performance.now();
   const outDir = resolve(options.outDir);
-  const source = await decodeSourceImage(options.imagePath);
+  const source = decodedSource ?? await decodeSourceImage(options.imagePath);
   const image = source.sourceBytes;
   await prepareAnalysisDirectory(outDir);
 
-  let ocr: OcrResult;
-  let vision: VisionResult;
-  let ocrDuration: number;
-  let visionDuration: number;
-  let activeConfig = options.config;
-
   if (options.replay !== undefined) {
     const ocrStartedAt = performance.now();
-    ocr = await readReplayOcr(options.replay.ocrPath);
-    ocrDuration = elapsed(ocrStartedAt);
+    const ocr = await readReplayOcr(options.replay.ocrPath);
+    const ocrDuration = elapsed(ocrStartedAt);
     const visionStartedAt = performance.now();
-    vision = await readReplayVision(options.replay.visionPath);
-    visionDuration = elapsed(visionStartedAt);
-  } else {
-    const config = activeConfig ?? loadConfig();
-    activeConfig = config;
-    const ocrStartedAt = performance.now();
-    const ocrPromise = recognizeText(
-      image,
-      config,
-      responseObserver(outDir, "ocr", config.apiKey),
-    ).finally(() => {
-      ocrDuration = elapsed(ocrStartedAt);
-    });
-    const visionStartedAt = performance.now();
-    const visionPromise = analyzeElements(
-      image,
-      config,
-      responseObserver(outDir, "vision", config.apiKey),
-    ).finally(() => {
-      visionDuration = elapsed(visionStartedAt);
-    });
-    const [ocrOutcome, visionOutcome] = await Promise.allSettled([
-      ocrPromise,
-      visionPromise,
+    const vision = await readReplayVision(options.replay.visionPath);
+    const visionDuration = elapsed(visionStartedAt);
+    await Promise.all([
+      writeRecording(join(outDir, "ocr.json"), ocr),
+      writeRecording(join(outDir, "vision.json"), vision),
     ]);
-    ocrDuration = ocrDuration!;
-    visionDuration = visionDuration!;
-    if (ocrOutcome.status === "rejected") throw ocrOutcome.reason;
-    if (visionOutcome.status === "rejected") throw visionOutcome.reason;
-    ocr = ocrOutcome.value;
-    vision = visionOutcome.value;
-    await rm(join(outDir, "raw-responses"), { recursive: true, force: true });
+    const recorded = options.record === true;
+    if (recorded) {
+      await Promise.all([
+        writeRecording(join(outDir, "recordings/ocr.json"), ocr),
+        writeRecording(join(outDir, "recordings/vision.json"), vision),
+      ]);
+    }
+    const ledger = AnalysisLedgerSchema.parse({
+      analysisVersion: 1,
+      mode: "replay",
+      recorded,
+      models: configuredModels(options.config),
+      durationsMs: {
+        ocr: ocrDuration,
+        vision: visionDuration,
+        analyze: elapsed(startedAt),
+      },
+      warnings: [],
+      hashes: {
+        sourceImage: sha256(image),
+        ocr: await sha256File(join(outDir, "ocr.json")),
+        vision: await sha256File(join(outDir, "vision.json")),
+      },
+      outputs: { ocr: "ocr.json", vision: "vision.json" },
+      ...(recorded
+        ? {
+            recordings: {
+              ocr: "recordings/ocr.json",
+              vision: "recordings/vision.json",
+            },
+          }
+        : {}),
+    });
+    await writeRecording(join(outDir, ANALYSIS_LEDGER_NAME), ledger);
+    return { analysisVersion: 1, ocr, vision, ledger };
   }
 
+  const config = options.config ?? loadConfig();
+  const canonicalImage = await canonicalLocalImage(source);
+  let ocrDuration = 0;
+  let fullVisionDuration = 0;
+  const ocrStartedAt = performance.now();
+  const ocrPromise = recognizeText(
+    image,
+    config,
+    responseObserver(outDir, "ocr", config.apiKey),
+  ).finally(() => {
+    ocrDuration = elapsed(ocrStartedAt);
+  });
+  const fullVisionStartedAt = performance.now();
+  const scenePromise = analyzeScene(
+    canonicalImage,
+    { width: source.width, height: source.height },
+    config,
+    responseObserver(outDir, "vision", config.apiKey),
+  ).finally(() => {
+    fullVisionDuration = elapsed(fullVisionStartedAt);
+  });
+  const [ocrOutcome, sceneOutcome] = await Promise.allSettled([
+    ocrPromise,
+    scenePromise,
+  ]);
+  if (ocrOutcome.status === "rejected") throw ocrOutcome.reason;
+  if (sceneOutcome.status === "rejected") throw sceneOutcome.reason;
+  const ocr = ocrOutcome.value;
+
+  const regionalStartedAt = performance.now();
+  const refined = await refineSceneRegions(
+    canonicalImage,
+    sceneOutcome.value,
+    config,
+    responseObserver(outDir, "vision", config.apiKey),
+  );
+  const regionalVisionDuration = elapsed(regionalStartedAt);
+  const refinements = await writeRefinementArtifacts(outDir, refined);
+
+  const completionStartedAt = performance.now();
+  const completion = await completeEligibleCandidates({
+    outDir,
+    source,
+    ocr,
+    scene: refined.graph,
+    config,
+  });
+  const completionDuration = elapsed(completionStartedAt);
+  const canonicalScene = SceneGraphSchema.parse(refined.graph) as SceneGraph;
   await Promise.all([
     writeRecording(join(outDir, "ocr.json"), ocr),
-    writeRecording(join(outDir, "vision.json"), vision),
+    writeRecording(join(outDir, "scene-graph.json"), canonicalScene),
   ]);
-
-  const recorded = options.record === true;
-  if (recorded) {
-    await Promise.all([
-      writeRecording(join(outDir, "recordings/ocr.json"), ocr),
-      writeRecording(join(outDir, "recordings/vision.json"), vision),
-    ]);
-  }
-
-  const ledger = AnalysisLedgerSchema.parse({
-    analysisVersion: 1,
-    mode: options.replay === undefined ? "live" : "replay",
-    recorded,
-    models: configuredModels(activeConfig),
+  const [ocrHash, sceneHash] = await Promise.all([
+    sha256File(join(outDir, "ocr.json")),
+    sha256File(join(outDir, "scene-graph.json")),
+  ]);
+  const ledger: AnalysisPackageV2 = {
+    analysisVersion: 2,
+    mode: "live",
+    recorded: options.record === true,
+    canvas: { width: source.width, height: source.height },
+    source: {
+      path: "source.rgba",
+      sha256: sha256(source.rgba),
+      originalSha256: sha256(source.sourceBytes),
+      format: source.format,
+    },
+    ocr: {
+      path: "ocr.json",
+      sha256: ocrHash,
+    },
+    scene: {
+      path: "scene-graph.json",
+      sha256: sceneHash,
+    },
+    refinements,
+    completions: completion.artifacts,
+    requests: {
+      ocr: 1,
+      fullVision: 1,
+      regionalVision: refined.requests.length,
+      completion: completion.requests,
+    },
+    models: {
+      ocr: config.ocrModel,
+      fullVision: config.visionModel,
+      regionalVision: config.visionModel,
+      ...(completion.requests === 0 ? {} : { completion: config.editModel }),
+    },
     durationsMs: {
       ocr: ocrDuration,
-      vision: visionDuration,
+      fullVision: fullVisionDuration,
+      regionalVision: regionalVisionDuration,
+      completion: completionDuration,
       analyze: elapsed(startedAt),
     },
-    warnings: [],
-    hashes: {
-      sourceImage: sha256(image),
-      ocr: await sha256File(join(outDir, "ocr.json")),
-      vision: await sha256File(join(outDir, "vision.json")),
-    },
-    outputs: { ocr: "ocr.json", vision: "vision.json" },
-    ...(recorded
-      ? {
-          recordings: {
-            ocr: "recordings/ocr.json",
-            vision: "recordings/vision.json",
-          },
-        }
-      : {}),
-  });
-  await writeRecording(join(outDir, "analysis-ledger.json"), ledger);
-
-  return {
+    warnings: [...refined.warnings],
+  };
+  await writeAnalysisPackageV2({
+    directory: outDir,
+    canvas: source,
     ocr,
-    vision,
+    scene: canonicalScene,
+    refinements,
+    completions: completion.artifacts,
     ledger,
+  });
+  await Promise.all([
+    rm(join(outDir, "raw-responses"), { recursive: true, force: true }),
+    rm(join(outDir, "parse-errors"), { recursive: true, force: true }),
+  ]);
+  return {
+    analysisVersion: 2,
+    source,
+    ocr,
+    scene: canonicalScene,
+    ledger,
+    directory: outDir,
   };
 }
 
-function outputName(imagePath: string): string {
+async function validateStandaloneAnalysisTarget(
+  target: string,
+): Promise<{ target: string; existedEmpty: boolean }> {
+  const absolute = resolve(target);
+  try {
+    const info = await lstat(absolute);
+    if (
+      info.isSymbolicLink() ||
+      !info.isDirectory() ||
+      (await readdir(absolute)).length !== 0
+    ) {
+      throw new Error("Analysis output directory must be new or empty");
+    }
+    return { target: absolute, existedEmpty: true };
+  } catch (error) {
+    if (!isNotFound(error)) throw error;
+    return { target: absolute, existedEmpty: false };
+  }
+}
+
+export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisResult> {
+  const source = await decodeSourceImage(options.imagePath);
+  const publication = await validateStandaloneAnalysisTarget(options.outDir);
+  const parent = dirname(publication.target);
+  await mkdir(parent, { recursive: true });
+  const stagingDir = await mkdtemp(
+    join(parent, `.${basename(publication.target)}.analysis-staging-`),
+  );
+  try {
+    const result = await analyzeIntoDirectory(
+      { ...options, outDir: stagingDir },
+      source,
+    );
+    if (publication.existedEmpty) await rmdir(publication.target);
+    await rename(stagingDir, publication.target);
+    return result.analysisVersion === 1
+      ? result
+      : { ...result, directory: publication.target };
+  } catch (error) {
+    await retainFailedRun(stagingDir, publication.target);
+    throw error;
+  }
+}
+
+function outputName(imagePath?: string): string {
+  if (imagePath === undefined) return "slide-editable.pptx";
   const extension = extname(imagePath);
   const stem = basename(imagePath, extension).replace(/^source-/, "");
   return `${stem}-editable.pptx`;
@@ -708,24 +1075,95 @@ async function buildFromAnalysis(
 ): Promise<PipelineResult> {
   const outDir = resolve(options.outDir);
   const publishedOutDir = resolve(context.publishedOutDir ?? outDir);
-  const imagePath = resolve(options.imagePath);
-  const source = await decodeSourceImage(imagePath);
-  const image = source.sourceBytes;
-  if (sha256(image) !== context.analysis.ledger.hashes.sourceImage) {
-    throw new Error("Analysis provenance hash mismatch: sourceImage");
+  let source: SourceCanvas;
+  let sourceImageHash: string;
+  let analysisVisualName: "vision.json" | "scene-graph.json";
+  let analysisVisual: VisionResult | SceneGraph;
+  let fidelityPlan: FidelityPlan;
+  let runModels: { ocr: string; vision: string; edit?: string };
+  let analysisDurations: { ocr: number; vision: number; analyze: number };
+  let imagePath: string | undefined;
+  if (context.analysis.analysisVersion === 1) {
+    if (options.imagePath === undefined) {
+      throw new Error("Analysis v1 build requires the external source image");
+    }
+    imagePath = resolve(options.imagePath);
+  }
+
+  if (context.analysis.analysisVersion === 1) {
+    source = await decodeSourceImage(imagePath!);
+    if (
+      sha256(source.sourceBytes) !==
+      context.analysis.ledger.hashes.sourceImage
+    ) {
+      throw new Error("Analysis provenance hash mismatch: sourceImage");
+    }
+    sourceImageHash = sha256(source.sourceBytes);
+    analysisVisualName = "vision.json";
+    analysisVisual = context.analysis.vision;
+    fidelityPlan = planFidelityCandidates(
+      context.analysis.ocr,
+      context.analysis.vision,
+    );
+    runModels = {
+      ocr: context.analysis.ledger.models.ocr,
+      vision: context.analysis.ledger.models.vision,
+    };
+    analysisDurations = context.analysis.ledger.durationsMs;
+  } else {
+    source = context.analysis.source;
+    sourceImageHash = context.analysis.ledger.source.originalSha256;
+    analysisVisualName = "scene-graph.json";
+    analysisVisual = context.analysis.scene;
+    const semanticPlan = planSemanticLayers(
+      context.analysis.scene,
+      context.analysis.ocr,
+    );
+    fidelityPlan = {
+      canvas: semanticPlan.canvas as FidelityPlan["canvas"],
+      text: semanticPlan.text,
+      icons: [],
+      warnings: semanticPlan.warnings,
+    };
+    runModels = {
+      ocr: context.analysis.ledger.models.ocr,
+      vision: context.analysis.ledger.models.fullVision,
+      ...(context.analysis.ledger.models.completion === undefined
+        ? {}
+        : { edit: context.analysis.ledger.models.completion }),
+    };
+    analysisDurations = {
+      ocr: context.analysis.ledger.durationsMs.ocr,
+      vision:
+        context.analysis.ledger.durationsMs.fullVision +
+        context.analysis.ledger.durationsMs.regionalVision,
+      analyze: context.analysis.ledger.durationsMs.analyze,
+    };
   }
   const localImage = await canonicalLocalImage(source);
   const assetsDir = join(outDir, "assets");
   await mkdir(assetsDir, { recursive: true });
   await Promise.all([
     writeRecording(join(outDir, "ocr.json"), context.analysis.ocr),
-    writeRecording(join(outDir, "vision.json"), context.analysis.vision),
+    writeRecording(join(outDir, analysisVisualName), analysisVisual),
     writeRecording(
-      join(outDir, "analysis-ledger.json"),
+      join(outDir, ANALYSIS_LEDGER_NAME),
       context.analysis.ledger,
     ),
+    ...(context.analysis.analysisVersion === 2 &&
+    resolve(context.analysis.directory) !== outDir
+      ? [
+          writeFile(join(outDir, "source.rgba"), source.rgba, {
+            flag: "wx",
+            mode: 0o600,
+          }),
+        ]
+      : []),
   ]);
-  if (context.analysis.ledger.recorded) {
+  if (
+    context.analysis.analysisVersion === 1 &&
+    context.analysis.ledger.recorded
+  ) {
     await Promise.all([
       writeRecording(
         join(outDir, "recordings/ocr.json"),
@@ -739,10 +1177,6 @@ async function buildFromAnalysis(
   }
 
   const planStartedAt = performance.now();
-  const fidelityPlan = planFidelityCandidates(
-    context.analysis.ocr,
-    context.analysis.vision,
-  );
   assertRequiredTextCount(
     "planned",
     fidelityPlan.text.length,
@@ -813,12 +1247,9 @@ async function buildFromAnalysis(
     ledgerVersion: 2,
     mode: context.analysis.ledger.mode,
     recorded: context.analysis.ledger.recorded,
-    models: {
-      ocr: context.analysis.ledger.models.ocr,
-      vision: context.analysis.ledger.models.vision,
-    },
+    models: runModels,
     durationsMs: {
-      ...context.analysis.ledger.durationsMs,
+      ...analysisDurations,
       plan: planDuration,
       repair: repairDuration,
       export: exportDuration,
@@ -828,9 +1259,9 @@ async function buildFromAnalysis(
     warnings: [...context.analysis.ledger.warnings, ...warnings],
     decisions: fidelityResult.decisions,
     hashes: {
-      sourceImage: sha256(image),
+      sourceImage: sourceImageHash,
       ocr: await sha256File(join(outDir, "ocr.json")),
-      vision: await sha256File(join(outDir, "vision.json")),
+      vision: await sha256File(join(outDir, analysisVisualName)),
       analysisLedger: await sha256File(
         join(outDir, "analysis-ledger.json"),
       ),
@@ -843,8 +1274,8 @@ async function buildFromAnalysis(
     outputs: {
       directory: publishedOutDir,
       ocr: join(publishedOutDir, "ocr.json"),
-      vision: join(publishedOutDir, "vision.json"),
-      analysisLedger: join(publishedOutDir, "analysis-ledger.json"),
+      vision: join(publishedOutDir, analysisVisualName),
+      analysisLedger: join(publishedOutDir, ANALYSIS_LEDGER_NAME),
       manifest: join(publishedOutDir, "manifest.json"),
       removalMask: join(publishedOutDir, "removal-mask.png"),
       cleanBackground: join(publishedOutDir, "clean-background.png"),
@@ -858,35 +1289,68 @@ async function buildFromAnalysis(
   return { outDir, manifestPath, pptxPath, ledgerPath };
 }
 
+async function loadAnalysisPackageV2(
+  analysisDir: string,
+  ledger: AnalysisPackageV2,
+): Promise<AnalysisResultV2> {
+  const [rgba, ocrBytes, sceneBytes] = await Promise.all([
+    readVerifiedAnalysisArtifact(analysisDir, ledger.source),
+    readVerifiedAnalysisArtifact(analysisDir, ledger.ocr),
+    readVerifiedAnalysisArtifact(analysisDir, ledger.scene),
+  ]);
+  return {
+    analysisVersion: 2,
+    source: {
+      format: ledger.source.format,
+      width: ledger.canvas.width,
+      height: ledger.canvas.height,
+      rgba,
+      sourceBytes: Buffer.alloc(0),
+    },
+    ocr: OcrResultSchema.parse(JSON.parse(ocrBytes.toString("utf8"))),
+    scene: SceneGraphSchema.parse(
+      JSON.parse(sceneBytes.toString("utf8")),
+    ) as SceneGraph,
+    ledger,
+    directory: analysisDir,
+  };
+}
+
 export async function buildSlide(options: BuildOptions): Promise<PipelineResult> {
   const startedAt = performance.now();
+  const analysisDir = resolve(options.analysisDir);
+  const ledger = await readAnalysisPackage(analysisDir);
+  let analysis: AnalysisResult;
+  if (ledger.analysisVersion === 1) {
+    if (options.imagePath === undefined) {
+      throw new Error("Analysis v1 build requires the external source image");
+    }
+    const [ocrBytes, visionBytes] = await Promise.all([
+      readVerifiedAnalysisArtifact(analysisDir, {
+        path: ledger.outputs.ocr,
+        sha256: ledger.hashes.ocr,
+      }),
+      readVerifiedAnalysisArtifact(analysisDir, {
+        path: ledger.outputs.vision,
+        sha256: ledger.hashes.vision,
+      }),
+    ]);
+    analysis = {
+      analysisVersion: 1,
+      ocr: OcrResultSchema.parse(JSON.parse(ocrBytes.toString("utf8"))),
+      vision: VisionResultSchema.parse(JSON.parse(visionBytes.toString("utf8"))),
+      ledger,
+    };
+  } else {
+    analysis = await loadAnalysisPackageV2(analysisDir, ledger);
+  }
   const publication = await validatePublicationTarget({
     targetPath: options.outDir,
-    sourceImagePath: options.imagePath,
+    ...(ledger.analysisVersion === 1
+      ? { sourceImagePath: options.imagePath! }
+      : {}),
+    protectedPaths: [analysisDir],
   });
-  const analysisDir = resolve(options.analysisDir);
-  const image = await readFile(options.imagePath);
-  const ledger = await readRecording(
-    join(analysisDir, "analysis-ledger.json"),
-    AnalysisLedgerSchema,
-  );
-  const ocrPath = join(analysisDir, ledger.outputs.ocr);
-  const visionPath = join(analysisDir, ledger.outputs.vision);
-  const analysis: AnalysisResult = {
-    ocr: await readRecording(ocrPath, OcrResultSchema),
-    vision: await readRecording(visionPath, VisionResultSchema),
-    ledger,
-  };
-  const actualHashes = {
-    sourceImage: sha256(image),
-    ocr: await sha256File(ocrPath),
-    vision: await sha256File(visionPath),
-  };
-  for (const key of ["sourceImage", "ocr", "vision"] as const) {
-    if (actualHashes[key] !== ledger.hashes[key]) {
-      throw new Error(`Analysis provenance hash mismatch: ${key}`);
-    }
-  }
   const targetDir = publication.targetDir;
   const targetParent = dirname(targetDir);
   await mkdir(targetParent, { recursive: true });
@@ -895,15 +1359,20 @@ export async function buildSlide(options: BuildOptions): Promise<PipelineResult>
   );
 
   try {
-    await buildFromAnalysis(
+    const built = await buildFromAnalysis(
       { ...options, outDir: stagingDir },
       { analysis, startedAt, publishedOutDir: targetDir },
     );
-    await promoteSuccessfulRun(stagingDir, targetDir, options.imagePath);
+    await promoteSuccessfulRun(
+      stagingDir,
+      targetDir,
+      ledger.analysisVersion === 1 ? options.imagePath : undefined,
+      [analysisDir],
+    );
     return {
       outDir: targetDir,
       manifestPath: join(targetDir, "manifest.json"),
-      pptxPath: join(targetDir, outputName(options.imagePath)),
+      pptxPath: join(targetDir, basename(built.pptxPath)),
       ledgerPath: join(targetDir, "run-ledger.json"),
     };
   } catch (error) {
@@ -933,7 +1402,8 @@ function isAlreadyExists(error: unknown): boolean {
 async function promoteSuccessfulRun(
   stagingDir: string,
   targetDir: string,
-  sourceImagePath: string,
+  sourceImagePath?: string,
+  protectedPaths: string[] = [],
 ): Promise<void> {
   const backupDir = `${targetDir}.previous-${basename(stagingDir)}`;
   let hadPreviousTarget = false;
@@ -941,7 +1411,8 @@ async function promoteSuccessfulRun(
 
   const publication = await validatePublicationTarget({
     targetPath: targetDir,
-    sourceImagePath,
+    ...(sourceImagePath === undefined ? {} : { sourceImagePath }),
+    ...(protectedPaths.length === 0 ? {} : { protectedPaths }),
   });
   if (publication.owned !== undefined) {
     await rename(targetDir, backupDir);
@@ -1016,14 +1487,22 @@ export async function runPipeline(
   );
 
   try {
-    const analysis = await analyzeSlide({
+    const analyzed = await analyzeIntoDirectory({
       imagePath: options.imagePath,
       outDir: stagingDir,
       ...(options.replay === undefined ? {} : { replay: options.replay }),
       ...(options.record === undefined ? {} : { record: options.record }),
       ...(config === undefined ? {} : { config }),
     });
-    await buildFromAnalysis(
+    let analysis: AnalysisResult = analyzed;
+    if (analyzed.analysisVersion === 2) {
+      const verifiedLedger = await readAnalysisPackage(stagingDir);
+      if (verifiedLedger.analysisVersion !== 2) {
+        throw new Error("Live analysis did not publish an analysis package v2");
+      }
+      analysis = await loadAnalysisPackageV2(stagingDir, verifiedLedger);
+    }
+    const built = await buildFromAnalysis(
       {
         imagePath: options.imagePath,
         analysisDir: stagingDir,
@@ -1041,7 +1520,7 @@ export async function runPipeline(
     return {
       outDir: targetDir,
       manifestPath: join(targetDir, "manifest.json"),
-      pptxPath: join(targetDir, outputName(options.imagePath)),
+      pptxPath: join(targetDir, basename(built.pptxPath)),
       ledgerPath: join(targetDir, "run-ledger.json"),
     };
   } catch (error) {

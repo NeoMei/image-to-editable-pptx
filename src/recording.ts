@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import type { z } from "zod";
 
@@ -275,13 +276,20 @@ export function sanitizeProviderRecording(
   };
 }
 
-function sanitize(value: unknown, ancestors = new WeakSet<object>()): JsonValue {
+function sanitize(
+  value: unknown,
+  ancestors = new WeakSet<object>(),
+  redactStrings = false,
+): JsonValue {
   if (
     value === null ||
-    typeof value === "string" ||
     typeof value === "boolean"
   ) {
     return value;
+  }
+
+  if (typeof value === "string") {
+    return redactStrings ? redactProviderText(value, "") : value;
   }
 
   if (typeof value === "number") {
@@ -309,21 +317,39 @@ function sanitize(value: unknown, ancestors = new WeakSet<object>()): JsonValue 
       const sanitizedItems: JsonValue[] = [];
 
       for (let index = 0; index < value.length; index += 1) {
-        sanitizedItems[index] = sanitize(value[index], ancestors);
+        sanitizedItems[index] = sanitize(
+          value[index],
+          ancestors,
+          redactStrings,
+        );
       }
 
       return sanitizedItems;
     }
 
-    return Object.fromEntries(
-      Object.entries(value).flatMap(([key, nestedValue]) => {
-        if (PROVIDER_SECRET_HEADER.test(key) || isSensitiveKey(key)) return [];
-        return [[key, sanitize(nestedValue, ancestors)]];
-      }),
-    );
+    const sanitizedObject: Record<string, JsonValue> = {};
+    for (const [index, [key, nestedValue]] of Object.entries(value).entries()) {
+      if (PROVIDER_SECRET_HEADER.test(key) || isSensitiveKey(key)) continue;
+      const redactedKey = redactProviderText(key, "");
+      let outputKey = redactedKey === key ? key : `[REDACTED_KEY_${index}]`;
+      if (Object.hasOwn(sanitizedObject, outputKey)) {
+        outputKey = `[DUPLICATE_KEY_${index}]`;
+      }
+      Object.defineProperty(sanitizedObject, outputKey, {
+        configurable: true,
+        enumerable: true,
+        value: sanitize(nestedValue, ancestors, redactStrings),
+        writable: true,
+      });
+    }
+    return sanitizedObject;
   } finally {
     ancestors.delete(value);
   }
+}
+
+export function sanitizeRecordingPayload(payload: unknown): JsonValue {
+  return sanitize(payload, new WeakSet<object>(), true);
 }
 
 export async function writeRecording(
@@ -337,19 +363,45 @@ export async function writeRecording(
   }
 
   await mkdir(dirname(path), { recursive: true });
-  const file = await open(
-    path,
-    constants.O_WRONLY |
-      constants.O_CREAT |
-      constants.O_TRUNC |
-      constants.O_NOFOLLOW,
-    0o600,
+  try {
+    const existing = await lstat(path);
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error(`ELOOP: Recording target must be a regular file: ${path}`);
+    }
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "ENOENT"
+    ) {
+      throw error;
+    }
+  }
+
+  const temporaryPath = join(
+    dirname(path),
+    `.${basename(path)}.tmp-${randomUUID()}`,
   );
   try {
-    await file.chmod(0o600);
-    await file.writeFile(`${serialized}\n`, "utf8");
+    const file = await open(
+      temporaryPath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await file.chmod(0o600);
+      await file.writeFile(`${serialized}\n`, "utf8");
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await rename(temporaryPath, path);
   } finally {
-    await file.close();
+    await rm(temporaryPath, { force: true });
   }
 }
 

@@ -18,6 +18,7 @@ import {
   MAX_PROVIDER_RECORDING_TOTAL_STRING_CHARS,
   readRecording,
   sanitizeProviderRecording,
+  sanitizeRecordingPayload,
   writeRecording,
 } from "../src/recording.js";
 
@@ -125,6 +126,49 @@ test("removes nested credentials and DashScope headers before recording", async 
       items: [{ value: 42 }],
     });
     assert.doesNotMatch(text, /secret/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("redacts secret-like strings and signed URLs nested under harmless keys", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-recording-string-redaction-"));
+  const recordingPath = join(directory, "nested.json");
+  try {
+    await writeRecording(
+      recordingPath,
+      sanitizeRecordingPayload({
+        safe: {
+          bearerText: "Bearer opaque-recording-canary-123456789",
+          credentialText: "sk-recording-canary-987654321",
+          signedUrl:
+            "https://bucket.example/object?X-OSS-Signature=signed-canary&Expires=99",
+          status: "SUCCEEDED",
+        },
+      }),
+    );
+    const text = await readFile(recordingPath, "utf8");
+    assert.doesNotMatch(
+      text,
+      /opaque-recording-canary|recording-canary-987|signed-canary|X-OSS-Signature|Expires=99/i,
+    );
+    assert.match(text, /SUCCEEDED/);
+    assert.equal((await stat(recordingPath)).mode & 0o777, 0o600);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("preserves functional JSON strings that merely discuss bearer authentication", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-recording-content-"));
+  const recordingPath = join(directory, "ocr.json");
+  try {
+    await writeRecording(recordingPath, {
+      lines: [{ text: "Bearer authentication overview" }],
+    });
+    assert.deepEqual(JSON.parse(await readFile(recordingPath, "utf8")), {
+      lines: [{ text: "Bearer authentication overview" }],
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
