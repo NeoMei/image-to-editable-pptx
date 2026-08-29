@@ -300,7 +300,7 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
   }
 });
 
-test("rejects a non-PNG source even when it has the required dimensions and extension", async () => {
+test("accepts a JPEG source even when it has a PNG extension", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-source-format-"));
   const imagePath = join(directory, "source-slide-07.png");
   const outDir = join(directory, "analysis");
@@ -318,19 +318,47 @@ test("rejects a non-PNG source even when it has the required dimensions and exte
       .toBuffer();
     await writeFile(imagePath, jpeg);
 
+    const result = await runPipeline({
+      imagePath,
+      outDir,
+      replay: {
+        ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
+        visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
+      },
+      fidelityBuild: deterministicFidelityBuild,
+    });
+    await access(result.pptxPath);
+    const ledger = JSON.parse(await readFile(result.ledgerPath, "utf8")) as {
+      hashes: { sourceImage: string };
+    };
+    assert.equal(ledger.hashes.sourceImage.length, 64);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects an invalid source before invoking OCR or Vision", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-invalid-source-"));
+  const imagePath = join(directory, "source.png");
+  const outDir = join(directory, "analysis");
+  const originalFetch = globalThis.fetch;
+  let providerCalls = 0;
+  globalThis.fetch = async () => {
+    providerCalls += 1;
+    throw new Error("Provider must not be called for invalid input");
+  };
+
+  try {
+    await writeFile(imagePath, Buffer.from("not an image"));
+
     await assert.rejects(
-      analyzeSlide({
-        imagePath,
-        outDir,
-        replay: {
-          ocrPath: resolve("tests/fixtures/qwen-ocr-slide-07.json"),
-          visionPath: resolve("tests/fixtures/qwen-vision-slide-07.json"),
-        },
-      }),
-      /Source image must be a PNG; received jpeg/,
+      analyzeSlide({ imagePath, outDir, config: liveConfig }),
+      /PNG or JPEG/i,
     );
+    assert.equal(providerCalls, 0);
     await assert.rejects(access(outDir));
   } finally {
+    globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
   }
 });

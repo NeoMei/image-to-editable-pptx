@@ -42,6 +42,7 @@ import {
   type FidelityBuildResult,
 } from "./fidelity/build.js";
 import { planFidelityCandidates } from "./fidelity/candidates.js";
+import { decodeSourceImage, type SourceCanvas } from "./image/source.js";
 import {
   parseQwenOcrResponse,
   recognizeText,
@@ -391,18 +392,12 @@ function configuredModels(config?: AppConfig): {
       };
 }
 
-async function inspectSourceImage(image: Buffer): Promise<void> {
-  const metadata = await sharp(image).metadata();
-  if (metadata.format !== "png") {
-    throw new Error(
-      `Source image must be a PNG; received ${metadata.format ?? "unknown"}`,
-    );
-  }
-  if (metadata.width !== 1280 || metadata.height !== 720) {
-    throw new Error(
-      `Source image must be exactly 1280x720 pixels; received ${metadata.width ?? "unknown"}x${metadata.height ?? "unknown"}`,
-    );
-  }
+async function canonicalLocalImage(source: SourceCanvas): Promise<Buffer> {
+  return sharp(source.rgba, {
+    raw: { width: source.width, height: source.height, channels: 4 },
+  })
+    .png()
+    .toBuffer();
 }
 
 async function prepareAnalysisDirectory(outDir: string): Promise<void> {
@@ -455,8 +450,8 @@ function responseObserver(
 export async function analyzeSlide(options: AnalyzeOptions): Promise<AnalysisResult> {
   const startedAt = performance.now();
   const outDir = resolve(options.outDir);
-  const image = await readFile(options.imagePath);
-  await inspectSourceImage(image);
+  const source = await decodeSourceImage(options.imagePath);
+  const image = source.sourceBytes;
   await prepareAnalysisDirectory(outDir);
 
   let ocr: OcrResult;
@@ -714,11 +709,12 @@ async function buildFromAnalysis(
   const outDir = resolve(options.outDir);
   const publishedOutDir = resolve(context.publishedOutDir ?? outDir);
   const imagePath = resolve(options.imagePath);
-  const image = await readFile(imagePath);
-  await inspectSourceImage(image);
+  const source = await decodeSourceImage(imagePath);
+  const image = source.sourceBytes;
   if (sha256(image) !== context.analysis.ledger.hashes.sourceImage) {
     throw new Error("Analysis provenance hash mismatch: sourceImage");
   }
+  const localImage = await canonicalLocalImage(source);
   const assetsDir = join(outDir, "assets");
   await mkdir(assetsDir, { recursive: true });
   await Promise.all([
@@ -758,7 +754,7 @@ async function buildFromAnalysis(
   const fidelityResult: FidelityBuildResult = await (
     options.fidelityBuild ?? buildFidelityLayers
   )(
-    image,
+    localImage,
     fidelityPlan,
   );
   const repairDuration = elapsed(repairStartedAt);
