@@ -16,7 +16,7 @@
     "editable-slides",
     "codex-plugin"
   ],
-  "private": true,
+  "private": false,
   "type": "module",
   "files": [
     "src/",

@@ -61,7 +61,7 @@ test("ships runtime, plugin metadata, and the installed skill in the npm package
   const packageJson = await readJson("package.json");
   const included = new Set(packageJson.files as string[]);
 
-  assert.equal(packageJson.private, true);
+  assert.equal(packageJson.private, false);
   assert.ok(included.has("src/"));
   assert.ok(included.has("skills/"));
   assert.ok(included.has(".codex-plugin/"));
