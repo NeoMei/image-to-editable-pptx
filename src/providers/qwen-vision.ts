@@ -58,6 +58,10 @@ text | panel | shape | icon | illustration | photo | background
 For every element return type, bbox as [x1,y1,x2,y2], label, zIndex, editableAs, and confidence.
 editableAs must be one of: text | native-shape | bitmap | background.
 Optional visual hints are fillColor, strokeColor, and cornerRadius.
+Return each independently movable object as its own icon or illustration element.
+Do not combine distinct objects merely because they share a panel or visual group.
+If symbols are visibly connected by arrows, lines, or a shared contour, return the complete connected composition as a single compound icon so its crop is self-contained.
+Each bitmap bbox must include the complete antialiased edge plus a small background margin.
 Use Qwen3-VL normalized integer coordinates from 0 to 999 for bbox, not source pixels.
 x2/y2 must exceed x1/y1.
 OCR is authoritative for text: do not duplicate OCR text as graphical assets.`;

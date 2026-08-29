@@ -238,6 +238,11 @@ test("uses the compatible client with the requested model and constrained prompt
     assert.match(serializedPrompt, /1280 x 720/);
     assert.match(serializedPrompt, /normalized integer coordinates from 0 to 999/i);
     assert.match(serializedPrompt, /do not duplicate OCR text as graphical assets/i);
+    assert.match(serializedPrompt, /each independently movable object/i);
+    assert.match(serializedPrompt, /complete antialiased edge/i);
+    assert.match(serializedPrompt, /do not combine distinct objects/i);
+    assert.match(serializedPrompt, /visibly connected/i);
+    assert.match(serializedPrompt, /single compound/i);
     assert.match(serializedPrompt, /data:image\/png;base64,iVA=/);
   } finally {
     globalThis.fetch = originalFetch;

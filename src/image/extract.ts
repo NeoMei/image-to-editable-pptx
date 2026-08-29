@@ -7,6 +7,7 @@ const MIN_EDGE_COLOR_CONSISTENCY = 0.85;
 const MIN_TRANSPARENT_RATIO = 0.05;
 const MAX_TRANSPARENT_RATIO = 0.92;
 const MAX_OPAQUE_BORDER_RATIO = 0.02;
+const SOFT_ALPHA_COLOR_RANGE = 96;
 
 export type AssetExtraction = "transparent" | "rectangular";
 
@@ -94,9 +95,10 @@ function removeConnectedBackground(
   height: number,
   edgeColor: Rgb,
   tolerance: number,
-): number {
+): Uint8Array {
   const pixelCount = width * height;
   const visited = new Uint8Array(pixelCount);
+  const removed = new Uint8Array(pixelCount);
   const queue = new Int32Array(pixelCount);
   let head = 0;
   let tail = 0;
@@ -123,6 +125,7 @@ function removeConnectedBackground(
 
   while (head < tail) {
     const index = queue[head++]!;
+    removed[index] = 1;
     data[index * 4 + 3] = 0;
     const x = index % width;
     const y = Math.floor(index / width);
@@ -132,7 +135,70 @@ function removeConnectedBackground(
     if (y + 1 < height) inspect(index + width);
   }
 
-  return tail;
+  return removed;
+}
+
+function applySoftAlphaFringe(
+  data: Buffer,
+  width: number,
+  height: number,
+  edgeColor: Rgb,
+  tolerance: number,
+  removed: Uint8Array,
+): void {
+  const touchesRemovedBackground = (x: number, y: number): boolean => {
+    for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+      for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+        if (offsetX === 0 && offsetY === 0) continue;
+        const neighborX = x + offsetX;
+        const neighborY = y + offsetY;
+        if (
+          neighborX >= 0 &&
+          neighborX < width &&
+          neighborY >= 0 &&
+          neighborY < height &&
+          removed[neighborY * width + neighborX] === 1
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if (removed[index] === 1 || !touchesRemovedBackground(x, y)) continue;
+      const offset = index * 4;
+      const observed: Rgb = [data[offset]!, data[offset + 1]!, data[offset + 2]!];
+      const distance = maxChannelDistance(observed, edgeColor);
+      if (distance >= tolerance + SOFT_ALPHA_COLOR_RANGE) continue;
+      const alpha = Math.max(
+        1,
+        Math.min(
+          254,
+          Math.round(
+            ((distance - tolerance) / SOFT_ALPHA_COLOR_RANGE) * 255,
+          ),
+        ),
+      );
+      const alphaFraction = alpha / 255;
+      for (let channel = 0; channel < 3; channel += 1) {
+        data[offset + channel] = Math.max(
+          0,
+          Math.min(
+            255,
+            Math.round(
+              (observed[channel]! - (1 - alphaFraction) * edgeColor[channel]!) /
+                alphaFraction,
+            ),
+          ),
+        );
+      }
+      data[offset + 3] = alpha;
+    }
+  }
 }
 
 function calculateAlphaMetrics(
@@ -232,12 +298,20 @@ export async function extractAsset(
       "edge_colors_inconsistent",
     );
   }
-  removeConnectedBackground(
+  const removed = removeConnectedBackground(
     data,
     info.width,
     info.height,
     edgeColor,
     colorTolerance,
+  );
+  applySoftAlphaFringe(
+    data,
+    info.width,
+    info.height,
+    edgeColor,
+    colorTolerance,
+    removed,
   );
   const metrics = calculateAlphaMetrics(data, info.width, info.height);
 

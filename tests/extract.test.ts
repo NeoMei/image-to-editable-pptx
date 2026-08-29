@@ -57,6 +57,44 @@ test("removes a cream border connected to the crop edge", async () => {
   );
 });
 
+test("preserves antialiased icon edges as decontaminated partial alpha", async () => {
+  const width = 16;
+  const height = 16;
+  const background = [247, 243, 233] as const;
+  const foreground = [35, 57, 77] as const;
+  const blended = [194, 197, 194] as const;
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let index = 0; index < width * height; index += 1) {
+    pixels.set(background, index * 3);
+  }
+  for (let y = 4; y <= 11; y += 1) {
+    for (let x = 4; x <= 11; x += 1) {
+      const edge = x === 4 || x === 11 || y === 4 || y === 11;
+      pixels.set(edge ? blended : foreground, (y * width + x) * 3);
+    }
+  }
+  const source = await sharp(pixels, {
+    raw: { width, height, channels: 3 },
+  }).png().toBuffer();
+
+  const extracted = await extractAsset(
+    source,
+    { x: 0, y: 0, width, height },
+    { extraction: "transparent" },
+  );
+  const { data } = await sharp(extracted.image)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const edgeOffset = (4 * width + 7) * 4;
+  const edgeAlpha = data[edgeOffset + 3]!;
+
+  assert.equal(extracted.extraction, "transparent");
+  assert.ok(edgeAlpha > 0 && edgeAlpha < 255);
+  assert.ok(data[edgeOffset]! < blended[0]);
+  assert.equal(data[(7 * width + 7) * 4 + 3], 255);
+});
+
 test("falls back when foreground occupies more than two percent of the crop perimeter", async () => {
   const source = await sharp({
     create: {

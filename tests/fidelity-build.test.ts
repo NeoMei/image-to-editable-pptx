@@ -236,6 +236,51 @@ test("keeps a failed icon in the background and continues", async () => {
   assert.equal(result.decisions.at(-1)?.decision, "kept_in_background");
 });
 
+test("retries a clipped icon with wider padding before keeping it in the background", async () => {
+  const { source, mask, transparentAsset } = await fixtures();
+  const dependencies = passingDependencies(source, mask, transparentAsset);
+  const attemptedBboxes: Array<{ x: number; y: number; width: number; height: number }> = [];
+  dependencies.extract = async (_input, bbox) => {
+    attemptedBboxes.push(bbox);
+    if (attemptedBboxes.length < 3) {
+      return {
+        image: transparentAsset,
+        extraction: "rectangular",
+        metrics: {
+          transparentRatio: 0.5,
+          opaqueBorderRatio: 0.1,
+          foregroundPixels: 100,
+        },
+        fallbackReason: "opaque_border_ratio_above_2_percent",
+      };
+    }
+    return {
+      image: transparentAsset,
+      extraction: "transparent",
+      metrics: {
+        transparentRatio: 0.75,
+        opaqueBorderRatio: 0,
+        foregroundPixels: 64,
+      },
+    };
+  };
+
+  const result = await buildFidelityLayers(source, makePlan(1), dependencies);
+
+  assert.deepEqual(attemptedBboxes, [
+    { x: 196, y: 196, width: 48, height: 48 },
+    { x: 192, y: 192, width: 56, height: 56 },
+    { x: 188, y: 188, width: 64, height: 64 },
+  ]);
+  assert.equal(result.manifest.elements.filter((item) => item.kind === "asset").length, 1);
+  assert.deepEqual(result.decisions.at(-1)?.bbox, {
+    x: 188,
+    y: 188,
+    width: 64,
+    height: 64,
+  });
+});
+
 test("rejects an icon repair that changes pixels outside its mask", async () => {
   const { source, mask, transparentAsset } = await fixtures();
   const dependencies = passingDependencies(source, mask, transparentAsset);

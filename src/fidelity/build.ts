@@ -108,6 +108,17 @@ function adaptiveTextDilation(height: number): number {
   return Math.min(3, Math.max(1, Math.round(height / 24)));
 }
 
+const ICON_PADDING_ATTEMPTS = [4, 8, 12, 16, 20, 24, 28, 32] as const;
+
+function sameBBox(left: BBox, right: BBox): boolean {
+  return (
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height
+  );
+}
+
 function rgbToHex(rgb: readonly [number, number, number]): string {
   return rgb
     .map((channel) =>
@@ -170,10 +181,22 @@ export async function buildFidelityLayers(
 
   const acceptedTextMask = await orMasks(acceptedTextMasks, plan.canvas);
   for (const candidate of plan.icons) {
-    const bbox = expandAndClip(candidate.bbox, 8, plan.canvas);
-    const extracted = await dependencies.extract(source, bbox, {
+    let bbox = expandAndClip(candidate.bbox, ICON_PADDING_ATTEMPTS[0], plan.canvas);
+    let extracted = await dependencies.extract(source, bbox, {
       extraction: "transparent",
     });
+    for (const padding of ICON_PADDING_ATTEMPTS.slice(1)) {
+      if (extracted.extraction === "transparent") break;
+      if (extracted.fallbackReason === "transparent_pixel_ratio_above_92_percent") {
+        break;
+      }
+      const expanded = expandAndClip(candidate.bbox, padding, plan.canvas);
+      if (sameBBox(expanded, bbox)) continue;
+      bbox = expanded;
+      extracted = await dependencies.extract(source, bbox, {
+        extraction: "transparent",
+      });
+    }
     if (extracted.extraction !== "transparent") {
       decisions.push({
         candidateId: candidate.id,

@@ -1,6 +1,6 @@
 {
   "name": "image-to-editable-pptx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Convert slide images into high-fidelity PPTX files with editable text and selected elements.",
   "author": "NeoMei",
   "license": "MIT",

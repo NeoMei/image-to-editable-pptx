@@ -40,7 +40,7 @@ const vision: VisionResult = {
     },
     {
       type: "icon",
-      bbox: { x: 455, y: 230, width: 70, height: 70 },
+      bbox: { x: 405, y: 245, width: 70, height: 70 },
       label: "shield",
       zIndex: 3,
       editableAs: "bitmap",
@@ -57,17 +57,59 @@ const vision: VisionResult = {
   ],
 };
 
-test("plans all OCR text but keeps panels and bars in the background", () => {
+test("keeps independent icons in the same panel as separate candidates", () => {
   const plan = planFidelityCandidates(ocr, vision);
   assert.equal(plan.text.length, 10);
   assert.equal(plan.text.every((candidate) => candidate.required), true);
-  assert.equal(plan.icons.length, 1);
-  assert.equal(plan.icons[0]?.label, "wrench + shield");
-  assert.deepEqual(plan.icons[0]?.sourceElementIndexes, [1, 2]);
+  assert.deepEqual(
+    plan.icons.map((candidate) => candidate.label),
+    ["wrench", "shield"],
+  );
+  assert.deepEqual(
+    plan.icons.map((candidate) => candidate.sourceElementIndexes),
+    [[1], [2]],
+  );
   assert.equal(
     plan.icons.some((candidate) => /panel|bar/i.test(candidate.label)),
     false,
   );
+});
+
+test("groups strongly overlapping icon detections inside one panel", () => {
+  const plan = planFidelityCandidates(ocr, {
+    elements: [
+      vision.elements[0]!,
+      {
+        ...vision.elements[1]!,
+        bbox: { x: 340, y: 160, width: 100, height: 120 },
+      },
+      {
+        ...vision.elements[2]!,
+        bbox: { x: 365, y: 180, width: 70, height: 80 },
+      },
+    ],
+  });
+
+  assert.equal(plan.icons.length, 1);
+  assert.equal(plan.icons[0]?.label, "wrench + shield");
+  assert.deepEqual(plan.icons[0]?.sourceElementIndexes, [1, 2]);
+});
+
+test("merges transitively overlapping detections regardless of source order", () => {
+  const panel = vision.elements[0]!;
+  const icon = vision.elements[1]!;
+  const plan = planFidelityCandidates(ocr, {
+    elements: [
+      panel,
+      { ...icon, label: "left", bbox: { x: 320, y: 160, width: 100, height: 100 } },
+      { ...icon, label: "right", bbox: { x: 420, y: 160, width: 100, height: 100 } },
+      { ...icon, label: "bridge", bbox: { x: 370, y: 160, width: 100, height: 100 } },
+    ],
+  });
+
+  assert.equal(plan.icons.length, 1);
+  assert.equal(plan.icons[0]?.label, "left + right + bridge");
+  assert.deepEqual(plan.icons[0]?.sourceElementIndexes, [1, 2, 3]);
 });
 
 test("keeps decorative and uncertain bitmaps in the background", () => {
@@ -93,9 +135,11 @@ test("keeps decorative and uncertain bitmaps in the background", () => {
     ],
   });
 
-  assert.equal(plan.icons.length, 1);
-  assert.equal(plan.icons[0]?.label, "wrench + shield");
-  assert.deepEqual(plan.icons[0]?.sourceElementIndexes, [1, 2]);
+  assert.equal(plan.icons.length, 2);
+  assert.deepEqual(
+    plan.icons.map((candidate) => candidate.label),
+    ["wrench", "shield"],
+  );
 });
 
 test("includes exact major-candidate confidence, dimension, and area boundaries", () => {

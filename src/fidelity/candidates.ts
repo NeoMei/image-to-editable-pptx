@@ -13,6 +13,7 @@ const CANVAS_HEIGHT = 720;
 const MIN_MAJOR_CANDIDATE_CONFIDENCE = 0.8;
 const MIN_MAJOR_CANDIDATE_DIMENSION_PX = 24;
 const MIN_MAJOR_CANDIDATE_AREA_PX2 = 1600;
+const MIN_STRONG_INTERSECTION_OVER_UNION = 0.25;
 
 const clipBBox = (
   bbox: ProviderBBox,
@@ -65,6 +66,23 @@ const centerInside = (inner: BBox, outer: BBox): boolean => {
   );
 };
 
+const intersectionOverUnion = (left: BBox, right: BBox): number => {
+  const intersectionWidth = Math.max(
+    0,
+    Math.min(left.x + left.width, right.x + right.width) -
+      Math.max(left.x, right.x),
+  );
+  const intersectionHeight = Math.max(
+    0,
+    Math.min(left.y + left.height, right.y + right.height) -
+      Math.max(left.y, right.y),
+  );
+  const intersectionArea = intersectionWidth * intersectionHeight;
+  const unionArea =
+    left.width * left.height + right.width * right.height - intersectionArea;
+  return unionArea === 0 ? 0 : intersectionArea / unionArea;
+};
+
 export function planFidelityCandidates(
   ocr: OcrResult,
   vision: VisionResult,
@@ -107,39 +125,65 @@ export function planFidelityCandidates(
         bbox.width * bbox.height >= MIN_MAJOR_CANDIDATE_AREA_PX2,
     );
 
-  const grouped = new Map<number, typeof bitmap>();
-  const ungrouped: typeof bitmap = [];
+  const groups: Array<{
+    panelIndex: number | undefined;
+    items: typeof bitmap;
+  }> = [];
   for (const candidate of bitmap) {
     const panel = panels.find(({ bbox }) =>
       centerInside(candidate.bbox, bbox),
     );
-    if (panel === undefined) {
-      ungrouped.push(candidate);
-      continue;
+    const panelIndex = panel?.sourceIndex;
+    const matchingGroupIndexes = groups.flatMap(
+      ({ panelIndex: existingPanelIndex, items }, groupIndex) =>
+        existingPanelIndex === panelIndex &&
+        items.some(
+          (item) =>
+            intersectionOverUnion(item.bbox, candidate.bbox) >=
+            MIN_STRONG_INTERSECTION_OVER_UNION,
+        )
+          ? [groupIndex]
+          : [],
+    );
+    if (matchingGroupIndexes.length === 0) {
+      groups.push({ panelIndex, items: [candidate] });
+    } else {
+      const target = groups[matchingGroupIndexes[0]!]!;
+      target.items.push(candidate);
+      for (const groupIndex of matchingGroupIndexes.slice(1).reverse()) {
+        target.items.push(...groups[groupIndex]!.items);
+        groups.splice(groupIndex, 1);
+      }
     }
-    const items = grouped.get(panel.sourceIndex) ?? [];
-    items.push(candidate);
-    grouped.set(panel.sourceIndex, items);
   }
 
-  const icons: FidelityIconCandidate[] = [
-    ...[...grouped.entries()].map(([panelIndex, items]) => ({
+  const icons: FidelityIconCandidate[] = groups.map(({ panelIndex, items }) => {
+    const orderedItems = [...items].sort(
+      (left, right) => left.sourceIndex - right.sourceIndex,
+    );
+    if (orderedItems.length === 1) {
+      const { element, bbox, sourceIndex } = orderedItems[0]!;
+      return {
+        kind: "icon" as const,
+        id: `icon-${sourceIndex + 1}`,
+        label: element.label,
+        bbox,
+        zIndex: element.zIndex,
+        sourceElementIndexes: [sourceIndex],
+      };
+    }
+    return {
       kind: "icon" as const,
-      id: `icon-panel-${panelIndex + 1}`,
-      label: items.map(({ element }) => element.label).join(" + "),
-      bbox: items.map(({ bbox }) => bbox).reduce(union),
-      zIndex: Math.max(...items.map(({ element }) => element.zIndex)),
-      sourceElementIndexes: items.map(({ sourceIndex }) => sourceIndex),
-    })),
-    ...ungrouped.map(({ element, bbox, sourceIndex }) => ({
-      kind: "icon" as const,
-      id: `icon-${sourceIndex + 1}`,
-      label: element.label,
-      bbox,
-      zIndex: element.zIndex,
-      sourceElementIndexes: [sourceIndex],
-    })),
-  ];
+      id:
+        panelIndex === undefined
+          ? `icon-group-${orderedItems[0]!.sourceIndex + 1}`
+          : `icon-panel-${panelIndex + 1}`,
+      label: orderedItems.map(({ element }) => element.label).join(" + "),
+      bbox: orderedItems.map(({ bbox }) => bbox).reduce(union),
+      zIndex: Math.max(...orderedItems.map(({ element }) => element.zIndex)),
+      sourceElementIndexes: orderedItems.map(({ sourceIndex }) => sourceIndex),
+    };
+  });
 
   return {
     canvas: { width: CANVAS_WIDTH, height: CANVAS_HEIGHT },
