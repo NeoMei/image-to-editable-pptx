@@ -297,6 +297,20 @@ export type RecompositionOptions = {
   ignoredMask?: Buffer;
 };
 
+export type RecompositionLayer = {
+  id: string;
+  asset: Buffer;
+  bbox: BBox;
+  zIndex: number;
+};
+
+export type WholePageRecompositionOptions = {
+  source: Buffer;
+  background: Buffer;
+  layers: RecompositionLayer[];
+  ignoredMask?: Buffer;
+};
+
 export type RecompositionMetrics = {
   comparedPixels: number;
   meanAbsoluteError: number;
@@ -309,6 +323,8 @@ export type RecompositionResult = {
   preview: Buffer;
   metrics: RecompositionMetrics;
   reason?: "recomposition_mismatch";
+  attribution?: "deterministic" | "ambiguous";
+  affectedLayerIds?: string[];
 };
 
 export const CandidateDecisionSchema = z.object({
@@ -344,6 +360,13 @@ export const CandidateDecisionSchema = z.object({
     "dangling_ocr_association",
     "decoration_candidate",
     "uncertain_candidate",
+    "backing_mask_invalid",
+    "glyph_residue",
+    "repair_seam",
+    "surface_unstable",
+    "semantic_mask_unavailable",
+    "occlusion_completion_unavailable",
+    "completion_provenance_invalid",
   ]).optional(),
   repairMetrics: z.object({
     maskedPixels: z.number().int().nonnegative(),

@@ -154,6 +154,7 @@ test("accepts every required text and only a passing transparent icon", async ()
     dependencies,
   );
   assert.equal(result.manifest.elements.filter((item) => item.kind === "text").length, 2);
+  assert.equal(result.manifest.manifestVersion, 1);
   assert.equal(result.manifest.elements.filter((item) => item.kind === "asset").length, 1);
   assert.equal(result.manifest.elements.some((item) => item.kind === "shape"), false);
   assert.equal(result.decisions.length, 4);

@@ -1,0 +1,390 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import sharp from "sharp";
+
+import type { BBox, OcrResult } from "../src/contracts.js";
+import { buildSemanticLayers } from "../src/fidelity/build.js";
+import {
+  chooseSemanticMask,
+  deriveSemanticMasks,
+} from "../src/image/semantic-mask.js";
+import type { SourceCanvas } from "../src/image/source.js";
+import type { CompletedCandidate } from "../src/occlusion/contracts.js";
+import type {
+  SceneGraph,
+  SceneNode,
+  SceneRelation,
+} from "../src/scene/contracts.js";
+import { planSemanticLayers, type SemanticCandidate } from "../src/scene/plan.js";
+
+type Rgba = readonly [number, number, number, number];
+
+const WIDTH = 320;
+const HEIGHT = 200;
+const BACKGROUND: Rgba = [247, 243, 233, 255];
+const GOOD_REAR: BBox = { x: 140, y: 20, width: 40, height: 36 };
+const GOOD_FRONT: BBox = { x: 154, y: 28, width: 12, height: 20 };
+const BAD_REAR: BBox = { x: 200, y: 20, width: 40, height: 36 };
+const BAD_FRONT: BBox = { x: 214, y: 28, width: 12, height: 20 };
+
+function sha256(input: Buffer): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function fillCanvas(): SourceCanvas {
+  const rgba = Buffer.alloc(WIDTH * HEIGHT * 4);
+  for (let index = 0; index < WIDTH * HEIGHT; index += 1) {
+    rgba.set(BACKGROUND, index * 4);
+  }
+  return {
+    format: "png",
+    width: WIDTH,
+    height: HEIGHT,
+    rgba,
+    sourceBytes: Buffer.alloc(0),
+  };
+}
+
+function paintRect(canvas: SourceCanvas, bbox: BBox, color: Rgba): void {
+  for (let y = Math.floor(bbox.y); y < Math.ceil(bbox.y + bbox.height); y += 1) {
+    for (let x = Math.floor(bbox.x); x < Math.ceil(bbox.x + bbox.width); x += 1) {
+      canvas.rgba.set(color, (y * canvas.width + x) * 4);
+    }
+  }
+}
+
+function paintGlyphs(canvas: SourceCanvas, bbox: BBox): void {
+  for (let y = bbox.y + 2; y < bbox.y + bbox.height - 2; y += 1) {
+    for (const x of [bbox.x + 6, bbox.x + 14, bbox.x + 23, bbox.x + 31]) {
+      if (x >= bbox.x + bbox.width) continue;
+      canvas.rgba.set([20, 24, 28, 255], (y * canvas.width + x) * 4);
+    }
+  }
+}
+
+function normalized(bbox: BBox): SceneNode["bbox"] {
+  return {
+    x: bbox.x / WIDTH,
+    y: bbox.y / HEIGHT,
+    width: bbox.width / WIDTH,
+    height: bbox.height / HEIGHT,
+  };
+}
+
+function node(
+  id: string,
+  role: SceneNode["role"],
+  bbox: BBox,
+  zIndex: number,
+): SceneNode {
+  return {
+    id,
+    role,
+    bbox: normalized(bbox),
+    confidence: 0.98,
+    zIndex,
+    label: `audit-${id}`,
+    extractionHints: [],
+  };
+}
+
+function relation(
+  id: string,
+  kind: SceneRelation["kind"],
+  from: string,
+  to: string,
+): SceneRelation {
+  return { id, kind, from, to, confidence: 0.98 };
+}
+
+function line(text: string, bbox: BBox): OcrResult["lines"][number] {
+  return {
+    text,
+    bbox,
+    quad: [
+      { x: bbox.x, y: bbox.y },
+      { x: bbox.x + bbox.width, y: bbox.y },
+      { x: bbox.x + bbox.width, y: bbox.y + bbox.height },
+      { x: bbox.x, y: bbox.y + bbox.height },
+    ],
+  };
+}
+
+async function semanticFixture(): Promise<{
+  source: SourceCanvas;
+  ocr: OcrResult;
+  graph: SceneGraph;
+}> {
+  const source = fillCanvas();
+  const acceptedBacking = { x: 90, y: 120, width: 80, height: 50 };
+  const acceptedText = { x: 110, y: 136, width: 40, height: 16 };
+  const rejectedBacking = { x: 0, y: 120, width: 72, height: 50 };
+  const rejectedText = { x: 16, y: 136, width: 36, height: 16 };
+  paintRect(source, acceptedBacking, [88, 96, 102, 255]);
+  paintGlyphs(source, acceptedText);
+  paintRect(source, rejectedBacking, [238, 235, 225, 255]);
+  paintGlyphs(source, rejectedText);
+  paintRect(source, { x: 20, y: 20, width: 20, height: 24 }, [35, 57, 77, 255]);
+  paintRect(source, { x: 60, y: 20, width: 16, height: 24 }, [52, 98, 135, 255]);
+  paintRect(source, { x: 96, y: 20, width: 16, height: 24 }, [52, 98, 135, 255]);
+  paintRect(source, { x: 76, y: 31, width: 20, height: 2 }, [52, 98, 135, 255]);
+  paintRect(source, GOOD_REAR, [43, 109, 168, 255]);
+  paintRect(source, GOOD_FRONT, [230, 93, 22, 255]);
+  paintRect(source, BAD_REAR, [58, 142, 92, 255]);
+  paintRect(source, BAD_FRONT, [133, 76, 176, 255]);
+  paintRect(source, { x: 260, y: 120, width: 16, height: 20 }, [185, 58, 64, 255]);
+  paintRect(source, { x: 282, y: 120, width: 16, height: 20 }, [204, 142, 42, 255]);
+  source.sourceBytes = await sharp(source.rgba, {
+    raw: { width: WIDTH, height: HEIGHT, channels: 4 },
+  }).png().toBuffer();
+
+  const ocr = {
+    lines: [line("Accepted backing", acceptedText), line("Fallback text", rejectedText)],
+  };
+  const graph: SceneGraph = {
+    graphVersion: 1,
+    canvas: { width: WIDTH, height: HEIGHT },
+    nodes: [
+      node("background", "background", { x: 0, y: 0, width: WIDTH, height: HEIGHT }, 0),
+      node("independent", "foreground-object", { x: 20, y: 20, width: 20, height: 24 }, 1),
+      node("compound", "compound-group", { x: 60, y: 20, width: 52, height: 24 }, 2),
+      node("compound-left", "foreground-object", { x: 60, y: 20, width: 16, height: 24 }, 2),
+      node("compound-right", "foreground-object", { x: 96, y: 20, width: 16, height: 24 }, 2),
+      node("compound-link", "connector", { x: 76, y: 31, width: 20, height: 2 }, 2),
+      node("good-rear", "foreground-object", GOOD_REAR, 3),
+      node("good-front", "foreground-object", GOOD_FRONT, 4),
+      node("bad-rear", "foreground-object", BAD_REAR, 5),
+      node("bad-front", "foreground-object", BAD_FRONT, 6),
+      node("accepted-backing", "text-backing", acceptedBacking, 7),
+      node("accepted-scene-text", "text", acceptedText, 8),
+      node("rejected-backing", "text-backing", rejectedBacking, 9),
+      node("rejected-scene-text", "text", rejectedText, 10),
+      node("cycle-a", "foreground-object", { x: 260, y: 120, width: 16, height: 20 }, 11),
+      node("cycle-b", "foreground-object", { x: 282, y: 120, width: 16, height: 20 }, 12),
+    ],
+    relations: [
+      relation("compound-left-group", "belongs-to", "compound-left", "compound"),
+      relation("compound-right-group", "belongs-to", "compound-right", "compound"),
+      relation("compound-connected", "connected-to", "compound-left", "compound-link"),
+      relation("good-occlusion", "occludes", "good-front", "good-rear"),
+      relation("bad-occlusion", "occludes", "bad-front", "bad-rear"),
+      relation("accepted-carries", "carries-text", "accepted-backing", "accepted-scene-text"),
+      relation("rejected-carries", "carries-text", "rejected-backing", "rejected-scene-text"),
+      relation("cycle-a-front", "in-front-of", "cycle-a", "cycle-b"),
+      relation("cycle-b-front", "in-front-of", "cycle-b", "cycle-a"),
+    ],
+  };
+  return { source, ocr, graph };
+}
+
+async function emptyMask(): Promise<Buffer> {
+  return sharp(Buffer.alloc(WIDTH * HEIGHT), {
+    raw: { width: WIDTH, height: HEIGHT, channels: 1 },
+  }).png().toBuffer();
+}
+
+async function completionFor(
+  source: SourceCanvas,
+  candidate: SemanticCandidate,
+  rear: BBox,
+  occluder: BBox,
+  color: Rgba,
+  exposedError = false,
+): Promise<CompletedCandidate> {
+  const selected = chooseSemanticMask(
+    await deriveSemanticMasks(source, candidate),
+    await emptyMask(),
+  );
+  assert.ok(selected);
+  const width = Math.ceil(selected.bbox.width);
+  const height = Math.ceil(selected.bbox.height);
+  const rgba = Buffer.alloc(width * height * 4);
+  const visible = Buffer.alloc(width * height);
+  const generated = Buffer.alloc(width * height);
+  const exposedX = rear.x + 4;
+  const exposedY = rear.y + 4;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const canvasX = Math.floor(selected.bbox.x) + x;
+      const canvasY = Math.floor(selected.bbox.y) + y;
+      const insideRear =
+        canvasX >= rear.x && canvasX < rear.x + rear.width &&
+        canvasY >= rear.y && canvasY < rear.y + rear.height;
+      if (!insideRear) continue;
+      const insideOccluder =
+        canvasX >= occluder.x && canvasX < occluder.x + occluder.width &&
+        canvasY >= occluder.y && canvasY < occluder.y + occluder.height;
+      const isExposedError = exposedError && canvasX === exposedX && canvasY === exposedY;
+      const index = y * width + x;
+      rgba.set(isExposedError ? [245, 245, 245, 255] : color, index * 4);
+      if (insideOccluder || isExposedError) generated[index] = 255;
+      else visible[index] = 255;
+    }
+  }
+  const [image, visibleMask, generatedMask, sourceCrop] = await Promise.all([
+    sharp(rgba, { raw: { width, height, channels: 4 } }).png().toBuffer(),
+    sharp(visible, { raw: { width, height, channels: 1 } }).png().toBuffer(),
+    sharp(generated, { raw: { width, height, channels: 1 } }).png().toBuffer(),
+    sharp(source.rgba, {
+      raw: { width: source.width, height: source.height, channels: 4 },
+    }).extract({
+      left: Math.floor(selected.bbox.x),
+      top: Math.floor(selected.bbox.y),
+      width,
+      height,
+    }).png().toBuffer(),
+  ]);
+  return {
+    image,
+    visibleMask,
+    generatedMask,
+    reviewRequired: true,
+    provenance: {
+      kind: "composite",
+      sourceCropSha256: sha256(sourceCrop),
+      visibleMaskSha256: sha256(visibleMask),
+      generatedMaskSha256: sha256(generatedMask),
+      assetSha256: sha256(image),
+      modelId: "fixture-completion-model",
+      taskIdSha256: sha256(Buffer.from(candidate.id)),
+      sanitizedProviderMetadata: { purpose: "semantic-build-regression" },
+    },
+  };
+}
+
+async function maskPixels(mask: Buffer): Promise<Buffer> {
+  return sharp(mask).removeAlpha().greyscale().raw().toBuffer();
+}
+
+async function rgbaPixels(image: Buffer): Promise<Buffer> {
+  return sharp(image).ensureAlpha().raw().toBuffer();
+}
+
+test("atomically builds graph-ordered semantic layers and rolls back one exposed completion", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  assert.equal(plan.candidates.some(({ id }) => id === "cycle-a" || id === "cycle-b"), false);
+  const byId = new Map(plan.candidates.map((candidate) => [candidate.id, candidate]));
+  const completions = new Map<string, CompletedCandidate>([
+    [
+      "good-rear",
+      await completionFor(
+        fixture.source,
+        byId.get("good-rear")!,
+        GOOD_REAR,
+        GOOD_FRONT,
+        [43, 109, 168, 255],
+      ),
+    ],
+    [
+      "bad-rear",
+      await completionFor(
+        fixture.source,
+        byId.get("bad-rear")!,
+        BAD_REAR,
+        BAD_FRONT,
+        [58, 142, 92, 255],
+        true,
+      ),
+    ],
+  ]);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-build-"));
+  try {
+    const result = await buildSemanticLayers({
+      source: fixture.source,
+      ocr: fixture.ocr,
+      graph: fixture.graph,
+      plan,
+      completions,
+      workDir,
+    });
+
+    assert.equal(result.manifest.manifestVersion, 2);
+    assert.equal(result.recomposition.accepted, true);
+    assert.equal(result.manifest.elements.some(({ id }) => id === "cycle-a"), false);
+    assert.equal(result.manifest.elements.some(({ id }) => id === "cycle-b"), false);
+    assert.equal(result.manifest.elements.some(({ id }) => id === "rejected-backing"), false);
+    assert.equal(result.manifest.elements.some(({ id }) => id === "bad-rear"), false);
+    for (const id of [
+      "independent",
+      "compound",
+      "good-rear",
+      "good-front",
+      "bad-front",
+      "accepted-backing",
+      "ocr-1",
+      "ocr-2",
+    ]) {
+      assert.equal(result.manifest.elements.some((element) => element.id === id), true, id);
+    }
+
+    const backingIndex = result.manifest.elements.findIndex(({ id }) => id === "accepted-backing");
+    const carriedTextIndex = result.manifest.elements.findIndex(({ id }) => id === "ocr-1");
+    assert.ok(backingIndex >= 0 && backingIndex < carriedTextIndex);
+    const backing = result.manifest.elements[backingIndex]!;
+    assert.equal(backing.kind, "asset");
+    if (backing.kind === "asset") {
+      assert.deepEqual(backing.relations.map(({ id }) => id), ["accepted-carries"]);
+    }
+
+    const generated = result.manifest.elements.find(({ id }) => id === "good-rear");
+    assert.equal(generated?.kind, "asset");
+    if (generated?.kind === "asset") {
+      assert.equal(generated.reviewRequired, true);
+      assert.deepEqual(generated.provenance, completions.get("good-rear")!.provenance);
+    }
+    const visible = result.manifest.elements.find(({ id }) => id === "independent");
+    assert.equal(visible?.kind, "asset");
+    if (visible?.kind === "asset") {
+      assert.equal(visible.reviewRequired, false);
+      assert.equal(visible.provenance.kind, "source-visible");
+    }
+
+    const badDecision = result.decisions.find(({ candidateId }) => candidateId === "bad-rear");
+    assert.equal(badDecision?.decision, "kept_in_background");
+    assert.equal(badDecision?.reason, "recomposition_mismatch");
+    const rejectedBackingDecision = result.decisions.find(
+      ({ candidateId }) => candidateId === "rejected-backing",
+    );
+    assert.equal(rejectedBackingDecision?.decision, "kept_in_background");
+
+    const combined = await maskPixels(result.combinedMask);
+    assert.ok(combined[30 * WIDTH + 30]! >= 128);
+    assert.ok(combined[31 * WIDTH + 84]! >= 128);
+    assert.ok(combined[130 * WIDTH + 120]! >= 128);
+    assert.equal(combined[128 * WIDTH + 30], 0);
+    assert.equal(combined[124 * WIDTH + 264], 0);
+    assert.equal(combined[24 * WIDTH + 204], 0);
+
+    const [before, after] = await Promise.all([
+      Promise.resolve(fixture.source.rgba),
+      rgbaPixels(result.background),
+    ]);
+    for (const [x, y] of [[30, 128], [264, 124], [204, 24]] as const) {
+      const offset = (y * WIDTH + x) * 4;
+      assert.deepEqual(after.subarray(offset, offset + 4), before.subarray(offset, offset + 4));
+    }
+    for (let index = 0; index < WIDTH * HEIGHT; index += 1) {
+      if (combined[index]! >= 128) continue;
+      assert.deepEqual(
+        after.subarray(index * 4, index * 4 + 4),
+        before.subarray(index * 4, index * 4 + 4),
+      );
+    }
+
+    assert.deepEqual(
+      result.manifest.elements.map(({ zIndex }) => zIndex),
+      [...result.manifest.elements.map(({ zIndex }) => zIndex)].sort((left, right) => left - right),
+    );
+    for (const asset of result.acceptedAssets) {
+      assert.deepEqual(await readFile(join(workDir, asset.assetPath)), asset.image);
+    }
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
