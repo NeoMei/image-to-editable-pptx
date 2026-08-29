@@ -1,0 +1,21 @@
+{
+  "id": "offline-scene-completion",
+  "object": "chat.completion",
+  "created": 0,
+  "model": "qwen3-vl-plus",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "{\"nodes\":[{\"id\":\"background-1\",\"role\":\"background\",\"bbox\":[0,0,1000,1000],\"confidence\":1,\"zIndex\":0,\"label\":\"full canvas\",\"extractionHints\":[]},{\"id\":\"text-1\",\"role\":\"text\",\"bbox\":[100,100,300,180],\"confidence\":0.99,\"zIndex\":6,\"label\":\"text region for OCR matching\",\"extractionHints\":[\"use OCR geometry and content\"]},{\"id\":\"backing-1\",\"role\":\"text-backing\",\"bbox\":[80,80,320,210],\"confidence\":0.97,\"zIndex\":5,\"label\":\"rounded text backing\",\"extractionHints\":[\"preserve the complete rounded boundary\"]},{\"id\":\"object-1\",\"role\":\"foreground-object\",\"bbox\":[400,120,520,280],\"confidence\":0.94,\"zIndex\":3,\"label\":\"independently movable foreground object\",\"extractionHints\":[\"retain antialiased visible edge\"]},{\"id\":\"connector-1\",\"role\":\"connector\",\"bbox\":[520,180,650,210],\"confidence\":0.92,\"zIndex\":2,\"label\":\"visible connector\",\"extractionHints\":[\"keep endpoints intact\"]},{\"id\":\"group-1\",\"role\":\"compound-group\",\"bbox\":[380,90,700,330],\"confidence\":0.91,\"zIndex\":1,\"label\":\"connected compound composition\",\"extractionHints\":[\"review as one connected unit\"]},{\"id\":\"decoration-1\",\"role\":\"decoration\",\"bbox\":[820,60,920,150],\"confidence\":0.88,\"zIndex\":1,\"label\":\"small decorative mark\",\"extractionHints\":[\"leave in background when uncertain\"]}],\"relations\":[{\"id\":\"relation-belongs\",\"kind\":\"belongs-to\",\"from\":\"object-1\",\"to\":\"group-1\",\"confidence\":0.95},{\"id\":\"relation-connected\",\"kind\":\"connected-to\",\"from\":\"object-1\",\"to\":\"connector-1\",\"confidence\":0.93},{\"id\":\"relation-carries\",\"kind\":\"carries-text\",\"from\":\"backing-1\",\"to\":\"text-1\",\"confidence\":0.98},{\"id\":\"relation-occludes\",\"kind\":\"occludes\",\"from\":\"object-1\",\"to\":\"connector-1\",\"confidence\":0.84},{\"id\":\"relation-front\",\"kind\":\"in-front-of\",\"from\":\"backing-1\",\"to\":\"background-1\",\"confidence\":0.96},{\"id\":\"relation-behind\",\"kind\":\"behind\",\"from\":\"decoration-1\",\"to\":\"object-1\",\"confidence\":0.81}]}"
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1,
+    "completion_tokens": 1,
+    "total_tokens": 2
+  }
+}

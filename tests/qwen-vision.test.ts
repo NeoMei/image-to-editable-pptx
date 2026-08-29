@@ -36,7 +36,7 @@ async function readFixture(): Promise<VisionFixture> {
   ) as VisionFixture;
 }
 
-test("strips one outer Markdown fence and validates vision elements", async () => {
+test("v1 compatibility parser strips one outer fence and validates elements", async () => {
   const fixture = await readFixture();
   const result = parseQwenVisionContent(fixture.choices[0]!.message.content);
 
@@ -57,7 +57,7 @@ test("strips one outer Markdown fence and validates vision elements", async () =
   assert.ok(result.elements.some((element) => element.type === "icon"));
 });
 
-test("converts Qwen3-VL normalized coordinates to the 1280 by 720 canvas", () => {
+test("v1 compatibility parser retains the historical fixed canvas", () => {
   const result = parseQwenVisionContent(
     '{"elements":[{"type":"panel","bbox":[47,334,259,810],"label":"panel","zIndex":1,"editableAs":"native-shape","confidence":0.99}]}',
   );
@@ -70,7 +70,7 @@ test("converts Qwen3-VL normalized coordinates to the 1280 by 720 canvas", () =>
   });
 });
 
-test("contains every recolorable slide 7 structure and six distinct movable assets", async () => {
+test("v1 compatibility parser replays the historical recording", async () => {
   const fixture = await readFixture();
   const result = parseQwenVisionContent(fixture.choices[0]!.message.content);
   const nativeShapeLabels = result.elements
@@ -189,7 +189,7 @@ test("rejects invalid element enums and non-positive bboxes", () => {
   );
 });
 
-test("uses the compatible client with the requested model and constrained prompt", async () => {
+test("v1 compatibility analyzer retains its recorded request contract", async () => {
   const originalFetch = globalThis.fetch;
   const fixture = await readFixture();
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];

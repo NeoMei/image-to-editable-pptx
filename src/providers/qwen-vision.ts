@@ -8,11 +8,13 @@ import {
 } from "../contracts.js";
 import type { ProviderResponseObserver } from "./response-observer.js";
 
+// Legacy manifest-v1 recording compatibility only. New scene analysis belongs
+// in qwen-scene.ts and must not inherit this adapter's fixed-canvas contract.
 const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 const NORMALIZED_COORDINATE_MAX = 1000;
-const CANVAS_WIDTH = 1280;
-const CANVAS_HEIGHT = 720;
+const V1_RECORDING_CANVAS_WIDTH = 1280;
+const V1_RECORDING_CANVAS_HEIGHT = 720;
 
 const NormalizedCoordinateSchema = z.number().finite();
 const NormalizedBBoxSchema = z
@@ -51,7 +53,7 @@ const VisionPayloadSchema = z.object({
   ),
 });
 
-const VISION_PROMPT = `Analyze this slide and return JSON only, with no prose or Markdown.
+const V1_RECORDING_COMPATIBILITY_PROMPT = `Analyze this slide and return JSON only, with no prose or Markdown.
 The source canvas is exactly 1280 x 720 pixels.
 Return {"elements":[...]} and use this exact element type enum:
 text | panel | shape | icon | illustration | photo | background
@@ -107,6 +109,7 @@ function stripSingleOuterFence(content: string): string {
   return fenced?.[1]?.trim() ?? trimmed;
 }
 
+/** @deprecated Use parseQwenSceneContent for new analysis. */
 export function parseQwenVisionContent(content: string): VisionResult {
   let payload: unknown;
 
@@ -125,18 +128,22 @@ export function parseQwenVisionContent(content: string): VisionResult {
 
   const elements = parsed.elements.map(({ bbox, ...element }) => {
     const left = Math.round(
-      (bbox[0] / NORMALIZED_COORDINATE_MAX) * CANVAS_WIDTH,
+      (bbox[0] / NORMALIZED_COORDINATE_MAX) * V1_RECORDING_CANVAS_WIDTH,
     );
     const top = Math.round(
-      (bbox[1] / NORMALIZED_COORDINATE_MAX) * CANVAS_HEIGHT,
+      (bbox[1] / NORMALIZED_COORDINATE_MAX) * V1_RECORDING_CANVAS_HEIGHT,
     );
     const right = Math.max(
       left + 1,
-      Math.round((bbox[2] / NORMALIZED_COORDINATE_MAX) * CANVAS_WIDTH),
+      Math.round(
+        (bbox[2] / NORMALIZED_COORDINATE_MAX) * V1_RECORDING_CANVAS_WIDTH,
+      ),
     );
     const bottom = Math.max(
       top + 1,
-      Math.round((bbox[3] / NORMALIZED_COORDINATE_MAX) * CANVAS_HEIGHT),
+      Math.round(
+        (bbox[3] / NORMALIZED_COORDINATE_MAX) * V1_RECORDING_CANVAS_HEIGHT,
+      ),
     );
 
     return {
@@ -157,6 +164,7 @@ export function parseQwenVisionContent(content: string): VisionResult {
   }
 }
 
+/** @deprecated Use analyzeScene for new analysis. */
 export async function analyzeElements(
   image: Buffer,
   config: AppConfig,
@@ -196,7 +204,7 @@ export async function analyzeElements(
         {
           role: "user",
           content: [
-            { type: "text", text: VISION_PROMPT },
+            { type: "text", text: V1_RECORDING_COMPATIBILITY_PROMPT },
             {
               type: "image_url",
               image_url: {
