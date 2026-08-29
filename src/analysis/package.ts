@@ -9,18 +9,19 @@ import {
 } from "node:path";
 
 import { z } from "zod";
+import sharp from "sharp";
 
 import {
   AssetProvenanceSchema,
   OcrResultSchema,
   Sha256Schema,
   VisionResultSchema,
-  type AssetProvenance,
   type BBox,
   type OcrResult,
 } from "../contracts.js";
 import type { SourceCanvas } from "../image/source.js";
 import {
+  sanitizeProviderMetadata,
   sanitizeProviderRecording,
   sanitizeRecordingPayload,
   writeRecording,
@@ -57,7 +58,9 @@ export const AnalysisArtifactSchema = z
   .strict();
 
 export const CompletionArtifactSchema = AnalysisArtifactSchema.extend({
+  crop: PixelBBoxSchema,
   candidateId: z.string().min(1),
+  sourceCropPath: SafeRelativePathSchema,
   visibleMaskPath: SafeRelativePathSchema,
   generatedMaskPath: SafeRelativePathSchema,
   reviewRequired: z.literal(true),
@@ -164,6 +167,11 @@ export const AnalysisPackageV2Schema = z
     }
     for (const [index, artifact] of ledger.completions.entries()) {
       notePath(artifact.path, ["completions", index, "path"]);
+      notePath(artifact.sourceCropPath, [
+        "completions",
+        index,
+        "sourceCropPath",
+      ]);
       notePath(artifact.visibleMaskPath, [
         "completions",
         index,
@@ -174,13 +182,11 @@ export const AnalysisPackageV2Schema = z
         index,
         "generatedMaskPath",
       ]);
-      if (artifact.crop !== undefined) {
-        validateCrop(artifact.crop, ledger.canvas, context, [
-          "completions",
-          index,
-          "crop",
-        ]);
-      }
+      validateCrop(artifact.crop, ledger.canvas, context, [
+        "completions",
+        index,
+        "crop",
+      ]);
     }
     if (ledger.refinements.length > ledger.requests.regionalVision) {
       context.addIssue({
@@ -245,13 +251,7 @@ const AnalysisPackageV1Schema = z
   });
 
 export type AnalysisArtifact = z.infer<typeof AnalysisArtifactSchema>;
-export type CompletionArtifact = AnalysisArtifact & {
-  candidateId: string;
-  visibleMaskPath: string;
-  generatedMaskPath: string;
-  reviewRequired: true;
-  provenance: AssetProvenance;
-};
+export type CompletionArtifact = z.infer<typeof CompletionArtifactSchema>;
 export type AnalysisPackageV2 = z.infer<typeof AnalysisPackageV2Schema>;
 export type AnalysisPackageV1 = z.infer<typeof AnalysisPackageV1Schema>;
 
@@ -410,39 +410,155 @@ function assertNoEmbeddedImagePayloads(value: unknown): void {
   }
 }
 
-function sanitizedV2Ledger(input: unknown): AnalysisPackageV2 {
+function sanitizeV2Metadata(input: unknown): unknown {
   const sanitized = sanitizeRecordingPayload(input);
+  if (
+    typeof sanitized !== "object" ||
+    sanitized === null ||
+    Array.isArray(sanitized) ||
+    sanitized.analysisVersion !== 2 ||
+    !Array.isArray(sanitized.completions)
+  ) {
+    return sanitized;
+  }
+  for (const completion of sanitized.completions) {
+    if (
+      typeof completion !== "object" ||
+      completion === null ||
+      Array.isArray(completion) ||
+      typeof completion.provenance !== "object" ||
+      completion.provenance === null ||
+      Array.isArray(completion.provenance) ||
+      !("sanitizedProviderMetadata" in completion.provenance)
+    ) {
+      continue;
+    }
+    completion.provenance.sanitizedProviderMetadata =
+      sanitizeProviderMetadata(
+        completion.provenance.sanitizedProviderMetadata,
+      );
+  }
+  return sanitized;
+}
+
+function sanitizedV2Ledger(input: unknown): AnalysisPackageV2 {
+  const sanitized = sanitizeV2Metadata(input);
   assertNoEmbeddedImagePayloads(sanitized);
   return AnalysisPackageV2Schema.parse(sanitized);
+}
+
+function assertSanitizedCompletionMetadata(ledger: AnalysisPackageV2): void {
+  for (const completion of ledger.completions) {
+    if (
+      completion.provenance.kind !== "composite" ||
+      completion.provenance.sanitizedProviderMetadata === undefined
+    ) {
+      continue;
+    }
+    const metadata = completion.provenance.sanitizedProviderMetadata;
+    if (
+      JSON.stringify(sanitizeProviderMetadata(metadata)) !==
+      JSON.stringify(metadata)
+    ) {
+      throw new Error("Analysis ledger contains opaque provider metadata");
+    }
+  }
+}
+
+async function verifyCompletionArtifactSet(
+  directory: string,
+  artifact: CompletionArtifact,
+  source: { width: number; height: number; rgba: Buffer },
+): Promise<void> {
+  if (artifact.provenance.kind !== "composite") {
+    throw new Error("Completion artifacts require composite provenance");
+  }
+  const [sourceCrop] = await Promise.all([
+    readVerifiedAnalysisArtifact(directory, {
+      path: artifact.sourceCropPath,
+      sha256: artifact.provenance.sourceCropSha256,
+    }),
+    readVerifiedAnalysisArtifact(directory, artifact),
+    readVerifiedAnalysisArtifact(directory, {
+      path: artifact.visibleMaskPath,
+      sha256: artifact.provenance.visibleMaskSha256,
+    }),
+    readVerifiedAnalysisArtifact(directory, {
+      path: artifact.generatedMaskPath,
+      sha256: artifact.provenance.generatedMaskSha256,
+    }),
+  ]);
+  let decoded: { width: number; height: number; rgba: Buffer };
+  try {
+    const result = await sharp(sourceCrop)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    decoded = {
+      width: result.info.width,
+      height: result.info.height,
+      rgba: result.data,
+    };
+  } catch (error) {
+    throw new Error(
+      `Completion source crop is not a decodable image: ${artifact.sourceCropPath}`,
+      { cause: error },
+    );
+  }
+  if (
+    decoded.width !== Math.round(artifact.crop.width) ||
+    decoded.height !== Math.round(artifact.crop.height)
+  ) {
+    throw new Error(
+      `Completion source crop dimensions do not match crop bounds: ${artifact.sourceCropPath}`,
+    );
+  }
+  const left = Math.round(artifact.crop.x);
+  const top = Math.round(artifact.crop.y);
+  if (
+    left + decoded.width > source.width ||
+    top + decoded.height > source.height
+  ) {
+    throw new Error(
+      `Completion source crop escapes canonical canvas bounds: ${artifact.sourceCropPath}`,
+    );
+  }
+  const expected = Buffer.alloc(decoded.width * decoded.height * 4);
+  for (let row = 0; row < decoded.height; row += 1) {
+    const sourceOffset = ((top + row) * source.width + left) * 4;
+    source.rgba.copy(
+      expected,
+      row * decoded.width * 4,
+      sourceOffset,
+      sourceOffset + decoded.width * 4,
+    );
+  }
+  if (!decoded.rgba.equals(expected)) {
+    throw new Error(
+      `Completion source crop pixels do not match canonical RGBA: ${artifact.sourceCropPath}`,
+    );
+  }
 }
 
 async function verifyV2ArtifactSet(
   directory: string,
   ledger: AnalysisPackageV2,
 ): Promise<void> {
+  const sourceRgba = await readVerifiedAnalysisArtifact(directory, ledger.source);
+  const source = {
+    width: ledger.canvas.width,
+    height: ledger.canvas.height,
+    rgba: sourceRgba,
+  };
   await Promise.all([
-    readVerifiedAnalysisArtifact(directory, ledger.source),
     readVerifiedAnalysisArtifact(directory, ledger.ocr),
     readVerifiedAnalysisArtifact(directory, ledger.scene),
     ...ledger.refinements.map((artifact) =>
       readVerifiedAnalysisArtifact(directory, artifact),
     ),
-    ...ledger.completions.flatMap((artifact) => {
-      if (artifact.provenance.kind !== "composite") {
-        throw new Error("Completion artifacts require composite provenance");
-      }
-      return [
-        readVerifiedAnalysisArtifact(directory, artifact),
-        readVerifiedAnalysisArtifact(directory, {
-          path: artifact.visibleMaskPath,
-          sha256: artifact.provenance.visibleMaskSha256,
-        }),
-        readVerifiedAnalysisArtifact(directory, {
-          path: artifact.generatedMaskPath,
-          sha256: artifact.provenance.generatedMaskSha256,
-        }),
-      ];
-    }),
+    ...ledger.completions.map((artifact) =>
+      verifyCompletionArtifactSet(directory, artifact, source),
+    ),
   ]);
 }
 
@@ -476,7 +592,10 @@ export async function writeAnalysisPackageV2(input: {
   const ledger = sanitizedV2Ledger(input.ledger);
   const parsedRefinements = z.array(AnalysisArtifactSchema).parse(input.refinements);
   const parsedCompletions = z.array(CompletionArtifactSchema).parse(
-    sanitizeRecordingPayload(input.completions),
+    (sanitizeV2Metadata({
+      analysisVersion: 2,
+      completions: input.completions,
+    }) as { completions: unknown }).completions,
   );
   if (comparable(ledger.refinements) !== comparable(parsedRefinements)) {
     throw new Error("Analysis ledger refinements do not match package inputs");
@@ -507,24 +626,14 @@ export async function writeAnalysisPackageV2(input: {
     ...ledger.refinements.map((artifact) =>
       readVerifiedAnalysisArtifact(directory, artifact),
     ),
-    ...ledger.completions.flatMap((artifact) => {
+    ...ledger.completions.map((artifact) => {
       if (artifact.provenance.kind !== "composite") {
         throw new Error("Completion artifacts require composite provenance");
       }
       if (artifact.provenance.assetSha256 !== artifact.sha256) {
         throw new Error(`Completion provenance hash mismatch: ${artifact.path}`);
       }
-      return [
-        readVerifiedAnalysisArtifact(directory, artifact),
-        readVerifiedAnalysisArtifact(directory, {
-          path: artifact.visibleMaskPath,
-          sha256: artifact.provenance.visibleMaskSha256,
-        }),
-        readVerifiedAnalysisArtifact(directory, {
-          path: artifact.generatedMaskPath,
-          sha256: artifact.provenance.generatedMaskSha256,
-        }),
-      ];
+      return verifyCompletionArtifactSet(directory, artifact, input.canvas);
     }),
   ]);
 
@@ -579,6 +688,7 @@ export async function readAnalysisPackage(
       throw new Error("Analysis ledger contains unsanitized secret-like metadata");
     }
     const ledger = AnalysisPackageV2Schema.parse(payload);
+    assertSanitizedCompletionMetadata(ledger);
     assertNoEmbeddedImagePayloads(ledger);
     await verifyV2ArtifactSet(directory, ledger);
     const [source, ocrBytes, sceneBytes] = await Promise.all([

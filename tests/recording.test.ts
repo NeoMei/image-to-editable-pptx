@@ -17,10 +17,34 @@ import {
   MAX_PROVIDER_RECORDING_STRING_CHARS,
   MAX_PROVIDER_RECORDING_TOTAL_STRING_CHARS,
   readRecording,
+  sanitizeProviderMetadata,
   sanitizeProviderRecording,
   sanitizeRecordingPayload,
   writeRecording,
 } from "../src/recording.js";
+
+test("drops opaque provider identifiers while preserving useful status metadata", () => {
+  const sanitized = sanitizeProviderMetadata({
+    status: "SUCCEEDED",
+    attempts: 2,
+    requestId: "req-opaque-canary-123456789",
+    nested: {
+      trace_id: "2e9044e2-525e-4a44-8bd8-71d8956d6439",
+      opaqueReference: "QW5hbHlzaXNPcGFxdWVUcmFjaW5nVG9rZW4xMjM0NTY=",
+      note: "provider completed normally",
+    },
+  });
+
+  assert.deepEqual(sanitized, {
+    status: "SUCCEEDED",
+    attempts: 2,
+    nested: { note: "provider completed normally" },
+  });
+  assert.doesNotMatch(
+    JSON.stringify(sanitized),
+    /opaque-canary|2e9044e2|QW5hbHlzaXNPcGFxdWU/,
+  );
+});
 
 test("sanitizes and deterministically bounds nested provider values", () => {
   const configuredKey = "configured-provider-key-canary-987654321";

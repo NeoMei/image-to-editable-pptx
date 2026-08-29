@@ -36,6 +36,60 @@ type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+const OPAQUE_METADATA_KEY = /^(?:(?:provider|task|request|job|trace|session|operation|execution|run|correlation|event|opaque)(?:id|key|token|uuid|reference)|(?:id|uuid|token))$/;
+const OPAQUE_METADATA_UUID =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const OPAQUE_METADATA_VALUE = /^[a-z0-9][a-z0-9._~+/=-]{15,}$/i;
+
+function isOpaqueMetadataKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[\s._-]+/g, "");
+  return OPAQUE_METADATA_KEY.test(normalized);
+}
+
+function isOpaqueMetadataString(value: string): boolean {
+  if (
+    value.includes("[REDACTED") ||
+    /^https?:\/\//i.test(value) ||
+    OPAQUE_METADATA_UUID.test(value)
+  ) {
+    return true;
+  }
+  return (
+    OPAQUE_METADATA_VALUE.test(value) &&
+    /[a-z]/i.test(value) &&
+    /\d/.test(value)
+  );
+}
+
+function pruneOpaqueProviderMetadata(value: JsonValue): JsonValue | undefined {
+  if (typeof value === "string") {
+    return isOpaqueMetadataString(value) ? undefined : value;
+  }
+  if (value === null || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      const sanitized = pruneOpaqueProviderMetadata(item);
+      return sanitized === undefined ? [] : [sanitized];
+    });
+  }
+  const sanitized: Record<string, JsonValue> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (isSensitiveKey(key) || PROVIDER_SECRET_HEADER.test(key) || isOpaqueMetadataKey(key)) {
+      continue;
+    }
+    const pruned = pruneOpaqueProviderMetadata(nested);
+    if (pruned !== undefined) sanitized[key] = pruned;
+  }
+  return sanitized;
+}
+
+export function sanitizeProviderMetadata(payload: unknown): JsonValue {
+  const bounded = sanitizeProviderRecording(payload, "").payload;
+  return pruneOpaqueProviderMetadata(bounded) ?? null;
+}
+
 export const MAX_PROVIDER_RECORDING_STRING_CHARS = 8_192;
 export const MAX_PROVIDER_RECORDING_KEY_CHARS = 256;
 export const MAX_PROVIDER_RECORDING_TOTAL_STRING_CHARS = 65_536;

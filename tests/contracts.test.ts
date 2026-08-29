@@ -176,7 +176,7 @@ test("parses all provider-neutral asset provenance forms", () => {
     generatedMaskSha256: hash("5"),
     assetSha256: hash("6"),
     modelId: "provider-neutral-model",
-    taskId: "sanitized-task-id",
+    taskIdSha256: hash("b"),
     sanitizedProviderMetadata: { requestClass: "image-edit", attempts: 1 },
   };
   const composite = {
@@ -186,7 +186,7 @@ test("parses all provider-neutral asset provenance forms", () => {
     generatedMaskSha256: hash("9"),
     assetSha256: hash("a"),
     modelId: "provider-neutral-model",
-    taskId: "sanitized-task-id",
+    taskIdSha256: hash("c"),
   };
 
   assert.deepEqual(AssetProvenanceSchema.parse(sourceVisible), sourceVisible);
@@ -196,6 +196,13 @@ test("parses all provider-neutral asset provenance forms", () => {
     AssetProvenanceSchema.parse({
       ...composite,
       generatedMaskSha256: undefined,
+    }),
+  );
+  assert.throws(() =>
+    AssetProvenanceSchema.parse({
+      ...composite,
+      taskIdSha256: undefined,
+      taskId: "raw-provider-task-id",
     }),
   );
 });
@@ -210,7 +217,7 @@ test("requires review for assets containing generated hidden pixels", () => {
       generatedMaskSha256: hash("e"),
       assetSha256: hash("f"),
       modelId: "provider-neutral-model",
-      taskId: "sanitized-task-id",
+      taskIdSha256: hash("f"),
       ...(kind === "composite" ? { visibleMaskSha256: hash("0") } : {}),
     };
     assert.throws(() => SlideManifestV2Schema.parse(fixture));

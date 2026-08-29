@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import sharp from "sharp";
 import { z } from "zod";
 
-import { sanitizeProviderRecording } from "../recording.js";
+import { sanitizeProviderMetadata } from "../recording.js";
 import type {
   CompletedCandidate,
   OcclusionCompletionInput,
@@ -60,8 +60,8 @@ export class OcclusionCompletionBudget {
   }
 }
 
-function sha256(buffer: Buffer): string {
-  return createHash("sha256").update(buffer).digest("hex");
+function sha256(value: Buffer | string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function canonicalCropPadding(input: OcclusionCompletionInput): number {
@@ -557,11 +557,9 @@ export async function completeOccludedCandidate(
       taskId: providerResult.taskId,
       sanitizedMetadata: providerResult.sanitizedMetadata,
     };
-    sanitizedMetadata = z
-      .json()
-      .parse(
-        sanitizeProviderRecording(completion.sanitizedMetadata, "").payload,
-      );
+    sanitizedMetadata = z.json().parse(
+      sanitizeProviderMetadata(completion.sanitizedMetadata),
+    );
   } catch {
     return undefined;
   }
@@ -620,7 +618,7 @@ export async function completeOccludedCandidate(
       generatedMaskSha256: sha256(generatedMask),
       assetSha256: sha256(image),
       modelId: completion.modelId,
-      taskId: completion.taskId,
+      taskIdSha256: sha256(completion.taskId),
       sanitizedProviderMetadata: sanitizedMetadata,
     },
   };

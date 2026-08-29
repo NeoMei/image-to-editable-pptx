@@ -500,7 +500,11 @@ test("composites only generated hidden pixels, locks visible RGBA, and records h
     createHash("sha256").update(result.image).digest("hex"),
   );
   assert.equal(result.provenance.modelId, "provider-model");
-  assert.equal(result.provenance.taskId, "provider-task");
+  assert.equal(
+    result.provenance.taskIdSha256,
+    createHash("sha256").update("provider-task").digest("hex"),
+  );
+  assert.equal("taskId" in result.provenance, false);
   assert.deepEqual(result.provenance.sanitizedProviderMetadata, {
     status: "succeeded",
     attempts: 1,
@@ -550,6 +554,9 @@ test("redacts provider credentials and signed URLs at the generic metadata bound
         taskId: "provider-task",
         sanitizedMetadata: {
           authorization: "Bearer secret-token-value",
+          requestId: "opaque-request-id-canary-123456789",
+          opaqueReference: "QW5hbHlzaXNPcGFxdWVUcmFjaW5nVG9rZW4xMjM0NTY=",
+          status: "succeeded",
           resultUrl:
             "https://example.invalid/result.png?Signature=secret-signature",
         },
@@ -557,10 +564,18 @@ test("redacts provider credentials and signed URLs at the generic metadata bound
     },
   });
   assert.ok(result);
+  assert.equal(result.provenance.kind, "composite");
   assert.doesNotMatch(
     JSON.stringify(result.provenance),
-    /secret-token-value|secret-signature|Signature/,
+    /secret-token-value|secret-signature|Signature|opaque-request-id-canary|QW5hbHlzaXNPcGFxdWU/,
   );
+  assert.equal(
+    result.provenance.taskIdSha256,
+    createHash("sha256").update("provider-task").digest("hex"),
+  );
+  assert.deepEqual(result.provenance.sanitizedProviderMetadata, {
+    status: "succeeded",
+  });
 });
 
 test("malformed provider envelopes consume budget and return no layer", async () => {

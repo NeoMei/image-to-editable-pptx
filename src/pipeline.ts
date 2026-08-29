@@ -640,12 +640,13 @@ async function completeEligibleCandidates(input: {
     }
     if (!completeMaskSet) continue;
 
+    const sourceCrop = await canonicalCrop(input.source, visible.bbox);
     const completed = await completeOccludedCandidate(
       {
         candidate,
         canvas: input.scene.canvas,
         cropBounds: visible.bbox,
-        crop: await canonicalCrop(input.source, visible.bbox),
+        crop: sourceCrop,
         visibleMask: visible.mask,
         occluderMasks,
         semanticContext: [
@@ -660,12 +661,15 @@ async function completeEligibleCandidates(input: {
     if (completed === undefined) continue;
     const sequence = String(artifacts.length + 1).padStart(3, "0");
     const path = `completions/completion-${sequence}.png`;
+    const sourceCropPath =
+      `completions/completion-${sequence}-source-crop.png`;
     const visibleMaskPath =
       `completions/completion-${sequence}-visible-mask.png`;
     const generatedMaskPath =
       `completions/completion-${sequence}-generated-mask.png`;
     await Promise.all([
       writeCompletionBinary(join(input.outDir, path), completed.image),
+      writeCompletionBinary(join(input.outDir, sourceCropPath), sourceCrop),
       writeCompletionBinary(
         join(input.outDir, visibleMaskPath),
         completed.visibleMask,
@@ -680,6 +684,7 @@ async function completeEligibleCandidates(input: {
       sha256: sha256(completed.image),
       crop: visible.bbox,
       candidateId: candidate.id,
+      sourceCropPath,
       visibleMaskPath,
       generatedMaskPath,
       reviewRequired: true,
@@ -1069,6 +1074,57 @@ function validateFidelityResult(
   }
 }
 
+function referencedV2Artifacts(
+  ledger: AnalysisPackageV2,
+): Array<{ path: string; sha256: string }> {
+  const artifacts: Array<{ path: string; sha256: string }> = [
+    ledger.source,
+    ledger.ocr,
+    ledger.scene,
+    ...ledger.refinements,
+  ];
+  for (const completion of ledger.completions) {
+    if (completion.provenance.kind !== "composite") {
+      throw new Error("Completion artifacts require composite provenance");
+    }
+    artifacts.push(
+      completion,
+      {
+        path: completion.sourceCropPath,
+        sha256: completion.provenance.sourceCropSha256,
+      },
+      {
+        path: completion.visibleMaskPath,
+        sha256: completion.provenance.visibleMaskSha256,
+      },
+      {
+        path: completion.generatedMaskPath,
+        sha256: completion.provenance.generatedMaskSha256,
+      },
+    );
+  }
+  return artifacts;
+}
+
+async function copyVerifiedV2PackageArtifacts(
+  sourceDirectory: string,
+  targetDirectory: string,
+  ledger: AnalysisPackageV2,
+): Promise<void> {
+  await Promise.all(
+    referencedV2Artifacts(ledger).map(async (artifact) => {
+      const bytes = await readVerifiedAnalysisArtifact(
+        sourceDirectory,
+        artifact,
+      );
+      await writeCompletionBinary(
+        join(targetDirectory, artifact.path),
+        bytes,
+      );
+    }),
+  );
+}
+
 async function buildFromAnalysis(
   options: BuildOptions,
   context: BuildContext,
@@ -1143,23 +1199,32 @@ async function buildFromAnalysis(
   const localImage = await canonicalLocalImage(source);
   const assetsDir = join(outDir, "assets");
   await mkdir(assetsDir, { recursive: true });
-  await Promise.all([
-    writeRecording(join(outDir, "ocr.json"), context.analysis.ocr),
-    writeRecording(join(outDir, analysisVisualName), analysisVisual),
-    writeRecording(
+  if (
+    context.analysis.analysisVersion === 2 &&
+    resolve(context.analysis.directory) !== outDir
+  ) {
+    await copyVerifiedV2PackageArtifacts(
+      context.analysis.directory,
+      outDir,
+      context.analysis.ledger,
+    );
+    await writeRecording(
       join(outDir, ANALYSIS_LEDGER_NAME),
       context.analysis.ledger,
-    ),
-    ...(context.analysis.analysisVersion === 2 &&
-    resolve(context.analysis.directory) !== outDir
-      ? [
-          writeFile(join(outDir, "source.rgba"), source.rgba, {
-            flag: "wx",
-            mode: 0o600,
-          }),
-        ]
-      : []),
-  ]);
+    );
+  } else {
+    await Promise.all([
+      writeRecording(join(outDir, "ocr.json"), context.analysis.ocr),
+      writeRecording(join(outDir, analysisVisualName), analysisVisual),
+      writeRecording(
+        join(outDir, ANALYSIS_LEDGER_NAME),
+        context.analysis.ledger,
+      ),
+    ]);
+  }
+  if (context.analysis.analysisVersion === 2) {
+    await readAnalysisPackage(outDir);
+  }
   if (
     context.analysis.analysisVersion === 1 &&
     context.analysis.ledger.recorded

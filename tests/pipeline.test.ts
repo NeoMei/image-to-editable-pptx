@@ -9,6 +9,7 @@ import {
   readdir,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -693,6 +694,76 @@ test("builds offline from a verified v2 package without an external source image
       ],
       relations: [],
     };
+    const refinementPath = "refinements/refinement-001.json";
+    const refinementBytes = Buffer.from(
+      `${JSON.stringify({ request: "regional", accepted: true }, null, 2)}\n`,
+    );
+    const completionPath = "completions/completion-001.png";
+    const sourceCropPath = "completions/completion-001-source-crop.png";
+    const visibleMaskPath = "completions/completion-001-visible-mask.png";
+    const generatedMaskPath = "completions/completion-001-generated-mask.png";
+    const crop = { x: 16, y: 16, width: 24, height: 24 };
+    const sourceCropBytes = await sharp(sourceBytes)
+      .extract({ left: crop.x, top: crop.y, width: crop.width, height: crop.height })
+      .png()
+      .toBuffer();
+    const completionBytes = await sharp(sourceCropBytes)
+      .tint("#405a75")
+      .png()
+      .toBuffer();
+    const visibleMaskBytes = await sharp({
+      create: {
+        width: crop.width,
+        height: crop.height,
+        channels: 4,
+        background: "white",
+      },
+    }).png().toBuffer();
+    const generatedMaskBytes = await sharp({
+      create: {
+        width: crop.width,
+        height: crop.height,
+        channels: 4,
+        background: "black",
+      },
+    }).png().toBuffer();
+    await Promise.all([
+      mkdir(join(analysisDir, "refinements")),
+      mkdir(join(analysisDir, "completions")),
+    ]);
+    await Promise.all([
+      writeFile(join(analysisDir, refinementPath), refinementBytes, { mode: 0o600 }),
+      writeFile(join(analysisDir, completionPath), completionBytes, { mode: 0o600 }),
+      writeFile(join(analysisDir, sourceCropPath), sourceCropBytes, { mode: 0o600 }),
+      writeFile(join(analysisDir, visibleMaskPath), visibleMaskBytes, { mode: 0o600 }),
+      writeFile(join(analysisDir, generatedMaskPath), generatedMaskBytes, { mode: 0o600 }),
+      writeFile(join(analysisDir, "unreferenced-provider-response.json"), "do-not-copy", { mode: 0o600 }),
+    ]);
+    const refinements = [{
+      path: refinementPath,
+      sha256: sha256(refinementBytes),
+      crop: { x: 8, y: 8, width: 48, height: 48 },
+    }];
+    const completions = [{
+      path: completionPath,
+      sha256: sha256(completionBytes),
+      crop,
+      candidateId: "completion-candidate-1",
+      sourceCropPath,
+      visibleMaskPath,
+      generatedMaskPath,
+      reviewRequired: true as const,
+      provenance: {
+        kind: "composite" as const,
+        sourceCropSha256: sha256(sourceCropBytes),
+        visibleMaskSha256: sha256(visibleMaskBytes),
+        generatedMaskSha256: sha256(generatedMaskBytes),
+        assetSha256: sha256(completionBytes),
+        modelId: "wanx2.1-imageedit",
+        taskIdSha256: sha256("raw-provider-task-never-persisted"),
+        sanitizedProviderMetadata: { status: "SUCCEEDED", attempts: 1 },
+      },
+    }];
     const analysisLedger: AnalysisPackageV2 = {
       analysisVersion: 2,
       mode: "replay",
@@ -712,20 +783,21 @@ test("builds offline from a verified v2 package without an external source image
         path: "scene-graph.json",
         sha256: sha256(`${JSON.stringify(packageScene, null, 2)}\n`),
       },
-      refinements: [],
-      completions: [],
-      requests: { ocr: 1, fullVision: 1, regionalVision: 0, completion: 0 },
+      refinements,
+      completions,
+      requests: { ocr: 1, fullVision: 1, regionalVision: 1, completion: 1 },
       models: {
         ocr: "qwen3.5-ocr",
         fullVision: "qwen3-vl-plus",
         regionalVision: "qwen3-vl-plus",
+        completion: "wanx2.1-imageedit",
       },
       durationsMs: {
         ocr: 1,
         fullVision: 1,
-        regionalVision: 0,
-        completion: 0,
-        analyze: 2,
+        regionalVision: 1,
+        completion: 1,
+        analyze: 4,
       },
       warnings: [],
     };
@@ -734,8 +806,8 @@ test("builds offline from a verified v2 package without an external source image
       canvas,
       ocr: packageOcr,
       scene: packageScene,
-      refinements: [],
-      completions: [],
+      refinements,
+      completions,
       ledger: analysisLedger,
     });
 
@@ -755,16 +827,43 @@ test("builds offline from a verified v2 package without an external source image
       access(join(outDir, "scene-graph.json")),
       access(join(outDir, "analysis-ledger.json")),
     ]);
-    const copiedAnalysisLedger = JSON.parse(
-      await readFile(join(outDir, "analysis-ledger.json"), "utf8"),
-    ) as {
-      requests: Record<string, number>;
-      source: { originalSha256: string };
-    };
+    const copiedAnalysisLedger = await readAnalysisPackage(outDir);
+    assert.equal(copiedAnalysisLedger.analysisVersion, 2);
     assert.deepEqual(copiedAnalysisLedger.requests, analysisLedger.requests);
     assert.equal(
       copiedAnalysisLedger.source.originalSha256,
       analysisLedger.source.originalSha256,
+    );
+    assert.equal(copiedAnalysisLedger.refinements.length, 1);
+    assert.equal(copiedAnalysisLedger.completions.length, 1);
+    const copiedCompletion = copiedAnalysisLedger.completions[0]!;
+    assert.equal(copiedCompletion.provenance.kind, "composite");
+    const referencedArtifacts = [
+      copiedAnalysisLedger.source,
+      copiedAnalysisLedger.ocr,
+      copiedAnalysisLedger.scene,
+      ...copiedAnalysisLedger.refinements,
+      copiedCompletion,
+      {
+        path: copiedCompletion.sourceCropPath,
+        sha256: copiedCompletion.provenance.sourceCropSha256,
+      },
+      {
+        path: copiedCompletion.visibleMaskPath,
+        sha256: copiedCompletion.provenance.visibleMaskSha256,
+      },
+      {
+        path: copiedCompletion.generatedMaskPath,
+        sha256: copiedCompletion.provenance.generatedMaskSha256,
+      },
+    ];
+    for (const artifact of referencedArtifacts) {
+      const copiedPath = join(outDir, artifact.path);
+      assert.equal(sha256(await readFile(copiedPath)), artifact.sha256);
+      assert.equal((await stat(copiedPath)).mode & 0o777, 0o600);
+    }
+    await assert.rejects(
+      access(join(outDir, "unreferenced-provider-response.json")),
     );
   } finally {
     globalThis.fetch = originalFetch;

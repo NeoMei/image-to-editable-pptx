@@ -128,7 +128,7 @@ const GeneratedHiddenProvenanceSchema = z
     generatedMaskSha256: Sha256Schema,
     assetSha256: Sha256Schema,
     modelId: z.string().min(1),
-    taskId: z.string().min(1),
+    taskIdSha256: Sha256Schema,
     sanitizedProviderMetadata: z.json().optional(),
   })
   .strict();
@@ -141,7 +141,7 @@ const CompositeProvenanceSchema = z
     generatedMaskSha256: Sha256Schema,
     assetSha256: Sha256Schema,
     modelId: z.string().min(1),
-    taskId: z.string().min(1),
+    taskIdSha256: Sha256Schema,
     sanitizedProviderMetadata: z.json().optional(),
   })
   .strict();

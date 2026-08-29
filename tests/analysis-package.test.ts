@@ -16,6 +16,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import sharp from "sharp";
+
 import {
   readAnalysisPackage,
   writeAnalysisPackageV2,
@@ -73,9 +75,16 @@ async function createPackageFixture(options: {
   const completionPath = "completions/completion-001.png";
   const visibleMaskPath = "completions/completion-001-visible-mask.png";
   const generatedMaskPath = "completions/completion-001-generated-mask.png";
+  const sourceCropPath = "completions/completion-001-source-crop.png";
   const completionBytes = Buffer.from("completed-png-bytes");
   const visibleMaskBytes = Buffer.from("visible-mask-png-bytes");
   const generatedMaskBytes = Buffer.from("generated-mask-png-bytes");
+  const sourceCropBytes = await sharp(canvas.rgba, {
+    raw: { width: canvas.width, height: canvas.height, channels: 4 },
+  })
+    .extract({ left: 8, top: 8, width: 24, height: 24 })
+    .png()
+    .toBuffer();
   await Promise.all([
     mkdir(join(directory, "refinements")),
     mkdir(join(directory, "completions")),
@@ -85,6 +94,7 @@ async function createPackageFixture(options: {
     writeFile(join(directory, completionPath), completionBytes, { mode: 0o600 }),
     writeFile(join(directory, visibleMaskPath), visibleMaskBytes, { mode: 0o600 }),
     writeFile(join(directory, generatedMaskPath), generatedMaskBytes, { mode: 0o600 }),
+    writeFile(join(directory, sourceCropPath), sourceCropBytes, { mode: 0o600 }),
   ]).catch(async (error) => {
     await rm(directory, { recursive: true, force: true });
     throw error;
@@ -95,17 +105,18 @@ async function createPackageFixture(options: {
     sha256: sha256(completionBytes),
     crop: { x: 8, y: 8, width: 24, height: 24 },
     candidateId: "candidate-1",
+    sourceCropPath,
     visibleMaskPath,
     generatedMaskPath,
     reviewRequired: true,
     provenance: {
       kind: "composite",
-      sourceCropSha256: sha256("source-crop"),
+      sourceCropSha256: sha256(sourceCropBytes),
       visibleMaskSha256: sha256(visibleMaskBytes),
       generatedMaskSha256: sha256(generatedMaskBytes),
       assetSha256: sha256(completionBytes),
       modelId: "wanx2.1-imageedit",
-      taskId: "task-123",
+      taskIdSha256: sha256("task-123"),
       sanitizedProviderMetadata:
         (options.nestedMetadata ?? { taskStatus: "SUCCEEDED" }) as never,
     },
@@ -176,6 +187,7 @@ async function createPackageFixture(options: {
       completionPath,
       visibleMaskPath,
       generatedMaskPath,
+      sourceCropPath,
     ],
   };
 }
@@ -309,10 +321,120 @@ test("rejects a completion asset hash that disagrees with its provenance", async
   }
 });
 
+test("rejects missing or falsely attributed completion source crops", async () => {
+  const bogusHash = await createPackageFixture();
+  const missingPath = await createPackageFixture();
+  const missingCrop = await createPackageFixture();
+  const wrongDimensions = await createPackageFixture();
+  const wrongPixels = await createPackageFixture();
+  try {
+    const bogusLedger = JSON.parse(
+      await readFile(join(bogusHash.directory, "analysis-ledger.json"), "utf8"),
+    ) as AnalysisPackageV2;
+    const bogusCompletion = bogusLedger.completions[0]!;
+    assert.equal(bogusCompletion.provenance.kind, "composite");
+    bogusCompletion.provenance.sourceCropSha256 = sha256("not-the-source-crop");
+    await writeFile(
+      join(bogusHash.directory, "analysis-ledger.json"),
+      `${JSON.stringify(bogusLedger, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      readAnalysisPackage(bogusHash.directory),
+      /source.crop|hash mismatch/i,
+    );
+
+    for (const [fixture, field] of [
+      [missingPath, "sourceCropPath"],
+      [missingCrop, "crop"],
+    ] as const) {
+      const ledger = JSON.parse(
+        await readFile(join(fixture.directory, "analysis-ledger.json"), "utf8"),
+      ) as AnalysisPackageV2;
+      delete (ledger.completions[0] as unknown as Record<string, unknown>)[field];
+      await writeFile(
+        join(fixture.directory, "analysis-ledger.json"),
+        `${JSON.stringify(ledger, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      await assert.rejects(
+        readAnalysisPackage(fixture.directory),
+        new RegExp(field === "crop" ? "crop|required|invalid" : "sourceCropPath|invalid", "i"),
+      );
+    }
+
+    const dimensionLedger = JSON.parse(
+      await readFile(join(wrongDimensions.directory, "analysis-ledger.json"), "utf8"),
+    ) as AnalysisPackageV2;
+    const dimensionCompletion = dimensionLedger.completions[0]!;
+    assert.equal(dimensionCompletion.provenance.kind, "composite");
+    const wrongCrop = await sharp({
+      create: {
+        width: 12,
+        height: 12,
+        channels: 4,
+        background: "#25364a",
+      },
+    }).png().toBuffer();
+    await writeFile(
+      join(wrongDimensions.directory, dimensionCompletion.sourceCropPath),
+      wrongCrop,
+      { mode: 0o600 },
+    );
+    dimensionCompletion.provenance.sourceCropSha256 = sha256(wrongCrop);
+    await writeFile(
+      join(wrongDimensions.directory, "analysis-ledger.json"),
+      `${JSON.stringify(dimensionLedger, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      readAnalysisPackage(wrongDimensions.directory),
+      /source.crop.*dimensions|dimensions.*source.crop/i,
+    );
+
+    const pixelLedger = JSON.parse(
+      await readFile(join(wrongPixels.directory, "analysis-ledger.json"), "utf8"),
+    ) as AnalysisPackageV2;
+    const pixelCompletion = pixelLedger.completions[0]!;
+    assert.equal(pixelCompletion.provenance.kind, "composite");
+    const falseCrop = await sharp({
+      create: {
+        width: 24,
+        height: 24,
+        channels: 4,
+        background: "#ff00cc",
+      },
+    }).png().toBuffer();
+    await writeFile(
+      join(wrongPixels.directory, pixelCompletion.sourceCropPath),
+      falseCrop,
+      { mode: 0o600 },
+    );
+    pixelCompletion.provenance.sourceCropSha256 = sha256(falseCrop);
+    await writeFile(
+      join(wrongPixels.directory, "analysis-ledger.json"),
+      `${JSON.stringify(pixelLedger, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      readAnalysisPackage(wrongPixels.directory),
+      /source.crop.*canonical|canonical.*source.crop|source.crop.*pixels/i,
+    );
+  } finally {
+    await Promise.all(
+      [bogusHash, missingPath, missingCrop, wrongDimensions, wrongPixels].map(
+        (fixture) => rm(fixture.directory, { recursive: true, force: true }),
+      ),
+    );
+  }
+});
+
 test("recursively sanitizes secret-like completion metadata before publication", async () => {
   const configuredCanary = "sk-secret-like-canary-123456789";
   const bearerCanary = "opaque-bearer-canary-987654321";
   const signatureCanary = "signed-query-canary-555";
+  const rawTaskId = "wanx-task-opaque-canary-246813579";
+  const opaqueMetadataCanary = "QW5hbHlzaXNPcGFxdWVUcmFjaW5nVG9rZW4xMjM0NTY=";
   const fixture = await createPackageFixture({
     nestedMetadata: {
       authorization: `Bearer ${bearerCanary}`,
@@ -320,6 +442,8 @@ test("recursively sanitizes secret-like completion metadata before publication",
         message: configuredCanary,
         url: `https://bucket.example/object?X-OSS-Signature=${signatureCanary}&Expires=99`,
         status: "SUCCEEDED",
+        requestId: rawTaskId,
+        opaqueReference: opaqueMetadataCanary,
       },
     },
   });
@@ -331,6 +455,9 @@ test("recursively sanitizes secret-like completion metadata before publication",
       text,
       /secret-like-canary|opaque-bearer-canary|signed-query-canary|authorization|X-OSS-Signature|Expires=99/i,
     );
+    assert.doesNotMatch(text, /wanx-task-opaque-canary|QW5hbHlzaXNPcGFxdWU/);
+    assert.match(text, new RegExp(sha256("task-123")));
+    assert.doesNotMatch(text, /"taskId"/);
     assert.match(text, /SUCCEEDED/);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
