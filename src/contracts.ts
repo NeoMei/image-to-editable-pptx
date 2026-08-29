@@ -426,6 +426,15 @@ export const RunLedgerV2Schema = z.object({
     cleanBackground: Sha256Schema,
     assets: z.record(z.string(), Sha256Schema),
     pptx: Sha256Schema,
+    qaPreviews: z
+      .object({
+        recomposition: Sha256Schema,
+        layerReview: Sha256Schema,
+        exploded: Sha256Schema,
+      })
+      .strict()
+      .optional(),
+    sceneGraph: Sha256Schema.optional(),
   }),
   outputs: z.object({
     directory: z.string().min(1),
@@ -437,6 +446,15 @@ export const RunLedgerV2Schema = z.object({
     cleanBackground: z.string().min(1),
     assets: z.string().min(1),
     pptx: z.string().min(1),
+    qaPreviews: z
+      .object({
+        recomposition: z.string().min(1),
+        layerReview: z.string().min(1),
+        exploded: z.string().min(1),
+      })
+      .strict()
+      .optional(),
+    sceneGraph: z.string().min(1).optional(),
   }),
 });
 

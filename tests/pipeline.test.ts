@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 
 import JSZip from "jszip";
@@ -31,6 +31,12 @@ import type {
   FidelityPlan,
   SlideElement,
 } from "../src/contracts.js";
+import { readSemanticAssetPublication } from "../src/fidelity/build.js";
+import {
+  chooseSemanticMask,
+  deriveSemanticMasks,
+} from "../src/image/semantic-mask.js";
+import type { SourceCanvas } from "../src/image/source.js";
 import {
   analyzeSlide,
   buildSlide,
@@ -38,6 +44,8 @@ import {
   runPipeline,
   type FidelityBuild,
 } from "../src/pipeline.js";
+import type { SceneGraph } from "../src/scene/contracts.js";
+import { planSemanticLayers } from "../src/scene/plan.js";
 
 const liveConfig: AppConfig = {
   apiKey: "provider-secret-canary",
@@ -473,6 +481,7 @@ test("integrated live run consumes and preserves its verified v2 staging package
       readFile(resolve("tests/fixtures/qwen-ocr-slide-07.json"), "utf8").then(JSON.parse),
       readFile(resolve("tests/fixtures/qwen-scene-generic.json"), "utf8").then(JSON.parse),
     ]);
+    ocrFixture.output.choices[0].message.content[0].ocr_result.words_info = [];
     globalThis.fetch = async (input) => {
       fetchCalls += 1;
       return Response.json(
@@ -490,7 +499,6 @@ test("integrated live run consumes and preserves its verified v2 staging package
         maxRegionAnalysis: 0,
         maxOcclusionCompletions: 0,
       },
-      fidelityBuild: deterministicFidelityBuild,
     });
 
     assert.equal(fetchCalls, 2);
@@ -661,38 +669,86 @@ test("builds offline from a verified v2 package without an external source image
 
   try {
     await mkdir(analysisDir);
-    const sourceBytes = await sharp({
-      create: {
-        width: 1280,
-        height: 720,
-        channels: 4,
-        background: "#f7f3e9",
-      },
+    const width = 320;
+    const height = 200;
+    const rgba = Buffer.alloc(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
+      rgba.set([247, 243, 233, 255], index * 4);
+    }
+    const rear = { x: 140, y: 20, width: 40, height: 36 };
+    const front = { x: 154, y: 28, width: 12, height: 20 };
+    const paint = (
+      bbox: typeof rear,
+      color: readonly [number, number, number, number],
+    ): void => {
+      for (let y = bbox.y; y < bbox.y + bbox.height; y += 1) {
+        for (let x = bbox.x; x < bbox.x + bbox.width; x += 1) {
+          rgba.set(color, (y * width + x) * 4);
+        }
+      }
+    };
+    paint(rear, [43, 109, 168, 255]);
+    paint(front, [230, 93, 22, 255]);
+    const sourceBytes = await sharp(rgba, {
+      raw: { width, height, channels: 4 },
     }).png().toBuffer();
-    const rgba = await sharp(sourceBytes).ensureAlpha().raw().toBuffer();
-    const canvas = {
-      format: "png" as const,
-      width: 1280,
-      height: 720,
+    const canvas: SourceCanvas = {
+      format: "png",
+      width,
+      height,
       rgba,
       sourceBytes,
     };
     const packageOcr = { lines: [] };
-    const packageScene = {
-      graphVersion: 1 as const,
-      canvas: { width: 1280, height: 720 },
+    const packageScene: SceneGraph = {
+      graphVersion: 1,
+      canvas: { width, height },
       nodes: [
         {
           id: "background",
-          role: "background" as const,
+          role: "background",
           bbox: { x: 0, y: 0, width: 1, height: 1 },
           confidence: 1,
           zIndex: 0,
           label: "complete canvas",
           extractionHints: [],
         },
+        {
+          id: "rear-object",
+          role: "foreground-object",
+          bbox: {
+            x: rear.x / width,
+            y: rear.y / height,
+            width: rear.width / width,
+            height: rear.height / height,
+          },
+          confidence: 0.99,
+          zIndex: 1,
+          label: "audit-only rear label",
+          extractionHints: [],
+        },
+        {
+          id: "front-object",
+          role: "foreground-object",
+          bbox: {
+            x: front.x / width,
+            y: front.y / height,
+            width: front.width / width,
+            height: front.height / height,
+          },
+          confidence: 0.99,
+          zIndex: 2,
+          label: "audit-only front label",
+          extractionHints: [],
+        },
       ],
-      relations: [],
+      relations: [{
+        id: "front-occludes-rear",
+        kind: "occludes",
+        from: "front-object",
+        to: "rear-object",
+        confidence: 0.99,
+      }],
     };
     const refinementPath = "refinements/refinement-001.json";
     const refinementBytes = Buffer.from(
@@ -702,31 +758,73 @@ test("builds offline from a verified v2 package without an external source image
     const sourceCropPath = "completions/completion-001-source-crop.png";
     const visibleMaskPath = "completions/completion-001-visible-mask.png";
     const generatedMaskPath = "completions/completion-001-generated-mask.png";
-    const crop = { x: 16, y: 16, width: 24, height: 24 };
-    const sourceCropBytes = await sharp(sourceBytes)
-      .extract({ left: crop.x, top: crop.y, width: crop.width, height: crop.height })
+    const semanticPlan = planSemanticLayers(packageScene, packageOcr);
+    const rearCandidate = semanticPlan.candidates.find(
+      ({ id }) => id === "rear-object",
+    );
+    assert.ok(rearCandidate?.occlusion);
+    const emptyTextMask = await sharp(Buffer.alloc(width * height), {
+      raw: { width, height, channels: 1 },
+    }).png().toBuffer();
+    const selected = chooseSemanticMask(
+      await deriveSemanticMasks(canvas, rearCandidate),
+      emptyTextMask,
+    );
+    assert.ok(selected);
+    assert.ok(
+      [selected.bbox.x, selected.bbox.y, selected.bbox.width, selected.bbox.height]
+        .every(Number.isInteger),
+    );
+    const crop = selected.bbox;
+    const cropWidth = Math.ceil(crop.width);
+    const cropHeight = Math.ceil(crop.height);
+    const completionRgba = Buffer.alloc(cropWidth * cropHeight * 4);
+    const visibleMask = Buffer.alloc(cropWidth * cropHeight);
+    const generatedMask = Buffer.alloc(cropWidth * cropHeight);
+    for (let y = 0; y < cropHeight; y += 1) {
+      for (let x = 0; x < cropWidth; x += 1) {
+        const canvasX = crop.x + x;
+        const canvasY = crop.y + y;
+        const insideRear =
+          canvasX >= rear.x &&
+          canvasX < rear.x + rear.width &&
+          canvasY >= rear.y &&
+          canvasY < rear.y + rear.height;
+        if (!insideRear) continue;
+        const insideFront =
+          canvasX >= front.x &&
+          canvasX < front.x + front.width &&
+          canvasY >= front.y &&
+          canvasY < front.y + front.height;
+        const index = y * cropWidth + x;
+        completionRgba.set([43, 109, 168, 255], index * 4);
+        if (insideFront) generatedMask[index] = 255;
+        else visibleMask[index] = 255;
+      }
+    }
+    const sourceCropBytes = await sharp(rgba, {
+      raw: { width, height, channels: 4 },
+    })
+      .extract({
+        left: crop.x,
+        top: crop.y,
+        width: cropWidth,
+        height: cropHeight,
+      })
       .png()
       .toBuffer();
-    const completionBytes = await sharp(sourceCropBytes)
-      .tint("#405a75")
-      .png()
-      .toBuffer();
-    const visibleMaskBytes = await sharp({
-      create: {
-        width: crop.width,
-        height: crop.height,
-        channels: 4,
-        background: "white",
-      },
-    }).png().toBuffer();
-    const generatedMaskBytes = await sharp({
-      create: {
-        width: crop.width,
-        height: crop.height,
-        channels: 4,
-        background: "black",
-      },
-    }).png().toBuffer();
+    const [completionBytes, visibleMaskBytes, generatedMaskBytes] =
+      await Promise.all([
+        sharp(completionRgba, {
+          raw: { width: cropWidth, height: cropHeight, channels: 4 },
+        }).png().toBuffer(),
+        sharp(visibleMask, {
+          raw: { width: cropWidth, height: cropHeight, channels: 1 },
+        }).png().toBuffer(),
+        sharp(generatedMask, {
+          raw: { width: cropWidth, height: cropHeight, channels: 1 },
+        }).png().toBuffer(),
+      ]);
     await Promise.all([
       mkdir(join(analysisDir, "refinements")),
       mkdir(join(analysisDir, "completions")),
@@ -742,13 +840,13 @@ test("builds offline from a verified v2 package without an external source image
     const refinements = [{
       path: refinementPath,
       sha256: sha256(refinementBytes),
-      crop: { x: 8, y: 8, width: 48, height: 48 },
+      crop: { x: 128, y: 8, width: 72, height: 64 },
     }];
     const completions = [{
       path: completionPath,
       sha256: sha256(completionBytes),
       crop,
-      candidateId: "completion-candidate-1",
+      candidateId: "rear-object",
       sourceCropPath,
       visibleMaskPath,
       generatedMaskPath,
@@ -838,6 +936,78 @@ test("builds offline from a verified v2 package without an external source image
     assert.equal(copiedAnalysisLedger.completions.length, 1);
     const copiedCompletion = copiedAnalysisLedger.completions[0]!;
     assert.equal(copiedCompletion.provenance.kind, "composite");
+    const manifest = JSON.parse(
+      await readFile(result.manifestPath, "utf8"),
+    ) as {
+      manifestVersion: number;
+      elements: Array<{
+        kind: string;
+        id: string;
+        assetPath?: string;
+        reviewRequired?: boolean;
+        provenance?: { kind: string };
+      }>;
+    };
+    assert.equal(manifest.manifestVersion, 2);
+    const generatedLayer = manifest.elements.find(
+      ({ id }) => id === "rear-object",
+    );
+    assert.deepEqual(
+      {
+        kind: generatedLayer?.kind,
+        reviewRequired: generatedLayer?.reviewRequired,
+        provenance: generatedLayer?.provenance?.kind,
+      },
+      {
+        kind: "asset",
+        reviewRequired: true,
+        provenance: "composite",
+      },
+    );
+    assert.match(
+      generatedLayer?.assetPath ?? "",
+      /^assets\/semantic-\d{3}-[a-f0-9]{10}\.png$/,
+    );
+    await access(join(outDir, generatedLayer!.assetPath!));
+    const publication = await readSemanticAssetPublication(join(outDir, "assets"));
+    assert.ok(
+      publication.inventory.some(
+        ({ path }) => path === generatedLayer?.assetPath,
+      ),
+    );
+
+    const qaNames = [
+      "recomposition-preview.png",
+      "layer-review.png",
+      "exploded-preview.png",
+    ];
+    await Promise.all(qaNames.map((name) => access(join(outDir, name))));
+    const runLedger = JSON.parse(
+      await readFile(result.ledgerPath, "utf8"),
+    ) as {
+      hashes: {
+        qaPreviews: Record<string, string>;
+      };
+      outputs: {
+        qaPreviews: Record<string, string>;
+      };
+    };
+    assert.deepEqual(Object.keys(runLedger.hashes.qaPreviews).sort(), [
+      "exploded",
+      "layerReview",
+      "recomposition",
+    ]);
+    assert.deepEqual(
+      Object.values(runLedger.outputs.qaPreviews).map((path) => basename(path)).sort(),
+      [...qaNames].sort(),
+    );
+    assert.equal(
+      runLedger.hashes.qaPreviews.recomposition,
+      sha256(await readFile(join(outDir, "recomposition-preview.png"))),
+    );
+    const pptx = await JSZip.loadAsync(await readFile(result.pptxPath));
+    const slideXml = await pptx.file("ppt/slides/slide1.xml")!.async("string");
+    assert.match(slideXml, /name="asset-rear-object"/);
     const referencedArtifacts = [
       copiedAnalysisLedger.source,
       copiedAnalysisLedger.ocr,

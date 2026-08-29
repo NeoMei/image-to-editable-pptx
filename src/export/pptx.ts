@@ -1,9 +1,15 @@
 import * as PptxGenJS from "pptxgenjs";
+import { lstat, realpath } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
-import type { BBox, SlideManifest } from "../contracts.js";
-
-const SLIDE_WIDTH_INCHES = 13.333;
-const SLIDE_HEIGHT_INCHES = 7.5;
+import type { BBox, VersionedSlideManifest } from "../contracts.js";
+import {
+  layoutForCanvas,
+  pixelsToPoints,
+  pixelsToSlideWidth,
+  positionForBBox,
+  type SlideLayout,
+} from "./layout.js";
 
 // tsx on Node 22.6 exposes PptxGenJS as `{ default: constructor }`, while
 // newer Node runtimes expose the constructor directly. Normalize both shapes.
@@ -22,39 +28,56 @@ if (typeof runtimeConstructor !== "function") {
 }
 const PptxGenConstructor = runtimeConstructor as PptxGenConstructor;
 
-const pxToX = (px: number): number => (px * SLIDE_WIDTH_INCHES) / 1280;
-const pxToY = (px: number): number => (px * SLIDE_HEIGHT_INCHES) / 720;
-const pxToPt = (px: number): number => (px * 72) / 96;
 const TRACKED_TEXT_BOX_SLACK_PX = 16;
 
-function position(bbox: BBox): { x: number; y: number; w: number; h: number } {
-  return {
-    x: pxToX(bbox.x),
-    y: pxToY(bbox.y),
-    w: pxToX(bbox.width),
-    h: pxToY(bbox.height),
-  };
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  const child = relative(directory, candidate);
+  return child !== "" && !isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`);
+}
+
+async function safeExportAssetPath(
+  outputPath: string,
+  assetPath: string,
+): Promise<string> {
+  const stagingDirectory = await realpath(dirname(resolve(outputPath)));
+  const candidate = isAbsolute(assetPath)
+    ? resolve(assetPath)
+    : resolve(stagingDirectory, assetPath);
+  const info = await lstat(candidate);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error(`PPTX asset must be a regular staged file: ${assetPath}`);
+  }
+  const canonicalCandidate = await realpath(candidate);
+  if (!isWithinDirectory(stagingDirectory, canonicalCandidate)) {
+    throw new Error(`Asset escapes PPTX output staging: ${assetPath}`);
+  }
+  return canonicalCandidate;
 }
 
 function textPosition(
   bbox: BBox,
-  canvasWidth: number,
+  canvas: VersionedSlideManifest["canvas"],
+  layout: SlideLayout,
   charSpacingPx?: number,
 ): { x: number; y: number; w: number; h: number } {
   if (charSpacingPx === undefined || charSpacingPx === 0) {
-    return position(bbox);
+    return positionForBBox(bbox, canvas, layout);
   }
-  return position({
-    ...bbox,
-    width: Math.min(
-      canvasWidth - bbox.x,
-      bbox.width + TRACKED_TEXT_BOX_SLACK_PX,
-    ),
-  });
+  return positionForBBox(
+    {
+      ...bbox,
+      width: Math.min(
+        canvas.width - bbox.x,
+        bbox.width + TRACKED_TEXT_BOX_SLACK_PX,
+      ),
+    },
+    canvas,
+    layout,
+  );
 }
 
 export async function exportPptx(
-  manifest: SlideManifest,
+  manifest: VersionedSlideManifest,
   backgroundPath: string,
   outputPath: string,
 ): Promise<void> {
@@ -63,17 +86,39 @@ export async function exportPptx(
       throw new Error(`Refusing to export rectangular fidelity asset ${element.id}`);
     }
   }
+  const stagedAssetPaths = new Map<string, string>();
+  for (const element of manifest.elements) {
+    if (element.kind === "asset") {
+      stagedAssetPaths.set(
+        element.id,
+        await safeExportAssetPath(outputPath, element.assetPath),
+      );
+    }
+  }
 
   const pptx = new PptxGenConstructor();
-  pptx.layout = "LAYOUT_WIDE";
+  const layout = layoutForCanvas(manifest.canvas);
+  const layoutName = "SOURCE_CANVAS";
+  pptx.defineLayout({
+    name: layoutName,
+    width: layout.widthInches,
+    height: layout.heightInches,
+  });
+  pptx.layout = layoutName;
 
   const slide = pptx.addSlide();
   slide.addImage({
     path: backgroundPath,
-    x: 0,
-    y: 0,
-    w: pxToX(manifest.canvas.width),
-    h: pxToY(manifest.canvas.height),
+    ...positionForBBox(
+      {
+        x: 0,
+        y: 0,
+        width: manifest.canvas.width,
+        height: manifest.canvas.height,
+      },
+      manifest.canvas,
+      layout,
+    ),
     objectName: "asset-background",
   });
 
@@ -90,15 +135,22 @@ export async function exportPptx(
         slide.addText(element.text, {
           ...textPosition(
             element.bbox,
-            manifest.canvas.width,
+            manifest.canvas,
+            layout,
             element.charSpacingPx,
           ),
           objectName: `text-${element.id}`,
           fontFace: "Microsoft YaHei",
-          fontSize: pxToPt(element.fontSizePx),
+          fontSize: pixelsToPoints(element.fontSizePx, manifest.canvas, layout),
           ...(element.charSpacingPx === undefined
             ? {}
-            : { charSpacing: pxToPt(element.charSpacingPx) }),
+            : {
+                charSpacing: pixelsToPoints(
+                  element.charSpacingPx,
+                  manifest.canvas,
+                  layout,
+                ),
+              }),
           ...(element.bold === undefined ? {} : { bold: element.bold }),
           color: element.color,
           align: element.align,
@@ -112,15 +164,25 @@ export async function exportPptx(
 
       case "shape": {
         const options = {
-          ...position(element.bbox),
+          ...positionForBBox(element.bbox, manifest.canvas, layout),
           objectName: `shape-${element.id}-${element.label}`,
           fill: { color: element.fillColor },
           line: {
             color: element.strokeColor,
-            width: pxToPt(element.strokeWidthPx),
+            width: pixelsToPoints(
+              element.strokeWidthPx,
+              manifest.canvas,
+              layout,
+            ),
           },
           ...(element.shape === "roundRect" && element.cornerRadiusPx > 0
-            ? { rectRadius: pxToX(element.cornerRadiusPx) }
+            ? {
+                rectRadius: pixelsToSlideWidth(
+                  element.cornerRadiusPx,
+                  manifest.canvas,
+                  layout,
+                ),
+              }
             : {}),
         };
         slide.addShape(shapeTypes[element.shape], options);
@@ -129,8 +191,8 @@ export async function exportPptx(
 
       case "asset":
         slide.addImage({
-          path: element.assetPath,
-          ...position(element.bbox),
+          path: stagedAssetPaths.get(element.id)!,
+          ...positionForBBox(element.bbox, manifest.canvas, layout),
           objectName: `asset-${element.id}`,
         });
         break;

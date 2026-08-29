@@ -41,15 +41,21 @@ import {
   RunLedgerV2Schema,
   Sha256Schema,
   SlideManifestV1Schema,
+  SlideManifestV2Schema,
   VisionResultSchema,
+  type CandidateDecision,
   type FidelityPlan,
   type OcrResult,
   type SlideManifest,
+  type VersionedSlideManifest,
   type VisionResult,
 } from "./contracts.js";
 import { exportPptx } from "./export/pptx.js";
 import {
   buildFidelityLayers,
+  buildSemanticLayers,
+  readSemanticAssetPublication,
+  type BuiltAsset,
   type FidelityBuildResult,
 } from "./fidelity/build.js";
 import { planFidelityCandidates } from "./fidelity/candidates.js";
@@ -63,6 +69,7 @@ import {
   completeOccludedCandidate,
   OcclusionCompletionBudget,
 } from "./occlusion/complete.js";
+import type { CompletedCandidate } from "./occlusion/contracts.js";
 import { analyzeScene, refineSceneRegions } from "./providers/qwen-scene.js";
 import {
   parseQwenOcrResponse,
@@ -84,6 +91,7 @@ import {
 } from "./recording.js";
 import { SceneGraphSchema, type SceneGraph } from "./scene/contracts.js";
 import { planSemanticLayers } from "./scene/plan.js";
+import { writeQaPreviews, type QaPreviewRecord } from "./qa/previews.js";
 
 const RawVisionRecordingSchema = z.object({
   choices: z.array(
@@ -945,7 +953,71 @@ function safeAssetOutput(outDir: string, assetPath: string): string {
   if (!/^assets\/[a-zA-Z0-9._-]+\.png$/.test(assetPath)) {
     throw new Error(`Unsafe generated asset path: ${assetPath}`);
   }
-  return join(outDir, assetPath);
+  const stagingRoot = resolve(outDir);
+  const output = resolve(stagingRoot, assetPath);
+  const stagedRelative = relative(stagingRoot, output);
+  if (
+    stagedRelative !== assetPath ||
+    isAbsolute(stagedRelative) ||
+    stagedRelative.startsWith("..")
+  ) {
+    throw new Error(`Generated asset escapes output staging: ${assetPath}`);
+  }
+  return output;
+}
+
+async function loadVerifiedCompletions(
+  analysis: AnalysisResultV2,
+): Promise<Map<string, CompletedCandidate>> {
+  const completions = new Map<string, CompletedCandidate>();
+  for (const artifact of analysis.ledger.completions) {
+    if (completions.has(artifact.candidateId)) {
+      throw new Error(
+        `Duplicate verified completion candidate: ${artifact.candidateId}`,
+      );
+    }
+    if (artifact.provenance.kind !== "composite") {
+      throw new Error("Completion artifacts require composite provenance");
+    }
+    const [image, visibleMask, generatedMask] = await Promise.all([
+      readVerifiedAnalysisArtifact(analysis.directory, artifact),
+      readVerifiedAnalysisArtifact(analysis.directory, {
+        path: artifact.visibleMaskPath,
+        sha256: artifact.provenance.visibleMaskSha256,
+      }),
+      readVerifiedAnalysisArtifact(analysis.directory, {
+        path: artifact.generatedMaskPath,
+        sha256: artifact.provenance.generatedMaskSha256,
+      }),
+    ]);
+    completions.set(artifact.candidateId, {
+      image,
+      visibleMask,
+      generatedMask,
+      reviewRequired: true,
+      provenance: artifact.provenance,
+    });
+  }
+  return completions;
+}
+
+function verifySemanticPublication(
+  publication: Awaited<ReturnType<typeof readSemanticAssetPublication>>,
+  assets: readonly BuiltAsset[],
+): void {
+  if (publication.inventory.length !== assets.length) {
+    throw new Error("Semantic asset publication inventory count mismatch");
+  }
+  const inventory = new Map(
+    publication.inventory.map((entry) => [entry.path, entry.sha256]),
+  );
+  for (const asset of assets) {
+    if (inventory.get(asset.assetPath) !== sha256(asset.image)) {
+      throw new Error(
+        `Semantic asset publication inventory mismatch: ${asset.assetPath}`,
+      );
+    }
+  }
 }
 
 function validateFidelityResult(
@@ -1135,7 +1207,6 @@ async function buildFromAnalysis(
   let sourceImageHash: string;
   let analysisVisualName: "vision.json" | "scene-graph.json";
   let analysisVisual: VisionResult | SceneGraph;
-  let fidelityPlan: FidelityPlan;
   let runModels: { ocr: string; vision: string; edit?: string };
   let analysisDurations: { ocr: number; vision: number; analyze: number };
   let imagePath: string | undefined;
@@ -1157,10 +1228,6 @@ async function buildFromAnalysis(
     sourceImageHash = sha256(source.sourceBytes);
     analysisVisualName = "vision.json";
     analysisVisual = context.analysis.vision;
-    fidelityPlan = planFidelityCandidates(
-      context.analysis.ocr,
-      context.analysis.vision,
-    );
     runModels = {
       ocr: context.analysis.ledger.models.ocr,
       vision: context.analysis.ledger.models.vision,
@@ -1171,16 +1238,6 @@ async function buildFromAnalysis(
     sourceImageHash = context.analysis.ledger.source.originalSha256;
     analysisVisualName = "scene-graph.json";
     analysisVisual = context.analysis.scene;
-    const semanticPlan = planSemanticLayers(
-      context.analysis.scene,
-      context.analysis.ocr,
-    );
-    fidelityPlan = {
-      canvas: semanticPlan.canvas as FidelityPlan["canvas"],
-      text: semanticPlan.text,
-      icons: [],
-      warnings: semanticPlan.warnings,
-    };
     runModels = {
       ocr: context.analysis.ledger.models.ocr,
       vision: context.analysis.ledger.models.fullVision,
@@ -1196,9 +1253,7 @@ async function buildFromAnalysis(
       analyze: context.analysis.ledger.durationsMs.analyze,
     };
   }
-  const localImage = await canonicalLocalImage(source);
   const assetsDir = join(outDir, "assets");
-  await mkdir(assetsDir, { recursive: true });
   if (
     context.analysis.analysisVersion === 2 &&
     resolve(context.analysis.directory) !== outDir
@@ -1242,53 +1297,130 @@ async function buildFromAnalysis(
   }
 
   const planStartedAt = performance.now();
+  const fidelityPlan =
+    context.analysis.analysisVersion === 1
+      ? planFidelityCandidates(
+          context.analysis.ocr,
+          context.analysis.vision,
+        )
+      : undefined;
+  const semanticPlan =
+    context.analysis.analysisVersion === 2
+      ? planSemanticLayers(
+          context.analysis.scene,
+          context.analysis.ocr,
+        )
+      : undefined;
   assertRequiredTextCount(
     "planned",
-    fidelityPlan.text.length,
+    (fidelityPlan ?? semanticPlan!).text.length,
     options.requiredTextCount,
   );
   const planDuration = elapsed(planStartedAt);
 
   const repairStartedAt = performance.now();
-  const fidelityResult: FidelityBuildResult = await (
-    options.fidelityBuild ?? buildFidelityLayers
-  )(
-    localImage,
-    fidelityPlan,
-  );
-  const repairDuration = elapsed(repairStartedAt);
-  const manifest = SlideManifestV1Schema.parse(fidelityResult.manifest);
-  if (manifest.elements.some((element) => element.kind === "shape")) {
-    throw new Error("Fidelity manifests must not contain structural shapes");
+  let manifest: VersionedSlideManifest;
+  let background: Buffer;
+  let combinedMask: Buffer;
+  let decisions: CandidateDecision[];
+  let acceptedAssets: BuiltAsset[] = [];
+  if (context.analysis.analysisVersion === 1) {
+    await mkdir(assetsDir, { recursive: true });
+    const localImage = await canonicalLocalImage(source);
+    const fidelityResult: FidelityBuildResult = await (
+      options.fidelityBuild ?? buildFidelityLayers
+    )(
+      localImage,
+      fidelityPlan!,
+    );
+    const v1Manifest = SlideManifestV1Schema.parse(fidelityResult.manifest);
+    if (v1Manifest.elements.some((element) => element.kind === "shape")) {
+      throw new Error("Fidelity manifests must not contain structural shapes");
+    }
+    assertRequiredTextCount(
+      "accepted",
+      v1Manifest.elements.filter((element) => element.kind === "text").length,
+      options.requiredTextCount,
+    );
+    validateFidelityResult(fidelityPlan!, fidelityResult, v1Manifest);
+    await Promise.all(
+      [...fidelityResult.assets].map(([assetPath, asset]) =>
+        writeFile(safeAssetOutput(outDir, assetPath), asset),
+      ),
+    );
+    manifest = v1Manifest;
+    background = fidelityResult.background;
+    combinedMask = fidelityResult.combinedMask;
+    decisions = fidelityResult.decisions;
+  } else {
+    const completions = await loadVerifiedCompletions({
+      ...context.analysis,
+      directory: outDir,
+    });
+    const candidateIds = new Set(semanticPlan!.candidates.map(({ id }) => id));
+    for (const candidateId of completions.keys()) {
+      if (!candidateIds.has(candidateId)) {
+        throw new Error(
+          `Verified completion does not match the canonical semantic plan: ${candidateId}`,
+        );
+      }
+    }
+    const semanticResult = await buildSemanticLayers({
+      source,
+      ocr: context.analysis.ocr,
+      graph: context.analysis.scene,
+      plan: semanticPlan!,
+      completions,
+      workDir: outDir,
+    });
+    manifest = SlideManifestV2Schema.parse(semanticResult.manifest);
+    background = semanticResult.background;
+    combinedMask = semanticResult.combinedMask;
+    decisions = semanticResult.decisions;
+    acceptedAssets = semanticResult.acceptedAssets;
+    const publication = await readSemanticAssetPublication(assetsDir);
+    verifySemanticPublication(publication, acceptedAssets);
   }
+  const repairDuration = elapsed(repairStartedAt);
   assertRequiredTextCount(
     "accepted",
     manifest.elements.filter((element) => element.kind === "text").length,
     options.requiredTextCount,
   );
-  validateFidelityResult(fidelityPlan, fidelityResult, manifest);
-  await Promise.all(
-    [...fidelityResult.assets].map(([assetPath, asset]) =>
-      writeFile(safeAssetOutput(outDir, assetPath), asset),
-    ),
-  );
   const manifestPath = join(outDir, "manifest.json");
   await writeRecording(manifestPath, manifest);
 
   const maskPath = join(outDir, "removal-mask.png");
-  await writeFile(maskPath, fidelityResult.combinedMask);
+  await writeFile(maskPath, combinedMask);
   const cleanBackgroundPath = join(outDir, "clean-background.png");
-  await writeFile(cleanBackgroundPath, fidelityResult.background);
+  await writeFile(cleanBackgroundPath, background);
+
+  let qaPreviews: QaPreviewRecord[] = [];
+  if (manifest.manifestVersion === 2) {
+    qaPreviews = await writeQaPreviews({
+      canvas: source,
+      background,
+      assets: acceptedAssets,
+      manifest,
+      outDir,
+    });
+  }
 
   const pptxPath = join(outDir, outputName(imagePath));
-  const exportManifest: SlideManifest = {
-    ...manifest,
-    elements: manifest.elements.map((element) =>
-      element.kind === "asset"
-        ? { ...element, assetPath: safeAssetOutput(outDir, element.assetPath) }
-        : element,
-    ),
-  };
+  const exportElements = manifest.elements.map((element) =>
+    element.kind === "asset"
+      ? { ...element, assetPath: safeAssetOutput(outDir, element.assetPath) }
+      : element,
+  );
+  const exportManifest = manifest.manifestVersion === 1
+    ? SlideManifestV1Schema.parse({
+        ...manifest,
+        elements: exportElements,
+      })
+    : SlideManifestV2Schema.parse({
+        ...manifest,
+        elements: exportElements,
+      });
   const exportStartedAt = performance.now();
   await exportPptx(exportManifest, cleanBackgroundPath, pptxPath);
   const exportDuration = elapsed(exportStartedAt);
@@ -1308,6 +1440,24 @@ async function buildFromAnalysis(
   );
   const ledgerPath = join(outDir, "run-ledger.json");
   const warnings = [...manifest.warnings];
+  const qaByKind = new Map(qaPreviews.map((record) => [record.kind, record]));
+  const qaHashes =
+    manifest.manifestVersion === 2
+      ? {
+          recomposition: qaByKind.get("recomposition")!.sha256,
+          layerReview: qaByKind.get("layer-review")!.sha256,
+          exploded: qaByKind.get("exploded")!.sha256,
+        }
+      : undefined;
+  const qaOutputs =
+    manifest.manifestVersion === 2
+      ? {
+          recomposition: join(publishedOutDir, "recomposition-preview.png"),
+          layerReview: join(publishedOutDir, "layer-review.png"),
+          exploded: join(publishedOutDir, "exploded-preview.png"),
+        }
+      : undefined;
+  const analysisVisualHash = await sha256File(join(outDir, analysisVisualName));
   const ledger = RunLedgerV2Schema.parse({
     ledgerVersion: 2,
     mode: context.analysis.ledger.mode,
@@ -1322,11 +1472,11 @@ async function buildFromAnalysis(
     },
     taskIds: {},
     warnings: [...context.analysis.ledger.warnings, ...warnings],
-    decisions: fidelityResult.decisions,
+    decisions,
     hashes: {
       sourceImage: sourceImageHash,
       ocr: await sha256File(join(outDir, "ocr.json")),
-      vision: await sha256File(join(outDir, analysisVisualName)),
+      vision: analysisVisualHash,
       analysisLedger: await sha256File(
         join(outDir, "analysis-ledger.json"),
       ),
@@ -1335,6 +1485,10 @@ async function buildFromAnalysis(
       cleanBackground: await sha256File(cleanBackgroundPath),
       assets: assetHashes,
       pptx: await sha256File(pptxPath),
+      ...(qaHashes === undefined ? {} : { qaPreviews: qaHashes }),
+      ...(manifest.manifestVersion === 1
+        ? {}
+        : { sceneGraph: analysisVisualHash }),
     },
     outputs: {
       directory: publishedOutDir,
@@ -1346,6 +1500,10 @@ async function buildFromAnalysis(
       cleanBackground: join(publishedOutDir, "clean-background.png"),
       assets: join(publishedOutDir, "assets"),
       pptx: join(publishedOutDir, outputName(imagePath)),
+      ...(qaOutputs === undefined ? {} : { qaPreviews: qaOutputs }),
+      ...(manifest.manifestVersion === 1
+        ? {}
+        : { sceneGraph: join(publishedOutDir, "scene-graph.json") }),
     },
   });
   await writeRecording(ledgerPath, ledger);
