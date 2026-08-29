@@ -612,13 +612,13 @@ image-to-editable-pptx run <image> --out <dir>
 - Create under ignored output directory: live analysis/build artifacts for the approved slide and at least four additional format/aspect fixtures
 - Modify: no release/tag/GitHub state in this task
 
-- [ ] Confirm the working tree contains no credentials and that Alibaba credentials are supplied only through the existing environment/config mechanism. Do not echo the key or signed URLs.
-- [ ] Run live `analyze` and offline `build` separately on the approved slide. Record request counts and prove build succeeds with network disabled.
-- [ ] Run the same pipeline on at least one JPEG, one non-16:9 image, one text-backing page, and one expected-fallback page.
-- [ ] Inspect each rendered PPTX beside the source, `recomposition-preview.png`, `layer-review.png`, and `exploded-preview.png`. Record accepted/rejected layers and every `reviewRequired` completion.
-- [ ] For the approved slide, verify generically that the eye/radar pair can become separate movable layers when the graph and masks support it, the wrench is independently movable when safely extracted, the shield/text backing is movable beneath editable text, and unsafe cases remain in the background. Do not add exceptions if any candidate fails.
+- [x] Confirm the working tree contains no credentials and that Alibaba credentials are supplied only through the existing environment/config mechanism. Do not echo the key or signed URLs.
+- [x] Run live `analyze` and offline `build` separately on the approved slide. Record request counts and prove build succeeds with network disabled.
+- [x] Run the same pipeline on at least one JPEG, one non-16:9 image, one text-backing page, and one expected-fallback page.
+- [x] Inspect each rendered PPTX beside the source, `recomposition-preview.png`, `layer-review.png`, and `exploded-preview.png`. Record accepted/rejected layers and every `reviewRequired` completion.
+- [x] For the approved slide, verify generically that the eye/radar pair can become separate movable layers when the graph and masks support it, the wrench is independently movable when safely extracted, the shield/text backing is movable beneath editable text, and unsafe cases remain in the background. Do not add exceptions if any candidate fails. (User-approved fidelity-first boundary: text takes priority; the shield backing stays in background via the generic guard, no exceptions added.)
 - [ ] In WPS, move one foreground object, move one text-backing asset, edit its associated text, undo all changes, explicitly choose save or discard, close, reopen, and verify the document state. Record the exact observed outcome.
-- [ ] Re-run `npm test && npm run lint:types && npm run build && npm run test:compiled` after any acceptance fix. Repeat live inspection only for affected paths until no worthwhile defect remains.
-- [ ] Write the acceptance report with commands, non-secret artifact paths, test totals, visual findings, WPS edit/undo/reopen result, known safe fallbacks, and whether the implementation meets each of the ten completion criteria in the spec.
-- [ ] Commit the report with `git add docs/acceptance/2026-08-29-semantic-layering.md && git commit -m "docs: record semantic layering acceptance"`.
-- [ ] Stop with a clean local branch and report the commit range. Do not push, tag, publish npm, update marketplace state, or overwrite installed plugin caches without explicit release authorization.
+- [x] Re-run `npm test && npm run lint:types && npm run build && npm run test:compiled` after any acceptance fix. Repeat live inspection only for affected paths until no worthwhile defect remains.
+- [x] Write the acceptance report with commands, non-secret artifact paths, test totals, visual findings, WPS edit/undo/reopen result, known safe fallbacks, and whether the implementation meets each of the ten completion criteria in the spec.
+- [x] Commit the report with `git add docs/acceptance/2026-08-29-semantic-layering.md && git commit -m "docs: record semantic layering acceptance"`.
+- [x] Stop with a clean local branch and report the commit range. Do not push, tag, publish npm, update marketplace state, or overwrite installed plugin caches without explicit release authorization.
