@@ -432,13 +432,33 @@ export function planSemanticLayers(
     const left = drafts[leftIndex]!;
     for (let rightIndex = leftIndex + 1; rightIndex < drafts.length; rightIndex += 1) {
       const right = drafts[rightIndex]!;
-      const isBackingObjectPair =
-        (left.kind === "text-backing" && right.kind === "foreground-object") ||
-        (left.kind === "foreground-object" && right.kind === "text-backing");
-      if (
-        isBackingObjectPair &&
-        intersectionOverSmallerArea(left.bbox, right.bbox) >= SUBSTANTIAL_OVERLAP_RATIO
-      ) {
+      const leftBackings = left.nodeIds.filter(
+        (nodeId) => nodeById.get(nodeId)!.role === "text-backing",
+      );
+      const leftObjects = left.nodeIds.filter(
+        (nodeId) => nodeById.get(nodeId)!.role === "foreground-object",
+      );
+      const rightBackings = right.nodeIds.filter(
+        (nodeId) => nodeById.get(nodeId)!.role === "text-backing",
+      );
+      const rightObjects = right.nodeIds.filter(
+        (nodeId) => nodeById.get(nodeId)!.role === "foreground-object",
+      );
+      const hasSubstantialMemberOverlap = [
+        ...leftBackings.flatMap((backingId) =>
+          rightObjects.map((objectId) => [backingId, objectId] as const),
+        ),
+        ...rightBackings.flatMap((backingId) =>
+          leftObjects.map((objectId) => [backingId, objectId] as const),
+        ),
+      ].some(
+        ([backingId, objectId]) =>
+          intersectionOverSmallerArea(
+            pixelBoxById.get(backingId)!,
+            pixelBoxById.get(objectId)!,
+          ) >= SUBSTANTIAL_OVERLAP_RATIO,
+      );
+      if (hasSubstantialMemberOverlap) {
         const ids = [left.id, right.id].sort(compareCodePoints);
         warnings.add(`ambiguous_substantial_overlap:${ids.join(",")}`);
         rejected.add(left.id);
@@ -467,13 +487,27 @@ export function planSemanticLayers(
 
   const edges = new Map<string, Set<string>>();
   for (const draft of drafts) edges.set(draft.id, new Set());
-  for (const relation of parsedGraph.relations) {
-    const order = orderEndpoints(relation);
-    if (order === undefined) continue;
-    const rear = candidateIdByNodeId.get(order.rear);
-    const front = candidateIdByNodeId.get(order.front);
-    if (rear !== undefined && front !== undefined && rear !== front) {
-      edges.get(rear)!.add(front);
+  for (const draft of drafts) {
+    const visited = new Set(draft.nodeIds);
+    const pending = [...draft.nodeIds].sort(compareCodePoints);
+    while (pending.length > 0) {
+      const nodeId = pending.shift()!;
+      for (const targetNodeId of [...(nodeEdges.get(nodeId) ?? [])].sort(
+        compareCodePoints,
+      )) {
+        const targetCandidateId = candidateIdByNodeId.get(targetNodeId);
+        if (
+          targetCandidateId !== undefined &&
+          targetCandidateId !== draft.id
+        ) {
+          edges.get(draft.id)!.add(targetCandidateId);
+        }
+        if (!visited.has(targetNodeId)) {
+          visited.add(targetNodeId);
+          pending.push(targetNodeId);
+          pending.sort(compareCodePoints);
+        }
+      }
     }
   }
 

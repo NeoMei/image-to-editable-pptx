@@ -322,6 +322,48 @@ test("uses in-front-of, behind, and occlusion edges for deterministic z-order", 
   });
 });
 
+test("preserves transitive z-order through a non-candidate node", () => {
+  const scene = graph(
+    [
+      node("rear-z", "foreground-object", {
+        x: 0.1,
+        y: 0.1,
+        width: 0.1,
+        height: 0.1,
+      }),
+      node("front-a", "foreground-object", {
+        x: 0.5,
+        y: 0.1,
+        width: 0.1,
+        height: 0.1,
+      }),
+    ],
+    [
+      relation("rear-behind-background", "behind", "rear-z", "background"),
+      relation("background-behind-front", "behind", "background", "front-a"),
+    ],
+  );
+
+  const forward = planSemanticLayers(scene, emptyOcr);
+  const reversed = planSemanticLayers(
+    {
+      ...scene,
+      nodes: [...scene.nodes].reverse(),
+      relations: [...scene.relations].reverse(),
+    },
+    emptyOcr,
+  );
+
+  assert.deepEqual(
+    forward.candidates.map(({ id, zOrder }) => ({ id, zOrder })),
+    [
+      { id: "rear-z", zOrder: 0 },
+      { id: "front-a", zOrder: 1 },
+    ],
+  );
+  assert.deepEqual(reversed, forward);
+});
+
 test("retains source node IDs for compound occluders", () => {
   const plan = planSemanticLayers(
     graph(
@@ -396,21 +438,27 @@ test("excludes every candidate touched by a layer-order cycle", () => {
 });
 
 test("excludes a candidate when its layer-order cycle passes through background", () => {
-  const plan = planSemanticLayers(
-    graph(
-      [
-        node("object", "foreground-object", {
-          x: 0.2,
-          y: 0.2,
-          width: 0.2,
-          height: 0.2,
-        }),
-      ],
-      [
-        relation("object-front", "in-front-of", "object", "background"),
-        relation("object-behind", "behind", "object", "background"),
-      ],
-    ),
+  const scene = graph(
+    [
+      node("object", "foreground-object", {
+        x: 0.2,
+        y: 0.2,
+        width: 0.2,
+        height: 0.2,
+      }),
+    ],
+    [
+      relation("object-front", "in-front-of", "object", "background"),
+      relation("object-behind", "behind", "object", "background"),
+    ],
+  );
+  const plan = planSemanticLayers(scene, emptyOcr);
+  const reversed = planSemanticLayers(
+    {
+      ...scene,
+      nodes: [...scene.nodes].reverse(),
+      relations: [...scene.relations].reverse(),
+    },
     emptyOcr,
   );
 
@@ -418,6 +466,7 @@ test("excludes a candidate when its layer-order cycle passes through background"
   assert.deepEqual(plan.warnings, [
     "cycle_in_layer_order:background,object",
   ]);
+  assert.deepEqual(reversed, plan);
 });
 
 test("keeps ambiguous substantial backing/object overlap in the background", () => {
@@ -443,6 +492,48 @@ test("keeps ambiguous substantial backing/object overlap in the background", () 
   assert.deepEqual(plan.warnings, [
     "ambiguous_substantial_overlap:backing,object",
   ]);
+});
+
+test("keeps an overlapping backing compound and independent object in background", () => {
+  const scene = graph(
+    [
+      node("backing", "text-backing", {
+        x: 0.2,
+        y: 0.2,
+        width: 0.3,
+        height: 0.3,
+      }),
+      node("connector", "connector", {
+        x: 0.18,
+        y: 0.34,
+        width: 0.05,
+        height: 0.02,
+      }),
+      node("object", "foreground-object", {
+        x: 0.22,
+        y: 0.22,
+        width: 0.28,
+        height: 0.28,
+      }),
+    ],
+    [relation("backing-connector", "connected-to", "backing", "connector")],
+  );
+
+  const forward = planSemanticLayers(scene, emptyOcr);
+  const reversed = planSemanticLayers(
+    {
+      ...scene,
+      nodes: [...scene.nodes].reverse(),
+      relations: [...scene.relations].reverse(),
+    },
+    emptyOcr,
+  );
+
+  assert.deepEqual(forward.candidates, []);
+  assert.deepEqual(forward.warnings, [
+    "ambiguous_substantial_overlap:backing,object",
+  ]);
+  assert.deepEqual(reversed, forward);
 });
 
 test("keeps a backing with a dangling OCR association in the background", () => {
