@@ -1,5 +1,5 @@
 import {
-  SlideManifestSchema,
+  SlideManifestV1Schema,
   type BBox,
   type OcrResult,
   type ProviderBBox,
@@ -281,7 +281,7 @@ export function planSlide(
       left.inputOrder - right.inputOrder,
   );
 
-  return SlideManifestSchema.parse({
+  return SlideManifestV1Schema.parse({
     manifestVersion: 1,
     canvas: { width: CANVAS_WIDTH, height: CANVAS_HEIGHT },
     elements: planned.map(({ element }) => element),

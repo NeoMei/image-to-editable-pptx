@@ -1,7 +1,7 @@
 import sharp from "sharp";
 
 import {
-  SlideManifestSchema,
+  SlideManifestV1Schema,
   type BBox,
   type CandidateDecision,
   type FidelityPlan,
@@ -307,7 +307,7 @@ export async function buildFidelityLayers(
   }
 
   const combinedMask = await orMasks(acceptedMasks, plan.canvas);
-  const manifest = SlideManifestSchema.parse({
+  const manifest = SlideManifestV1Schema.parse({
     manifestVersion: 1,
     canvas: plan.canvas,
     elements: acceptedElements.sort(

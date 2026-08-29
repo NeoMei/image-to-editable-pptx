@@ -29,7 +29,7 @@ import {
   OcrResultSchema,
   RunLedgerV2Schema,
   Sha256Schema,
-  SlideManifestSchema,
+  SlideManifestV1Schema,
   VisionResultSchema,
   type FidelityPlan,
   type OcrResult,
@@ -758,7 +758,7 @@ async function buildFromAnalysis(
     fidelityPlan,
   );
   const repairDuration = elapsed(repairStartedAt);
-  const manifest = SlideManifestSchema.parse(fidelityResult.manifest);
+  const manifest = SlideManifestV1Schema.parse(fidelityResult.manifest);
   if (manifest.elements.some((element) => element.kind === "shape")) {
     throw new Error("Fidelity manifests must not contain structural shapes");
   }

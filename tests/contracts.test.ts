@@ -7,6 +7,9 @@ import {
   ProviderBBoxSchema,
   SlideManifestSchema,
   SlideManifestV2Schema,
+  type SlideManifestV1,
+  type SlideManifestV2,
+  type VersionedSlideManifest,
   VisionResultSchema,
 } from "../src/contracts.js";
 
@@ -118,6 +121,24 @@ test("keeps manifest v1 readable through the versioned union", () => {
   const parsed = SlideManifestSchema.parse(validManifest);
 
   assert.equal(parsed.manifestVersion, 1);
+});
+
+function parseVersionedManifestForTypecheck(
+  input: unknown,
+): VersionedSlideManifest {
+  const parsed = SlideManifestSchema.parse(input);
+  if (parsed.manifestVersion === 2) {
+    const manifestV2: SlideManifestV2 = parsed;
+    return manifestV2;
+  }
+  const manifestV1: SlideManifestV1 = parsed;
+  return manifestV1;
+}
+
+test("parsing unknown manifest JSON preserves discriminant narrowing", () => {
+  const parsed = parseVersionedManifestForTypecheck(validManifestV2);
+
+  assert.equal(parsed.manifestVersion, 2);
 });
 
 test("requires every semantic asset field in manifest v2", () => {

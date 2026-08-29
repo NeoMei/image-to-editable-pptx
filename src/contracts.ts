@@ -221,30 +221,14 @@ export const SlideManifestV2Schema = z
   .strict()
   .superRefine(validateManifestBBoxes);
 
-const VersionedSlideManifestSchema = z.discriminatedUnion("manifestVersion", [
+export const SlideManifestSchema = z.discriminatedUnion("manifestVersion", [
   SlideManifestV1Schema,
   SlideManifestV2Schema,
 ]);
 
 export type SlideManifestV1 = z.infer<typeof SlideManifestV1Schema>;
 export type SlideManifestV2 = z.infer<typeof SlideManifestV2Schema>;
-export type VersionedSlideManifest = z.infer<
-  typeof VersionedSlideManifestSchema
->;
-
-type SlideManifestCompatibilitySchema = Omit<
-  typeof VersionedSlideManifestSchema,
-  "parse"
-> & {
-  parse(data: SlideManifestV1): SlideManifestV1;
-  parse(data: SlideManifestV2): SlideManifestV2;
-  parse(data: unknown): SlideManifestV1;
-};
-
-// The runtime schema is the v1/v2 discriminated union. The overloads retain
-// precise v1 inference for the existing planner and builder during migration.
-export const SlideManifestSchema =
-  VersionedSlideManifestSchema as SlideManifestCompatibilitySchema;
+export type VersionedSlideManifest = z.infer<typeof SlideManifestSchema>;
 
 export type BBox = z.infer<typeof BBoxSchema>;
 export type ProviderBBox = z.infer<typeof ProviderBBoxSchema>;

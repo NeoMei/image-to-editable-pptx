@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { measureTextSpanAcceptance } from "../src/acceptance/text-span.js";
-import { SlideManifestSchema } from "../src/contracts.js";
+import { SlideManifestV1Schema } from "../src/contracts.js";
 
 const USAGE =
   "Usage: npm run measure:text-span -- --source <png> --render <png> --manifest <json> [--out <json>]";
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     readFile(args.get("--render")!),
     readFile(args.get("--manifest")!, "utf8"),
   ]);
-  const manifest = SlideManifestSchema.parse(JSON.parse(manifestText));
+  const manifest = SlideManifestV1Schema.parse(JSON.parse(manifestText));
   const evidence = await measureTextSpanAcceptance(source, render, manifest);
   const serialized = `${JSON.stringify(evidence, null, 2)}\n`;
   const out = args.get("--out");
