@@ -332,6 +332,61 @@ test("refined duplicate preference keeps the refinement target ID over a higher-
   assert.ok(!mergedIds.includes("panel-fine"));
 });
 
+test("refined nodes displace near-identical retained originals across stages", () => {
+  const original = graph([
+    node("panel-execution", { x: 0.2, y: 0.3, width: 0.4, height: 0.4 }),
+    node("wrench-icon", { x: 0.3, y: 0.45, width: 0.14, height: 0.26 }),
+  ], [relation("wrench-uses", "connected-to", "wrench-icon", "panel-execution")]);
+  const request = {
+    targetNodeIds: ["panel-execution"],
+    crop: { x: 200, y: 150, width: 400, height: 200 },
+    reason: "compound" as const,
+  };
+  const local = graph(
+    [
+      node("wrench", { x: 0.25, y: 0.35, width: 0.35, height: 0.65 }),
+      node("gear", { x: 0.6, y: 0.2, width: 0.2, height: 0.3 }),
+    ],
+    [relation("gear-link", "connected-to", "gear", "wrench")],
+    { width: 400, height: 200 },
+  );
+
+  const merged = mergeRefinedSubgraph(original, request, local);
+  const mergedIds = merged.nodes.map(({ id }) => id);
+
+  assert.ok(mergedIds.includes("wrench"));
+  assert.ok(!mergedIds.includes("panel-execution"));
+  assert.ok(!mergedIds.includes("wrench-icon"));
+  assert.ok(
+    !merged.relations.some(({ id }) => id === "wrench-uses"),
+    "relations referencing displaced originals must be removed",
+  );
+  assert.ok(merged.relations.some(({ id }) => id === "gear-link"));
+});
+
+test("refinements returning fewer nodes than the targets they replace are rejected", () => {
+  const original = graph([
+    node("alpha", { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }),
+    node("beta", { x: 0.4, y: 0.1, width: 0.2, height: 0.2 }),
+    node("gamma", { x: 0.7, y: 0.1, width: 0.2, height: 0.2 }),
+  ]);
+  const request = {
+    targetNodeIds: ["alpha", "beta", "gamma"],
+    crop: { x: 100, y: 50, width: 800, height: 100 },
+    reason: "compound" as const,
+  };
+  const lossy = graph(
+    [node("alpha", { x: 0.1, y: 0.1, width: 0.8, height: 0.8 })],
+    [],
+    { width: 800, height: 100 },
+  );
+
+  assert.throws(
+    () => mergeRefinedSubgraph(original, request, lossy),
+    /targets/i,
+  );
+});
+
 test("rejects a local graph whose owning canvas escapes the requested crop", () => {
   const original = graph([
     node("target", { x: 0.2, y: 0.2, width: 0.2, height: 0.2 }),

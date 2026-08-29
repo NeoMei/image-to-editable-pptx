@@ -329,6 +329,11 @@ export function mergeRefinedSubgraph(
   if (localNodes.length === 0) {
     throw new Error("Regional refinement must return at least one local node");
   }
+  if (localNodes.length < targetNodeIds.size) {
+    throw new Error(
+      "Regional refinement must not replace more targets than it returns",
+    );
+  }
   const unrelatedNodeIds = new Set(
     parsedGraph.nodes
       .filter(({ id }) => !targetNodeIds.has(id))
@@ -353,8 +358,17 @@ export function mergeRefinedSubgraph(
     },
   }));
   const { nodes: dedupedNodes } = deduplicateRefinedNodes(mappedNodes, targetNodeIds);
+  const survivingOriginalNodes = parsedGraph.nodes.filter((originalNode) => {
+    if (targetNodeIds.has(originalNode.id)) return false;
+    if (isProtectedNode(originalNode)) return true;
+    return !dedupedNodes.some(
+      (refinedNode) =>
+        intersectionOverUnion(originalNode.bbox, refinedNode.bbox) >
+        DUPLICATE_IOU_THRESHOLD,
+    );
+  });
   const nodes = [
-    ...parsedGraph.nodes.filter(({ id }) => !targetNodeIds.has(id)),
+    ...survivingOriginalNodes,
     ...dedupedNodes,
   ];
   const mergedNodeIds = new Set(nodes.map(({ id }) => id));
