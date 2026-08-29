@@ -93,6 +93,110 @@ function createObserver(): {
   };
 }
 
+const ACCEPTANCE_TOKENS = [
+  "\u773c\u775b",
+  "\u96f7\u8fbe",
+  "\u6273\u624b",
+  "\u76fe\u724c",
+  "\u5b89\u5168\u673a\u5236",
+  "slide-07",
+];
+
+function findSceneArchitectureViolations(
+  sourceText: string,
+  modulePath = "scene-decision.ts",
+): string[] {
+  const source = ts.createSourceFile(
+    modulePath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const decisionExpressions: ts.Expression[] = [];
+  const violations: string[] = [];
+
+  function isPromptProducingSubtree(node: ts.Node): boolean {
+    if (
+      (ts.isFunctionDeclaration(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isFunctionExpression(node)) &&
+      node.name !== undefined &&
+      /prompt/i.test(node.name.getText(source))
+    ) {
+      return true;
+    }
+
+    if (
+      (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
+      ts.isVariableDeclaration(node.parent) &&
+      ts.isIdentifier(node.parent.name) &&
+      /prompt/i.test(node.parent.name.text)
+    ) {
+      return true;
+    }
+
+    return (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      /prompt/i.test(node.name.text)
+    );
+  }
+
+  function visit(node: ts.Node): void {
+    if (isPromptProducingSubtree(node)) return;
+
+    if (
+      ts.isIfStatement(node) ||
+      ts.isWhileStatement(node) ||
+      ts.isDoStatement(node) ||
+      ts.isSwitchStatement(node)
+    ) {
+      decisionExpressions.push(node.expression);
+    } else if (ts.isConditionalExpression(node)) {
+      decisionExpressions.push(node.condition);
+    } else if (ts.isForStatement(node) && node.condition !== undefined) {
+      decisionExpressions.push(node.condition);
+    } else if (ts.isCaseClause(node)) {
+      decisionExpressions.push(node.expression);
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  visit(source);
+
+  for (const expression of decisionExpressions) {
+    const expressionText = expression.getText(source);
+    if (/(?:\.label\b|\[\s*["']label["']\s*\])/.test(expressionText)) {
+      violations.push("branch on audit-only label");
+    }
+    function inspectDecisionLiteral(node: ts.Node): void {
+      if (ts.isNumericLiteral(node)) {
+        const value = Number(node.text);
+        if (value === 1280 || value === 720) {
+          violations.push(`fixed-canvas numeric geometry: ${value}`);
+        }
+      }
+      if (
+        ts.isStringLiteral(node) ||
+        ts.isNoSubstitutionTemplateLiteral(node)
+      ) {
+        for (const token of ACCEPTANCE_TOKENS) {
+          if (node.text.includes(token)) {
+            violations.push(`branch on acceptance token: ${token}`);
+          }
+        }
+      }
+      ts.forEachChild(node, inspectDecisionLiteral);
+    }
+
+    inspectDecisionLiteral(expression);
+  }
+
+  return violations;
+}
+
 test("parses every generic scene role and relation on an arbitrary canvas", async () => {
   const fixture = await readFixture();
   const graph = parseQwenSceneContent(fixture.choices[0]!.message.content, {
@@ -189,6 +293,20 @@ test("rejects provider coordinates outside normalized thousandths", async () => 
   );
 
   payload.nodes[1]!.bbox = [100, 100, 1001, 180];
+  assert.throws(
+    () =>
+      parseQwenSceneContent(JSON.stringify(payload), {
+        width: 1600,
+        height: 900,
+      }),
+    /scene response/i,
+  );
+});
+
+test("rejects a provider background that does not cover the complete canvas", async () => {
+  const payload = parseFixturePayload(await readFixture());
+  payload.nodes[0]!.bbox = [0, 0, 500, 500];
+
   assert.throws(
     () =>
       parseQwenSceneContent(JSON.stringify(payload), {
@@ -365,95 +483,41 @@ test("new scene decision modules contain no acceptance-label or fixed-canvas bra
     resolve("src/providers/qwen-scene.ts"),
     resolve("src/scene/plan.ts"),
   ].filter((path) => existsSync(path));
-  const acceptanceTokens = [
-    "\u773c\u775b",
-    "\u96f7\u8fbe",
-    "\u6273\u624b",
-    "\u76fe\u724c",
-    "\u5b89\u5168\u673a\u5236",
-    "slide-07",
-  ];
-
   assert.ok(modulePaths.length > 0, "expected a new scene decision module");
 
   for (const modulePath of modulePaths) {
     const sourceText = await readFile(modulePath, "utf8");
-    const source = ts.createSourceFile(
-      modulePath,
-      sourceText,
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const decisionExpressions: ts.Expression[] = [];
-    const acceptanceTokenHits: string[] = [];
-    const forbiddenCanvasLiterals: number[] = [];
-
-    function visit(node: ts.Node): void {
-      if (
-        ts.isVariableDeclaration(node) &&
-        ts.isIdentifier(node.name) &&
-        /prompt/i.test(node.name.text)
-      ) {
-        return;
-      }
-
-      if (
-        ts.isIfStatement(node) ||
-        ts.isWhileStatement(node) ||
-        ts.isDoStatement(node) ||
-        ts.isSwitchStatement(node)
-      ) {
-        decisionExpressions.push(node.expression);
-      } else if (ts.isConditionalExpression(node)) {
-        decisionExpressions.push(node.condition);
-      } else if (ts.isForStatement(node) && node.condition !== undefined) {
-        decisionExpressions.push(node.condition);
-      }
-
-      if (ts.isNumericLiteral(node)) {
-        const value = Number(node.text);
-        if (value === 1280 || value === 720) forbiddenCanvasLiterals.push(value);
-      }
-
-      if (
-        ts.isStringLiteral(node) ||
-        ts.isNoSubstitutionTemplateLiteral(node)
-      ) {
-        for (const token of acceptanceTokens) {
-          if (node.text.includes(token)) acceptanceTokenHits.push(token);
-        }
-      }
-
-      ts.forEachChild(node, visit);
-    }
-
-    visit(source);
-
-    for (const expression of decisionExpressions) {
-      const expressionText = expression.getText(source);
-      assert.doesNotMatch(
-        expressionText,
-        /(?:\.label\b|\[\s*["']label["']\s*\])/,
-        `${modulePath} branches on audit-only labels`,
-      );
-      for (const token of acceptanceTokens) {
-        assert.equal(
-          expressionText.includes(token),
-          false,
-          `${modulePath} branches on acceptance token ${token}`,
-        );
-      }
-    }
     assert.deepEqual(
-      acceptanceTokenHits,
+      findSceneArchitectureViolations(sourceText, modulePath),
       [],
-      `${modulePath} contains acceptance-specific executable literals`,
-    );
-    assert.deepEqual(
-      forbiddenCanvasLiterals,
-      [],
-      `${modulePath} contains fixed-canvas numeric geometry`,
+      `${modulePath} contains forbidden scene decisions`,
     );
   }
+});
+
+test("architecture guard ignores audit prose inside prompt-producing functions", () => {
+  const promptSource = `
+    function createScenePrompt(canvas: { width: number; height: number }) {
+      const auditExample = canvas.width === 1280
+        ? "\u773c\u775b slide-07 on 720"
+        : "generic audit prose";
+      return auditExample;
+    }
+  `;
+
+  assert.deepEqual(findSceneArchitectureViolations(promptSource), []);
+});
+
+test("architecture guard catches equivalent executable decision branches", () => {
+  const decisionSource = `
+    function chooseLayer(node: { label: string }, canvas: { width: number }) {
+      if (node.label === "\u773c\u775b" && canvas.width === 1280) return true;
+      return false;
+    }
+  `;
+
+  const violations = findSceneArchitectureViolations(decisionSource);
+  assert.ok(violations.some((violation) => /audit-only label/.test(violation)));
+  assert.ok(violations.some((violation) => /\u773c\u775b/.test(violation)));
+  assert.ok(violations.some((violation) => /1280/.test(violation)));
 });

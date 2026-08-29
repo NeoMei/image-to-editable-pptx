@@ -74,7 +74,24 @@ const ProviderScenePayloadSchema = z
         .strict(),
     ),
   })
-  .strict();
+  .strict()
+  .superRefine((payload, context) => {
+    for (const [index, node] of payload.nodes.entries()) {
+      if (
+        node.role === "background" &&
+        (node.bbox[0] !== 0 ||
+          node.bbox[1] !== 0 ||
+          node.bbox[2] !== PROVIDER_COORDINATE_SCALE ||
+          node.bbox[3] !== PROVIDER_COORDINATE_SCALE)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "background bbox must cover the complete canvas",
+          path: ["nodes", index, "bbox"],
+        });
+      }
+    }
+  });
 
 function requireSafeCompatibleBase(config: AppConfig): string {
   if (!WORKSPACE_ID_PATTERN.test(config.workspaceId)) {
