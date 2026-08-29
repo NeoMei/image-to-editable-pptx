@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type BigIntStats } from "node:fs";
 import {
   copyFile,
   link,
@@ -9,6 +9,7 @@ import {
   open,
   readdir,
   rm,
+  type FileHandle,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -804,7 +805,16 @@ export const SEMANTIC_ASSET_OWNERSHIP_MARKER =
 export const SEMANTIC_ASSET_COMPLETION_MARKER =
   ".semantic-assets-complete.json";
 
-const SEMANTIC_ASSET_MARKER_VERSION = 1 as const;
+const SEMANTIC_ASSET_MARKER_VERSION = 2 as const;
+// Version 2 is a cooperating immutable-publication protocol: creating the
+// completion marker permanently locks this directory against later mutation.
+// The only writer in this module creates paths exclusively and refuses an
+// existing assets directory. Readers never modify or delete publication paths.
+// Non-cooperating mutation is detected during the held-handle validation
+// interval, but no filesystem reader can promise immunity to mutation after it
+// returns.
+const SEMANTIC_ASSET_READER_PROTOCOL =
+  "immutable-completion-lock-v1" as const;
 const SemanticAssetDirectoryBindingSchema = z.object({
   dev: z.string().regex(/^\d+$/u),
   ino: z.string().regex(/^\d+$/u),
@@ -816,6 +826,7 @@ const SemanticAssetInventoryEntrySchema = z.object({
 const SemanticAssetOwnershipMarkerSchema = z.object({
   markerVersion: z.literal(SEMANTIC_ASSET_MARKER_VERSION),
   kind: z.literal("semantic-assets-owner"),
+  readerProtocol: z.literal(SEMANTIC_ASSET_READER_PROTOCOL),
   directory: SemanticAssetDirectoryBindingSchema,
   ownerToken: z.string().uuid(),
   inventory: z.array(SemanticAssetInventoryEntrySchema),
@@ -823,6 +834,7 @@ const SemanticAssetOwnershipMarkerSchema = z.object({
 const SemanticAssetCompletionMarkerSchema = z.object({
   markerVersion: z.literal(SEMANTIC_ASSET_MARKER_VERSION),
   kind: z.literal("semantic-assets-complete"),
+  readerProtocol: z.literal(SEMANTIC_ASSET_READER_PROTOCOL),
   directory: SemanticAssetDirectoryBindingSchema,
   ownerToken: z.string().uuid(),
   ownershipMarkerSha256: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -835,14 +847,41 @@ export type SemanticAssetInventoryEntry = z.infer<
 
 export type SemanticAssetPublication = {
   markerVersion: typeof SEMANTIC_ASSET_MARKER_VERSION;
+  readerProtocol: typeof SEMANTIC_ASSET_READER_PROTOCOL;
   directory: z.infer<typeof SemanticAssetDirectoryBindingSchema>;
   ownerToken: string;
   inventory: SemanticAssetInventoryEntry[];
 };
 
+export type SemanticAssetReaderHooks = {
+  afterAssetHandlesHashed?: (assetNames: readonly string[]) => Promise<void>;
+  beforeFinalInventoryRead?: () => Promise<void>;
+};
+
 type FileSystemIdentity = {
   dev: bigint;
   ino: bigint;
+};
+
+type FileSystemSnapshot = FileSystemIdentity & {
+  size: bigint;
+  nlink: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+};
+
+type HeldPublishedFile = {
+  name: string;
+  path: string;
+  handle: FileHandle;
+  snapshot: FileSystemSnapshot;
+  bytes: Buffer;
+  sha256: string;
+};
+
+type HeldPublishedDirectory = {
+  handle: FileHandle;
+  snapshot: FileSystemSnapshot;
 };
 
 type OwnedPublicationEntry = FileSystemIdentity & {
@@ -859,6 +898,30 @@ function sameIdentity(
   right: FileSystemIdentity,
 ): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function snapshotFileSystemState(stats: BigIntStats): FileSystemSnapshot {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    nlink: stats.nlink,
+    mtimeNs: stats.mtimeNs,
+    ctimeNs: stats.ctimeNs,
+  };
+}
+
+function sameFileSystemSnapshot(
+  left: FileSystemSnapshot,
+  right: FileSystemSnapshot,
+): boolean {
+  return (
+    sameIdentity(left, right) &&
+    left.size === right.size &&
+    left.nlink === right.nlink &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
 }
 
 async function readDirectoryIdentity(path: string): Promise<FileSystemIdentity> {
@@ -996,88 +1059,319 @@ function assertCanonicalAssetInventory(
   }
 }
 
-async function readSemanticAssetPublicationUnchecked(
+async function openHeldPublishedDirectory(
   directory: string,
-): Promise<SemanticAssetPublication> {
-  const directoryIdentity = await readDirectoryIdentity(directory);
-  const ownerPath = join(directory, SEMANTIC_ASSET_OWNERSHIP_MARKER);
-  const completionPath = join(directory, SEMANTIC_ASSET_COMPLETION_MARKER);
-  const [ownerFile, completionFile] = await Promise.all([
-    readStablePublishedFile(ownerPath, SEMANTIC_ASSET_OWNERSHIP_MARKER),
-    readStablePublishedFile(completionPath, SEMANTIC_ASSET_COMPLETION_MARKER),
-  ]);
-  const owner = SemanticAssetOwnershipMarkerSchema.parse(
-    JSON.parse(ownerFile.bytes.toString("utf8")),
+): Promise<HeldPublishedDirectory> {
+  const pathStats = await lstat(directory, { bigint: true });
+  if (!pathStats.isDirectory() || pathStats.isSymbolicLink()) {
+    throw new Error("Semantic assets target is not an owned directory");
+  }
+  const handle = await open(
+    directory,
+    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
   );
-  const completion = SemanticAssetCompletionMarkerSchema.parse(
-    JSON.parse(completionFile.bytes.toString("utf8")),
+  try {
+    const handleStats = await handle.stat({ bigint: true });
+    const pathSnapshot = snapshotFileSystemState(pathStats);
+    const handleSnapshot = snapshotFileSystemState(handleStats);
+    if (
+      !handleStats.isDirectory() ||
+      !sameFileSystemSnapshot(pathSnapshot, handleSnapshot)
+    ) {
+      throw new Error("Semantic assets directory changed while it was opened");
+    }
+    return { handle, snapshot: handleSnapshot };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+async function readEntireHeldFile(
+  handle: FileHandle,
+  expectedSize: bigint,
+): Promise<Buffer> {
+  const size = Number(expectedSize);
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error("Semantic asset publication file is too large to validate");
+  }
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const { bytesRead } = await handle.read(
+      bytes,
+      offset,
+      size - offset,
+      offset,
+    );
+    if (bytesRead === 0) {
+      throw new Error("Semantic asset publication changed while it was read");
+    }
+    offset += bytesRead;
+  }
+  const trailing = Buffer.alloc(1);
+  if ((await handle.read(trailing, 0, 1, size)).bytesRead !== 0) {
+    throw new Error("Semantic asset publication changed while it was read");
+  }
+  return bytes;
+}
+
+async function openHeldPublishedFile(
+  path: string,
+  name: string,
+  expectedSha256?: string,
+): Promise<HeldPublishedFile> {
+  const pathStats = await lstat(path, { bigint: true });
+  if (!pathStats.isFile() || pathStats.isSymbolicLink()) {
+    throw new Error(`Semantic asset publication is contaminated: ${name}`);
+  }
+  const handle = await open(
+    path,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
   );
-  assertCanonicalAssetInventory(owner.inventory);
-  assertCanonicalAssetInventory(completion.inventory);
+  try {
+    const beforeStats = await handle.stat({ bigint: true });
+    const pathSnapshot = snapshotFileSystemState(pathStats);
+    const beforeSnapshot = snapshotFileSystemState(beforeStats);
+    if (
+      !beforeStats.isFile() ||
+      !sameFileSystemSnapshot(pathSnapshot, beforeSnapshot)
+    ) {
+      throw new Error(`Semantic asset publication is contaminated: ${name}`);
+    }
+    const bytes = await readEntireHeldFile(handle, beforeSnapshot.size);
+    const afterStats = await handle.stat({ bigint: true });
+    const afterSnapshot = snapshotFileSystemState(afterStats);
+    if (
+      !afterStats.isFile() ||
+      !sameFileSystemSnapshot(beforeSnapshot, afterSnapshot)
+    ) {
+      throw new Error(`Semantic asset publication changed while reading: ${name}`);
+    }
+    const actualSha256 = sha256(bytes);
+    if (expectedSha256 !== undefined && actualSha256 !== expectedSha256) {
+      throw new Error(`Semantic asset publication hash mismatch: ${name}`);
+    }
+    return {
+      name,
+      path,
+      handle,
+      snapshot: afterSnapshot,
+      bytes,
+      sha256: actualSha256,
+    };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
 
-  const currentDirectory = {
-    dev: directoryIdentity.dev.toString(),
-    ino: directoryIdentity.ino.toString(),
-  };
+async function assertHeldDirectoryStable(
+  directory: HeldPublishedDirectory,
+): Promise<void> {
+  const stats = await directory.handle.stat({ bigint: true });
   if (
-    !isDeepStrictEqual(owner.directory, currentDirectory) ||
-    !isDeepStrictEqual(completion.directory, currentDirectory) ||
-    owner.ownerToken !== completion.ownerToken ||
-    !isDeepStrictEqual(owner.inventory, completion.inventory) ||
-    completion.ownershipMarkerSha256 !== sha256(ownerFile.bytes)
-  ) {
-    throw new Error("Semantic asset marker ownership binding does not match");
-  }
-
-  const expectedNames = [
-    SEMANTIC_ASSET_OWNERSHIP_MARKER,
-    SEMANTIC_ASSET_COMPLETION_MARKER,
-    ...completion.inventory.map(({ path }) => path.slice("assets/".length)),
-  ].sort(compareCodePoints);
-  const actualNames = (await readdir(directory)).sort(compareCodePoints);
-  if (!isDeepStrictEqual(actualNames, expectedNames)) {
-    throw new Error("Semantic asset publication inventory is not exact");
-  }
-  for (const entry of completion.inventory) {
-    const name = entry.path.slice("assets/".length);
-    await inspectPublishedFile(join(directory, name), name, entry.sha256);
-  }
-  const [verifiedOwner, verifiedCompletion] = await Promise.all([
-    inspectPublishedFile(
-      ownerPath,
-      SEMANTIC_ASSET_OWNERSHIP_MARKER,
-      sha256(ownerFile.bytes),
-    ),
-    inspectPublishedFile(
-      completionPath,
-      SEMANTIC_ASSET_COMPLETION_MARKER,
-      sha256(completionFile.bytes),
-    ),
-  ]);
-  if (
-    !sameIdentity(verifiedOwner, ownerFile.identity) ||
-    !sameIdentity(verifiedCompletion, completionFile.identity) ||
-    !(await directoryHasIdentity(directory, directoryIdentity)) ||
-    !isDeepStrictEqual(
-      (await readdir(directory)).sort(compareCodePoints),
-      expectedNames,
+    !stats.isDirectory() ||
+    !sameFileSystemSnapshot(
+      snapshotFileSystemState(stats),
+      directory.snapshot,
     )
   ) {
-    throw new Error("Semantic asset publication changed during validation");
+    throw new Error("Semantic asset publication directory changed during validation");
   }
-  return {
-    markerVersion: SEMANTIC_ASSET_MARKER_VERSION,
-    directory: currentDirectory,
-    ownerToken: owner.ownerToken,
-    inventory: completion.inventory.map((entry) => ({ ...entry })),
-  };
+}
+
+async function assertCurrentDirectoryBinding(
+  path: string,
+  directory: HeldPublishedDirectory,
+): Promise<void> {
+  const stats = await lstat(path, { bigint: true });
+  if (
+    !stats.isDirectory() ||
+    stats.isSymbolicLink() ||
+    !sameFileSystemSnapshot(
+      snapshotFileSystemState(stats),
+      directory.snapshot,
+    )
+  ) {
+    throw new Error("Semantic asset publication directory binding changed");
+  }
+}
+
+async function readHeldDirectoryInventory(
+  directory: string,
+  heldDirectory: HeldPublishedDirectory,
+): Promise<string[]> {
+  if (process.platform === "linux") {
+    return readdir(`/proc/self/fd/${heldDirectory.handle.fd}`);
+  }
+  // Node does not accept a FileHandle in readdir and macOS /dev/fd directory
+  // descriptors are not enumerable, so sealed-protocol readers use the bound
+  // pathname with identity and mutation-epoch checks on both sides.
+  return readdir(directory);
+}
+
+async function readBoundDirectoryInventory(
+  directory: string,
+  heldDirectory: HeldPublishedDirectory,
+  beforeRead?: () => Promise<void>,
+): Promise<string[]> {
+  await assertHeldDirectoryStable(heldDirectory);
+  await assertCurrentDirectoryBinding(directory, heldDirectory);
+  await beforeRead?.();
+  const names = await readHeldDirectoryInventory(directory, heldDirectory);
+  await assertCurrentDirectoryBinding(directory, heldDirectory);
+  await assertHeldDirectoryStable(heldDirectory);
+  return names.sort(compareCodePoints);
+}
+
+async function revalidateHeldPublishedFile(
+  file: HeldPublishedFile,
+): Promise<void> {
+  const beforeStats = await file.handle.stat({ bigint: true });
+  if (
+    !beforeStats.isFile() ||
+    !sameFileSystemSnapshot(
+      snapshotFileSystemState(beforeStats),
+      file.snapshot,
+    )
+  ) {
+    throw new Error(`Semantic asset publication changed during validation: ${file.name}`);
+  }
+  const bytes = await readEntireHeldFile(file.handle, file.snapshot.size);
+  const afterStats = await file.handle.stat({ bigint: true });
+  if (
+    !afterStats.isFile() ||
+    !sameFileSystemSnapshot(
+      snapshotFileSystemState(afterStats),
+      file.snapshot,
+    ) ||
+    sha256(bytes) !== file.sha256
+  ) {
+    throw new Error(`Semantic asset publication changed during validation: ${file.name}`);
+  }
+  const pathStats = await lstat(file.path, { bigint: true });
+  if (
+    !pathStats.isFile() ||
+    pathStats.isSymbolicLink() ||
+    !sameFileSystemSnapshot(
+      snapshotFileSystemState(pathStats),
+      file.snapshot,
+    )
+  ) {
+    throw new Error(`Semantic asset publication path binding changed: ${file.name}`);
+  }
+}
+
+async function readSemanticAssetPublicationUnchecked(
+  directory: string,
+  hooks: SemanticAssetReaderHooks,
+): Promise<SemanticAssetPublication> {
+  const heldDirectory = await openHeldPublishedDirectory(directory);
+  const heldFiles: HeldPublishedFile[] = [];
+  try {
+    const ownerFile = await openHeldPublishedFile(
+      join(directory, SEMANTIC_ASSET_OWNERSHIP_MARKER),
+      SEMANTIC_ASSET_OWNERSHIP_MARKER,
+    );
+    heldFiles.push(ownerFile);
+    const completionFile = await openHeldPublishedFile(
+      join(directory, SEMANTIC_ASSET_COMPLETION_MARKER),
+      SEMANTIC_ASSET_COMPLETION_MARKER,
+    );
+    heldFiles.push(completionFile);
+    const owner = SemanticAssetOwnershipMarkerSchema.parse(
+      JSON.parse(ownerFile.bytes.toString("utf8")),
+    );
+    const completion = SemanticAssetCompletionMarkerSchema.parse(
+      JSON.parse(completionFile.bytes.toString("utf8")),
+    );
+    assertCanonicalAssetInventory(owner.inventory);
+    assertCanonicalAssetInventory(completion.inventory);
+
+    const currentDirectory = {
+      dev: heldDirectory.snapshot.dev.toString(),
+      ino: heldDirectory.snapshot.ino.toString(),
+    };
+    if (
+      !isDeepStrictEqual(owner.directory, currentDirectory) ||
+      !isDeepStrictEqual(completion.directory, currentDirectory) ||
+      owner.readerProtocol !== completion.readerProtocol ||
+      owner.ownerToken !== completion.ownerToken ||
+      !isDeepStrictEqual(owner.inventory, completion.inventory) ||
+      completion.ownershipMarkerSha256 !== ownerFile.sha256
+    ) {
+      throw new Error("Semantic asset marker ownership binding does not match");
+    }
+
+    const expectedNames = [
+      SEMANTIC_ASSET_OWNERSHIP_MARKER,
+      SEMANTIC_ASSET_COMPLETION_MARKER,
+      ...completion.inventory.map(({ path }) => path.slice("assets/".length)),
+    ].sort(compareCodePoints);
+    if (
+      !isDeepStrictEqual(
+        await readBoundDirectoryInventory(directory, heldDirectory),
+        expectedNames,
+      )
+    ) {
+      throw new Error("Semantic asset publication inventory is not exact");
+    }
+
+    const assetFiles: HeldPublishedFile[] = [];
+    for (const entry of completion.inventory) {
+      const name = entry.path.slice("assets/".length);
+      const file = await openHeldPublishedFile(
+        join(directory, name),
+        name,
+        entry.sha256,
+      );
+      heldFiles.push(file);
+      assetFiles.push(file);
+    }
+    await hooks.afterAssetHandlesHashed?.(
+      assetFiles.map(({ name }) => name),
+    );
+
+    for (const file of heldFiles) await revalidateHeldPublishedFile(file);
+    if (
+      !isDeepStrictEqual(
+        await readBoundDirectoryInventory(
+          directory,
+          heldDirectory,
+          hooks.beforeFinalInventoryRead,
+        ),
+        expectedNames,
+      )
+    ) {
+      throw new Error("Semantic asset publication inventory is not exact");
+    }
+    for (const file of heldFiles) await revalidateHeldPublishedFile(file);
+    // With the completion lock honored, the successful held-directory fstat
+    // below is the reader's linearization point. The following pathname check
+    // proves the caller-visible name remained bound through that point.
+    await assertHeldDirectoryStable(heldDirectory);
+    await assertCurrentDirectoryBinding(directory, heldDirectory);
+
+    return {
+      markerVersion: SEMANTIC_ASSET_MARKER_VERSION,
+      readerProtocol: SEMANTIC_ASSET_READER_PROTOCOL,
+      directory: currentDirectory,
+      ownerToken: owner.ownerToken,
+      inventory: completion.inventory.map((entry) => ({ ...entry })),
+    };
+  } finally {
+    await Promise.allSettled(heldFiles.map(({ handle }) => handle.close()));
+    await heldDirectory.handle.close();
+  }
 }
 
 export async function readSemanticAssetPublication(
   directory: string,
+  hooks: SemanticAssetReaderHooks = {},
 ): Promise<SemanticAssetPublication> {
   try {
-    return await readSemanticAssetPublicationUnchecked(directory);
+    return await readSemanticAssetPublicationUnchecked(directory, hooks);
   } catch (error) {
     throw new Error("Invalid semantic asset publication ownership or inventory", {
       cause: error,
@@ -1148,6 +1442,7 @@ async function publishSemanticAssets(
     const ownerBytes = Buffer.from(`${JSON.stringify({
       markerVersion: SEMANTIC_ASSET_MARKER_VERSION,
       kind: "semantic-assets-owner",
+      readerProtocol: SEMANTIC_ASSET_READER_PROTOCOL,
       directory: directoryBinding,
       ownerToken,
       inventory,
@@ -1186,6 +1481,7 @@ async function publishSemanticAssets(
     const completionBytes = Buffer.from(`${JSON.stringify({
       markerVersion: SEMANTIC_ASSET_MARKER_VERSION,
       kind: "semantic-assets-complete",
+      readerProtocol: SEMANTIC_ASSET_READER_PROTOCOL,
       directory: directoryBinding,
       ownerToken,
       ownershipMarkerSha256: sha256(ownerBytes),

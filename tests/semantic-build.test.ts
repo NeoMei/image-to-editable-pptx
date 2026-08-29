@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  copyFile,
   lstat,
   link,
   mkdir,
@@ -10,7 +11,6 @@ import {
   rename,
   rm,
   symlink,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -790,7 +790,9 @@ test("retains all incomplete evidence when an asset is replaced before validatio
   const plan = planSemanticLayers(fixture.graph, fixture.ocr);
   const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-file-replacement-"));
   const assetsDir = join(workDir, "assets");
+  const displacedAsset = join(workDir, "displaced-asset-evidence.png");
   let replacedName: string | undefined;
+  let originalBytes: Buffer | undefined;
   try {
     await assert.rejects(
       buildSemanticLayers(
@@ -808,7 +810,8 @@ test("retains all incomplete evidence when an asset is replaced before validatio
               name.endsWith(".png"),
             );
             assert.ok(replacedName);
-            await unlink(join(directory, replacedName));
+            originalBytes = await readFile(join(directory, replacedName));
+            await rename(join(directory, replacedName), displacedAsset);
             await writeFile(join(directory, replacedName), "foreign replacement", {
               flag: "wx",
             });
@@ -819,6 +822,7 @@ test("retains all incomplete evidence when an asset is replaced before validatio
       /hash|publication|inventory/,
     );
     assert.ok(replacedName);
+    assert.deepEqual(await readFile(displacedAsset), originalBytes);
     assert.equal(
       await readFile(join(assetsDir, replacedName), "utf8"),
       "foreign replacement",
@@ -831,6 +835,101 @@ test("retains all incomplete evidence when an asset is replaced before validatio
       fidelityBuild.readSemanticAssetPublication(assetsDir),
       /hash|publication|inventory/,
     );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects an asset replacement between handle hashing and the final validation gate", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-reader-asset-race-"));
+  const assetsDir = join(workDir, "assets");
+  const displacedAsset = join(workDir, "displaced-after-hash.png");
+  let injected = false;
+  let originalBytes: Buffer | undefined;
+  let replacementBytes: Buffer | undefined;
+  let replacedAssetName: string | undefined;
+  try {
+    await buildSemanticLayers({
+      source: fixture.source,
+      ocr: fixture.ocr,
+      graph: fixture.graph,
+      plan,
+      completions: new Map(),
+      workDir,
+    });
+
+    await assert.rejects(
+      fidelityBuild.readSemanticAssetPublication(assetsDir, {
+        afterAssetHandlesHashed: async (assetNames: readonly string[]) => {
+          const assetName = assetNames[0];
+          assert.ok(assetName);
+          replacedAssetName = assetName;
+          const assetPath = join(assetsDir, assetName);
+          originalBytes = await readFile(assetPath);
+          replacementBytes = Buffer.alloc(originalBytes.length, 0x5a);
+          if (replacementBytes.equals(originalBytes)) {
+            assert.ok(replacementBytes.length > 0);
+            replacementBytes[0] = replacementBytes[0]! ^ 0xff;
+          }
+          await rename(assetPath, displacedAsset);
+          await writeFile(assetPath, replacementBytes, { flag: "wx" });
+          injected = true;
+        },
+      }),
+      /ownership|inventory|changed|hash/,
+    );
+
+    assert.equal(injected, true);
+    assert.deepEqual(await readFile(displacedAsset), originalBytes);
+    assert.ok(replacedAssetName);
+    assert.deepEqual(
+      await readFile(join(assetsDir, replacedAssetName)),
+      replacementBytes,
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects an exact-name directory replacement during final inventory verification", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-reader-directory-race-"));
+  const assetsDir = join(workDir, "assets");
+  const replacementDir = join(workDir, "replacement-assets");
+  const displacedDir = join(workDir, "displaced-assets-evidence");
+  let injected = false;
+  try {
+    await buildSemanticLayers({
+      source: fixture.source,
+      ocr: fixture.ocr,
+      graph: fixture.graph,
+      plan,
+      completions: new Map(),
+      workDir,
+    });
+    await mkdir(replacementDir);
+    const expectedNames = (await readdir(assetsDir)).sort();
+    for (const name of expectedNames) {
+      await copyFile(join(assetsDir, name), join(replacementDir, name));
+    }
+
+    await assert.rejects(
+      fidelityBuild.readSemanticAssetPublication(assetsDir, {
+        beforeFinalInventoryRead: async () => {
+          await rename(assetsDir, displacedDir);
+          await rename(replacementDir, assetsDir);
+          injected = true;
+        },
+      }),
+      /ownership|inventory|changed|directory/,
+    );
+
+    assert.equal(injected, true);
+    assert.deepEqual((await readdir(assetsDir)).sort(), expectedNames);
+    assert.deepEqual((await readdir(displacedDir)).sort(), expectedNames);
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
