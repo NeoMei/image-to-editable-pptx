@@ -102,19 +102,19 @@ function cropCanonicalRgba(canvas: SourceCanvas, bounds: IntegerBounds): Buffer 
 function confineToCandidate(
   rgba: Buffer,
   crop: IntegerBounds,
-  candidate: IntegerBounds,
+  candidate: BBox,
 ): void {
   const width = crop.right - crop.left;
   const height = crop.bottom - crop.top;
   for (let y = 0; y < height; y += 1) {
-    const canvasY = crop.top + y;
+    const pixelCenterY = crop.top + y + 0.5;
     for (let x = 0; x < width; x += 1) {
-      const canvasX = crop.left + x;
+      const pixelCenterX = crop.left + x + 0.5;
       if (
-        canvasX < candidate.left ||
-        canvasX >= candidate.right ||
-        canvasY < candidate.top ||
-        canvasY >= candidate.bottom
+        pixelCenterX < candidate.x ||
+        pixelCenterX >= candidate.x + candidate.width ||
+        pixelCenterY < candidate.y ||
+        pixelCenterY >= candidate.y + candidate.height
       ) {
         rgba[(y * width + x) * 4 + 3] = 0;
       }
@@ -296,7 +296,7 @@ export async function deriveSemanticMasks(
         minimumEdgeColorConsistency: 0.6,
       });
       if (proposal === undefined) continue;
-      confineToCandidate(proposal.rgba, crop, candidateBounds);
+      confineToCandidate(proposal.rgba, crop, candidate.bbox);
       const completeMetrics = maskMetrics(proposal.rgba, width, height);
       if (completeMetrics.completeness !== 1) continue;
       for (const variant of connectedComponentVariants(

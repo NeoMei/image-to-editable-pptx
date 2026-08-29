@@ -39,6 +39,32 @@ test("max-dilates alpha without hardening the source fringe", () => {
   assert.equal(source[4], 96);
 });
 
+test("keeps the legacy removal wrapper binary at the alpha-16 threshold", async () => {
+  const rgba = Buffer.alloc(3 * 4);
+  rgba.set([35, 57, 77, 15], 0);
+  rgba.set([35, 57, 77, 16], 4);
+  rgba.set([35, 57, 77, 128], 8);
+  const asset = await sharp(rgba, {
+    raw: { width: 3, height: 1, channels: 4 },
+  })
+    .png()
+    .toBuffer();
+
+  const mask = await buildAssetRemovalMask(
+    asset,
+    { x: 2, y: 3, width: 3, height: 1 },
+    { width: 8, height: 8 },
+    0,
+  );
+  const { data, info } = await sharp(mask)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const value = (x: number): number => data[(3 * 8 + x) * info.channels]!;
+
+  assert.deepEqual([value(2), value(3), value(4)], [0, 255, 255]);
+});
+
 test("places asset alpha at its canvas bbox without masking transparent pixels", async () => {
   const pixels = Buffer.alloc(4 * 4 * 4);
   const foregroundPixels: ReadonlyArray<readonly [number, number]> = [

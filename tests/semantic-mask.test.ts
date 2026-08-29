@@ -118,6 +118,34 @@ test("keeps adjacent and touching independent candidates pixel-disjoint", async 
   assert.ok(rightAlpha[30 * canvas.width + 42]! > 0);
 });
 
+test("assigns fractional touching bboxes by half-open pixel-center ownership", async () => {
+  const canvas = solidCanvas(64, 64);
+  paintRect(canvas, { x: 10, y: 22, width: 21, height: 17 }, [35, 57, 77, 255]);
+  const textMask = await emptyTextMask(canvas.width, canvas.height);
+  const leftBox = { x: 10.2, y: 22.2, width: 10.4, height: 16.4 };
+  const rightBox = { x: 20.6, y: 22.2, width: 10.4, height: 16.4 };
+
+  const [leftMasks, rightMasks] = await Promise.all([
+    deriveSemanticMasks(canvas, semanticCandidate("fractional-left", leftBox)),
+    deriveSemanticMasks(canvas, semanticCandidate("fractional-right", rightBox)),
+  ]);
+  const left = chooseSemanticMask(leftMasks, textMask);
+  const right = chooseSemanticMask(rightMasks, textMask);
+
+  assert.ok(left);
+  assert.ok(right);
+  const [leftAlpha, rightAlpha] = await Promise.all([
+    canvasAlpha(left, canvas),
+    canvasAlpha(right, canvas),
+  ]);
+  for (let index = 0; index < leftAlpha.length; index += 1) {
+    assert.equal(leftAlpha[index]! > 0 && rightAlpha[index]! > 0, false);
+  }
+  assert.ok(leftAlpha[30 * canvas.width + 20]! > 0);
+  assert.equal(rightAlpha[30 * canvas.width + 20], 0);
+  assert.ok(rightAlpha[30 * canvas.width + 21]! > 0);
+});
+
 test("offers a dominant connected-component proposal when a loose bbox includes OCR noise", async () => {
   const canvas = solidCanvas(96, 64);
   paintRect(canvas, { x: 24, y: 22, width: 14, height: 20 }, [35, 57, 77, 255]);

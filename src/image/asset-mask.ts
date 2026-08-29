@@ -105,7 +105,7 @@ export async function buildAssetRemovalMask(
   }
   const alpha = new Uint8Array(width * height);
   for (let index = 0; index < alpha.length; index += 1) {
-    alpha[index] = data[index * 4 + 3]!;
+    alpha[index] = data[index * 4 + 3]! >= 16 ? 255 : 0;
   }
   const dilated = dilateAlphaMask(alpha, width, height, dilationPx);
   const canvasMask = placeAlphaMask(dilated, width, height, bbox, canvas);
