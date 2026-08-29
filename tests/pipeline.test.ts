@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve, win32 } from "node:path";
 import test from "node:test";
 
 import JSZip from "jszip";
@@ -41,6 +41,7 @@ import {
   analyzeSlide,
   buildSlide,
   OUTPUT_OWNERSHIP_MARKER,
+  resolveSafeAssetOutputPath,
   runPipeline,
   type FidelityBuild,
 } from "../src/pipeline.js";
@@ -119,6 +120,35 @@ const repairMetrics = {
   ringChannelMad: 1,
   filledPixelDistanceP95: 2,
 };
+
+test("resolves portable manifest asset paths with Windows path semantics", () => {
+  assert.equal(
+    resolveSafeAssetOutputPath(
+      "C:\\workspace\\published-output",
+      "assets/asset-node.png",
+      win32,
+    ),
+    "C:\\workspace\\published-output\\assets\\asset-node.png",
+  );
+  assert.throws(
+    () =>
+      resolveSafeAssetOutputPath(
+        "C:\\workspace\\published-output",
+        "assets\\asset-node.png",
+        win32,
+      ),
+    /Unsafe generated asset path/,
+  );
+  assert.throws(
+    () =>
+      resolveSafeAssetOutputPath(
+        "C:\\workspace\\published-output",
+        "assets/../outside.png",
+        win32,
+      ),
+    /Unsafe generated asset path/,
+  );
+});
 
 const recompositionMetrics = {
   comparedPixels: 100,

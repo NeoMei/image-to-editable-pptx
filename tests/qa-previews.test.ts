@@ -87,28 +87,71 @@ async function fixture(): Promise<{
       },
     },
   ];
+  const manifestAssets: SlideManifestV2["elements"] = assets.map((asset, index) => ({
+    kind: "asset" as const,
+    id: asset.candidateId,
+    label: index === 0 ? "label must not affect QA" : "another ignored label",
+    bbox: asset.bbox,
+    extraction: "transparent" as const,
+    assetPath: asset.assetPath,
+    zIndex: asset.zIndex,
+    role: index === 0 ? "foreground-object" as const : "compound-group" as const,
+    groupId: index === 0 ? null : "group-stable",
+    provenance: asset.provenance,
+    relations: [],
+    reviewRequired: asset.reviewRequired,
+  }));
   const manifest: SlideManifestV2 = {
     manifestVersion: 2,
     canvas: { width, height },
     warnings: [],
-    elements: assets.map((asset, index) => ({
-      kind: "asset" as const,
-      id: asset.candidateId,
-      label: index === 0 ? "label must not affect QA" : "another ignored label",
-      bbox: asset.bbox,
-      extraction: "transparent" as const,
-      assetPath: asset.assetPath,
-      zIndex: asset.zIndex,
-      role: index === 0 ? "foreground-object" as const : "compound-group" as const,
-      groupId: index === 0 ? null : "group-stable",
-      provenance: asset.provenance,
-      relations: [],
-      reviewRequired: asset.reviewRequired,
-    })),
+    // Deliberately not in z-order: QA recomposition must use zIndex, not input
+    // array order, just like the slide scene does.
+    elements: [
+      {
+        kind: "text",
+        id: "text-qa",
+        text: "文",
+        bbox: { x: 68, y: 42, width: 24, height: 14 },
+        rotation: 0,
+        color: "112233",
+        fontSizePx: 14,
+        charSpacingPx: 0,
+        bold: false,
+        align: "left",
+        zIndex: 3,
+      },
+      manifestAssets[1]!,
+      manifestAssets[0]!,
+      {
+        kind: "shape",
+        id: "shape-panel",
+        label: "audit-only shape label",
+        shape: "rect",
+        bbox: { x: 4, y: 4, width: 30, height: 26 },
+        fillColor: "4488CC",
+        strokeColor: "224466",
+        strokeWidthPx: 2,
+        cornerRadiusPx: 0,
+        zIndex: 0,
+      },
+    ],
   };
   const rgba = await sharp(background).ensureAlpha().raw().toBuffer();
+  // The source retains the glyph while the clean background above does not.
+  // Put its distinctive right-hand stroke beyond the deterministic fallback
+  // glyph so the assertion proves source-derived text restoration.
+  for (let y = 44; y <= 53; y += 1) {
+    rgba.set([17, 34, 51, 255], (y * width + 88) * 4);
+  }
+  for (let x = 82; x <= 89; x += 1) {
+    rgba.set([17, 34, 51, 255], (48 * width + x) * 4);
+  }
+  const sourceBytes = await sharp(rgba, {
+    raw: { width, height, channels: 4 },
+  }).png().toBuffer();
   return {
-    canvas: { format: "png", width, height, rgba, sourceBytes: background },
+    canvas: { format: "png", width, height, rgba, sourceBytes },
     background,
     assets,
     manifest,
@@ -223,5 +266,51 @@ test("writes deterministic recomposition, checkerboard review, and exploded QA p
       rm(firstDirectory, { recursive: true, force: true }),
       rm(secondDirectory, { recursive: true, force: true }),
     ]);
+  }
+});
+
+test("recomposition restores cleared editable text and shapes in manifest z-order", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "semantic-qa-editable-"));
+  try {
+    const input = await fixture();
+    const records = await writeQaPreviews({ ...input, outDir: directory });
+    const recompositionRecord = records.find(({ kind }) => kind === "recomposition");
+    assert.ok(recompositionRecord);
+    const recomposition = await sharp(recompositionRecord.path)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const pixel = (x: number, y: number): number[] => {
+      const offset = (y * recomposition.info.width + x) * recomposition.info.channels;
+      return [...recomposition.data.subarray(offset, offset + 4)];
+    };
+    let textColorPixels = 0;
+    for (let y = 42; y < 56; y += 1) {
+      for (let x = 68; x < 92; x += 1) {
+        const [red, green, blue, alpha] = pixel(x, y);
+        if (red === 17 && green === 34 && blue === 51 && alpha === 255) {
+          textColorPixels += 1;
+        }
+      }
+    }
+
+    assert.deepEqual(
+      {
+        shapeRestored: pixel(28, 16).slice(0, 3).join(",") === "68,136,204",
+        lowerShapeStayedBehindAsset:
+          pixel(15, 16).slice(0, 3).join(",") === "35,57,77",
+        clearedTextRestored: textColorPixels >= 12,
+        sourceGlyphRestored:
+          pixel(88, 48).slice(0, 3).join(",") === "17,34,51",
+      },
+      {
+        shapeRestored: true,
+        lowerShapeStayedBehindAsset: true,
+        clearedTextRestored: true,
+        sourceGlyphRestored: true,
+      },
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });

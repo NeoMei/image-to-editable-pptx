@@ -20,6 +20,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
 } from "node:path";
 
 import sharp from "sharp";
@@ -949,21 +950,45 @@ function assertRequiredTextCount(
   }
 }
 
-function safeAssetOutput(outDir: string, assetPath: string): string {
+export type AssetOutputPathSemantics = {
+  resolve: (...paths: string[]) => string;
+  relative: (from: string, to: string) => string;
+  isAbsolute: (path: string) => boolean;
+  sep: string;
+};
+
+const hostAssetOutputPathSemantics: AssetOutputPathSemantics = {
+  resolve,
+  relative,
+  isAbsolute,
+  sep,
+};
+
+export function resolveSafeAssetOutputPath(
+  outDir: string,
+  assetPath: string,
+  pathSemantics: AssetOutputPathSemantics = hostAssetOutputPathSemantics,
+): string {
   if (!/^assets\/[a-zA-Z0-9._-]+\.png$/.test(assetPath)) {
     throw new Error(`Unsafe generated asset path: ${assetPath}`);
   }
-  const stagingRoot = resolve(outDir);
-  const output = resolve(stagingRoot, assetPath);
-  const stagedRelative = relative(stagingRoot, output);
+  const stagingRoot = pathSemantics.resolve(outDir);
+  const nativeAssetPath = assetPath.split("/").join(pathSemantics.sep);
+  const output = pathSemantics.resolve(stagingRoot, nativeAssetPath);
+  const stagedRelative = pathSemantics.relative(stagingRoot, output);
   if (
-    stagedRelative !== assetPath ||
-    isAbsolute(stagedRelative) ||
-    stagedRelative.startsWith("..")
+    stagedRelative !== nativeAssetPath ||
+    pathSemantics.isAbsolute(stagedRelative) ||
+    stagedRelative === ".." ||
+    stagedRelative.startsWith(`..${pathSemantics.sep}`)
   ) {
     throw new Error(`Generated asset escapes output staging: ${assetPath}`);
   }
   return output;
+}
+
+function safeAssetOutput(outDir: string, assetPath: string): string {
+  return resolveSafeAssetOutputPath(outDir, assetPath);
 }
 
 async function loadVerifiedCompletions(

@@ -8,6 +8,7 @@ import sharp, { type OverlayOptions } from "sharp";
 import type { SlideManifestV2 } from "../contracts.js";
 import type { BuiltAsset } from "../fidelity/build.js";
 import type { SourceCanvas } from "../image/source.js";
+import { buildTightTextMask } from "../image/text-mask.js";
 
 const CELL_WIDTH = 320;
 const CELL_HEIGHT = 220;
@@ -27,6 +28,76 @@ type AnnotatedAsset = BuiltAsset & {
   role: Extract<SlideManifestV2["elements"][number], { kind: "asset" }>["role"];
   generatedReviewOverlay?: Buffer;
 };
+
+type ManifestText = Extract<
+  SlideManifestV2["elements"][number],
+  { kind: "text" }
+>;
+type ManifestShape = Extract<
+  SlideManifestV2["elements"][number],
+  { kind: "shape" }
+>;
+
+// Recomposition must be deterministic on hosts that do not have Microsoft
+// YaHei. Source-derived glyph masks preserve the original script without a
+// font dependency. If a safe source mask cannot be recovered, these
+// repository-owned 5x7 glyphs provide a deterministic fallback: Latin letters
+// and digits remain readable while unsupported Unicode scalars use the stable
+// missing-glyph box. The QA raster verifies content presence, geometry, color,
+// rotation, alignment, and z-order, not PowerPoint font-level fidelity.
+const QA_GLYPHS: Readonly<Record<string, readonly string[]>> = {
+  " ": ["00000", "00000", "00000", "00000", "00000", "00000", "00000"],
+  "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
+  ".": ["00000", "00000", "00000", "00000", "00000", "01100", "01100"],
+  ":": ["00000", "01100", "01100", "00000", "01100", "01100", "00000"],
+  "?": ["01110", "10001", "00001", "00110", "00100", "00000", "00100"],
+  "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+  "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+  "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+  "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+  "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+  "5": ["11111", "10000", "10000", "11110", "00001", "00001", "11110"],
+  "6": ["01110", "10000", "10000", "11110", "10001", "10001", "01110"],
+  "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+  "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+  "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"],
+  A: ["01110", "10001", "10001", "11111", "10001", "10001", "10001"],
+  B: ["11110", "10001", "10001", "11110", "10001", "10001", "11110"],
+  C: ["01111", "10000", "10000", "10000", "10000", "10000", "01111"],
+  D: ["11110", "10001", "10001", "10001", "10001", "10001", "11110"],
+  E: ["11111", "10000", "10000", "11110", "10000", "10000", "11111"],
+  F: ["11111", "10000", "10000", "11110", "10000", "10000", "10000"],
+  G: ["01111", "10000", "10000", "10111", "10001", "10001", "01110"],
+  H: ["10001", "10001", "10001", "11111", "10001", "10001", "10001"],
+  I: ["01110", "00100", "00100", "00100", "00100", "00100", "01110"],
+  J: ["00001", "00001", "00001", "00001", "10001", "10001", "01110"],
+  K: ["10001", "10010", "10100", "11000", "10100", "10010", "10001"],
+  L: ["10000", "10000", "10000", "10000", "10000", "10000", "11111"],
+  M: ["10001", "11011", "10101", "10101", "10001", "10001", "10001"],
+  N: ["10001", "11001", "10101", "10011", "10001", "10001", "10001"],
+  O: ["01110", "10001", "10001", "10001", "10001", "10001", "01110"],
+  P: ["11110", "10001", "10001", "11110", "10000", "10000", "10000"],
+  Q: ["01110", "10001", "10001", "10001", "10101", "10010", "01101"],
+  R: ["11110", "10001", "10001", "11110", "10100", "10010", "10001"],
+  S: ["01111", "10000", "10000", "01110", "00001", "00001", "11110"],
+  T: ["11111", "00100", "00100", "00100", "00100", "00100", "00100"],
+  U: ["10001", "10001", "10001", "10001", "10001", "10001", "01110"],
+  V: ["10001", "10001", "10001", "10001", "10001", "01010", "00100"],
+  W: ["10001", "10001", "10001", "10101", "10101", "11011", "10001"],
+  X: ["10001", "10001", "01010", "00100", "01010", "10001", "10001"],
+  Y: ["10001", "10001", "01010", "00100", "00100", "00100", "00100"],
+  Z: ["11111", "00001", "00010", "00100", "01000", "10000", "11111"],
+};
+
+const MISSING_QA_GLYPH = [
+  "11111",
+  "10001",
+  "11011",
+  "10101",
+  "11011",
+  "10001",
+  "11111",
+] as const;
 
 function sha256(value: Buffer): string {
   return createHash("sha256").update(value).digest("hex");
@@ -177,18 +248,180 @@ async function validatedAssets(input: {
   );
 }
 
+function svgColor(value: string): string {
+  return `#${escapeXml(value.replace(/^#/, ""))}`;
+}
+
+function rgbColor(value: string): readonly [number, number, number] | undefined {
+  const normalized = value.replace(/^#/, "");
+  if (!/^[a-fA-F0-9]{6}$/.test(normalized)) return undefined;
+  return [
+    Number.parseInt(normalized.slice(0, 2), 16),
+    Number.parseInt(normalized.slice(2, 4), 16),
+    Number.parseInt(normalized.slice(4, 6), 16),
+  ];
+}
+
+function shapeLayerSvg(
+  canvas: SlideManifestV2["canvas"],
+  element: ManifestShape,
+): Buffer {
+  const { x, y, width, height } = element.bbox;
+  const stroke = element.strokeWidthPx === 0
+    ? 'stroke="none"'
+    : `stroke="${svgColor(element.strokeColor)}" stroke-width="${element.strokeWidthPx}"`;
+  let shape: string;
+  switch (element.shape) {
+    case "ellipse":
+      shape = `<ellipse cx="${x + width / 2}" cy="${y + height / 2}" rx="${width / 2}" ry="${height / 2}" fill="${svgColor(element.fillColor)}" ${stroke}/>`;
+      break;
+    case "line":
+      shape = `<line x1="${x}" y1="${y}" x2="${x + width}" y2="${y + height}" ${stroke}/>`;
+      break;
+    case "roundRect": {
+      const radius = Math.min(element.cornerRadiusPx, width / 2, height / 2);
+      shape = `<rect x="${x}" y="${y}" width="${width}" height="${height}" rx="${radius}" ry="${radius}" fill="${svgColor(element.fillColor)}" ${stroke}/>`;
+      break;
+    }
+    case "rect":
+      shape = `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${svgColor(element.fillColor)}" ${stroke}/>`;
+      break;
+  }
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}" viewBox="0 0 ${canvas.width} ${canvas.height}" shape-rendering="geometricPrecision">${shape}</svg>`,
+  );
+}
+
+function qaGlyph(character: string): readonly string[] {
+  return QA_GLYPHS[character.toLocaleUpperCase("en-US")] ?? MISSING_QA_GLYPH;
+}
+
+function textLayerSvg(
+  canvas: SlideManifestV2["canvas"],
+  element: ManifestText,
+): Buffer {
+  const lines = element.text.replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n");
+  const cell = element.fontSizePx / 7;
+  const glyphWidth = cell * 5;
+  const glyphGap = cell + (element.charSpacingPx ?? 0);
+  const lineGap = cell * 1.4;
+  const blockHeight = lines.length * element.fontSizePx + (lines.length - 1) * lineGap;
+  const top = element.bbox.y + (element.bbox.height - blockHeight) / 2;
+  const rectangles: string[] = [];
+  for (const [lineIndex, line] of lines.entries()) {
+    const characters = [...line];
+    const lineWidth = characters.length === 0
+      ? 0
+      : characters.length * glyphWidth + (characters.length - 1) * glyphGap;
+    const left = element.align === "center"
+      ? element.bbox.x + (element.bbox.width - lineWidth) / 2
+      : element.align === "right"
+        ? element.bbox.x + element.bbox.width - lineWidth
+        : element.bbox.x;
+    for (const [characterIndex, character] of characters.entries()) {
+      const glyphLeft = left + characterIndex * (glyphWidth + glyphGap);
+      for (const [rowIndex, row] of qaGlyph(character).entries()) {
+        for (const [columnIndex, pixel] of [...row].entries()) {
+          if (pixel !== "1") continue;
+          const expansion = element.bold === true ? cell * 0.12 : 0;
+          rectangles.push(
+            `<rect x="${glyphLeft + columnIndex * cell - expansion / 2}" y="${top + lineIndex * (element.fontSizePx + lineGap) + rowIndex * cell - expansion / 2}" width="${cell + expansion}" height="${cell + expansion}"/>`,
+          );
+        }
+      }
+    }
+  }
+  const centerX = element.bbox.x + element.bbox.width / 2;
+  const centerY = element.bbox.y + element.bbox.height / 2;
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}" viewBox="0 0 ${canvas.width} ${canvas.height}" shape-rendering="crispEdges">
+      <defs><clipPath id="text-box"><rect x="${element.bbox.x}" y="${element.bbox.y}" width="${element.bbox.width}" height="${element.bbox.height}"/></clipPath></defs>
+      <g transform="rotate(${element.rotation} ${centerX} ${centerY})" clip-path="url(#text-box)" fill="${svgColor(element.color)}">${rectangles.join("")}</g>
+    </svg>`,
+  );
+}
+
+async function sourceTextLayer(
+  canvas: SourceCanvas,
+  element: ManifestText,
+): Promise<Buffer | undefined> {
+  const color = rgbColor(element.color);
+  if (color === undefined) return undefined;
+  try {
+    const tightMask = await buildTightTextMask(
+      canvas.sourceBytes,
+      element,
+      { dilationPx: 0 },
+    );
+    const decodedMask = await sharp(tightMask.mask)
+      .removeAlpha()
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (
+      decodedMask.info.width !== canvas.width ||
+      decodedMask.info.height !== canvas.height
+    ) {
+      return undefined;
+    }
+    const rgba = Buffer.alloc(canvas.width * canvas.height * 4);
+    for (let index = 0; index < canvas.width * canvas.height; index += 1) {
+      const alpha = decodedMask.data[index * decodedMask.info.channels]!;
+      if (alpha === 0) continue;
+      rgba.set([color[0], color[1], color[2], alpha], index * 4);
+    }
+    return sharp(rgba, {
+      raw: { width: canvas.width, height: canvas.height, channels: 4 },
+    }).png().toBuffer();
+  } catch {
+    // The editable-text builder applies the same conservative mask gate. A
+    // deterministic vector fallback is safer than trusting host font lookup.
+    return undefined;
+  }
+}
+
 async function recompositionPreview(
-  background: Buffer,
+  input: {
+    canvas: SourceCanvas;
+    background: Buffer;
+    manifest: SlideManifestV2;
+  },
   assets: readonly AnnotatedAsset[],
 ): Promise<Buffer> {
-  return sharp(background)
-    .composite(
-      assets.map((asset) => ({
-        input: asset.image,
-        left: Math.floor(asset.bbox.x),
-        top: Math.floor(asset.bbox.y),
-      })),
-    )
+  const assetsById = new Map(assets.map((asset) => [asset.candidateId, asset]));
+  const elements = input.manifest.elements
+    .map((element, index) => ({ element, index }))
+    .sort(
+      (left, right) =>
+        left.element.zIndex - right.element.zIndex || left.index - right.index,
+    );
+  const layers: OverlayOptions[] = await Promise.all(elements.map(async ({ element }) => {
+    switch (element.kind) {
+      case "asset": {
+        const asset = assetsById.get(element.id);
+        if (asset === undefined) {
+          throw new Error(`QA asset is missing from recomposition: ${element.id}`);
+        }
+        return {
+          input: asset.image,
+          left: Math.floor(element.bbox.x),
+          top: Math.floor(element.bbox.y),
+        };
+      }
+      case "shape":
+        return { input: shapeLayerSvg(input.manifest.canvas, element), left: 0, top: 0 };
+      case "text": {
+        const sourceLayer = await sourceTextLayer(input.canvas, element);
+        return {
+          input: sourceLayer ?? textLayerSvg(input.manifest.canvas, element),
+          left: 0,
+          top: 0,
+        };
+      }
+    }
+  }));
+  return sharp(input.background)
+    .composite(layers)
     .png()
     .toBuffer();
 }
@@ -383,7 +616,7 @@ export async function writeQaPreviews(input: {
   const assets = await validatedAssets(input);
   await mkdir(input.outDir, { recursive: true });
   const previews = await Promise.all([
-    recompositionPreview(input.background, assets),
+    recompositionPreview(input, assets),
     layerReviewPreview(assets),
     explodedPreview({ ...input, assets }),
   ]);
