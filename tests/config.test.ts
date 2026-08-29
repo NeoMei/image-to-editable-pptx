@@ -31,6 +31,7 @@ test("accepts a valid workspace DNS label and derives exact Beijing API URLs", (
     config.dashscopeCompatibleBase,
     "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
   );
+  assert.equal(config.maxRegionAnalysis, 8);
 
   for (const [base, pathname] of [
     [config.dashscopeApiBase, "/api/v1"],
@@ -48,6 +49,35 @@ test("accepts a valid workspace DNS label and derives exact Beijing API URLs", (
     assert.equal(url.pathname, pathname);
     assert.equal(url.search, "");
     assert.equal(url.hash, "");
+  }
+});
+
+test("accepts only strict integer regional analysis limits from zero through eight", () => {
+  for (const [configured, expected] of [
+    ["0", 0],
+    ["8", 8],
+  ] as const) {
+    assert.equal(
+      loadConfig({
+        DASHSCOPE_API_KEY: "secret",
+        DASHSCOPE_WORKSPACE_ID: "workspace-123",
+        MAX_REGION_ANALYSIS: configured,
+      }).maxRegionAnalysis,
+      expected,
+    );
+  }
+
+  for (const configured of ["-1", "9", "1.5", "01", " 1", "1 ", ""]) {
+    assert.throws(
+      () =>
+        loadConfig({
+          DASHSCOPE_API_KEY: "secret",
+          DASHSCOPE_WORKSPACE_ID: "workspace-123",
+          MAX_REGION_ANALYSIS: configured,
+        }),
+      /MAX_REGION_ANALYSIS/,
+      configured,
+    );
   }
 });
 

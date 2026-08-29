@@ -2,6 +2,7 @@ import {
   CanvasSizeSchema,
   type CanvasSize,
 } from "../scene/contracts.js";
+import type { RefinementRequest } from "../scene/refine.js";
 
 export function createScenePrompt(canvas: CanvasSize): string {
   const owningCanvas = CanvasSizeSchema.parse(canvas);
@@ -19,4 +20,24 @@ Describe partial occlusion with occludes and explicit layer order with in-front-
 relation kind must be one of: belongs-to | connected-to | carries-text | occludes | in-front-of | behind.
 For every relation return id, kind, from, to, and confidence, and reference only node IDs present in this response.
 Labels are audit-only descriptions for human review. They must not imply extraction or planning decisions; encode decisions only with roles, relations, geometry, confidence, zIndex, and extractionHints.`;
+}
+
+export function createRegionalScenePrompt(
+  canvas: CanvasSize,
+  request: RefinementRequest,
+): string {
+  const owningCanvas = CanvasSizeSchema.parse(canvas);
+  return `Analyze only the supplied regional crop and return JSON only, with no prose or Markdown.
+The supplied image is exactly ${owningCanvas.width} x ${owningCanvas.height} pixels and contains no pixels outside the requested crop.
+Refine only these target node IDs: ${JSON.stringify(request.targetNodeIds)}.
+The generic ambiguity reason is ${JSON.stringify(request.reason)}.
+Return exactly {"nodes":[...],"relations":[...]} with no additional fields.
+Use normalized thousandths from 0 through 1000 relative to this crop, never the complete slide.
+Return exactly one background node covering the complete crop. It is coordinate context only and will not replace the slide background.
+Return only replacement nodes and relations for the target subgraph. Preserve a target ID for a one-to-one replacement; use stable new IDs only when splitting or joining visible parts requires it.
+Do not return text nodes. OCR and all nodes outside the target subgraph are authoritative and must not be replaced, duplicated, or inferred.
+For every node return id, role, bbox, confidence, label, extractionHints, and optional zIndex.
+role must be one of: background | text-backing | foreground-object | connector | compound-group | decoration.
+For every relation return id, kind, from, to, and confidence. relation kind must be one of: belongs-to | connected-to | occludes | in-front-of | behind.
+Reference only node IDs present in this regional response. Labels are audit-only; make decisions only from visible geometry, roles, relations, confidence, zIndex, and extractionHints.`;
 }

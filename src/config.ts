@@ -8,6 +8,7 @@ export type AppConfig = {
   editModel: "wanx2.1-imageedit";
   requestTimeoutMs: number;
   pollIntervalMs: number;
+  maxRegionAnalysis?: number;
 };
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -65,6 +66,14 @@ export function loadConfig(env: Environment = process.env): AppConfig {
     );
   }
 
+  const configuredMaxRegionAnalysis = env.MAX_REGION_ANALYSIS;
+  if (
+    configuredMaxRegionAnalysis !== undefined &&
+    !/^[0-8]$/.test(configuredMaxRegionAnalysis)
+  ) {
+    throw new Error("MAX_REGION_ANALYSIS must be an integer from 0 through 8");
+  }
+
   return {
     apiKey,
     workspaceId,
@@ -78,5 +87,9 @@ export function loadConfig(env: Environment = process.env): AppConfig {
     editModel: "wanx2.1-imageedit",
     requestTimeoutMs: 120_000,
     pollIntervalMs: 2_000,
+    maxRegionAnalysis:
+      configuredMaxRegionAnalysis === undefined
+        ? 8
+        : Number(configuredMaxRegionAnalysis),
   };
 }

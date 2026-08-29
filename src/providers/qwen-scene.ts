@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import sharp from "sharp";
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
@@ -11,7 +12,15 @@ import {
   type SceneGraph,
   type SceneNode,
 } from "../scene/contracts.js";
-import { createScenePrompt } from "./qwen-scene-prompt.js";
+import {
+  mergeRefinedSubgraph,
+  selectRefinementRequests,
+  type RefinementResult,
+} from "../scene/refine.js";
+import {
+  createRegionalScenePrompt,
+  createScenePrompt,
+} from "./qwen-scene-prompt.js";
 import type { ProviderResponseObserver } from "./response-observer.js";
 
 const WORKSPACE_ID_PATTERN =
@@ -185,6 +194,16 @@ export async function analyzeScene(
   observer?: ProviderResponseObserver,
 ): Promise<SceneGraph> {
   const prompt = createScenePrompt(canvas);
+  return requestSceneGraph(image, canvas, prompt, config, observer);
+}
+
+async function requestSceneGraph(
+  image: Buffer,
+  canvas: CanvasSize,
+  prompt: string,
+  config: AppConfig,
+  observer?: ProviderResponseObserver,
+): Promise<SceneGraph> {
   const baseURL = requireSafeCompatibleBase(config);
   let outerHttpParseError: Error | undefined;
   const client = new OpenAI({
@@ -246,4 +265,56 @@ export async function analyzeScene(
     await observer?.recordParseError(error);
     throw error;
   }
+}
+
+export type RegionalRefinementResult = RefinementResult & {
+  warnings: string[];
+};
+
+export async function refineSceneRegions(
+  image: Buffer,
+  graph: SceneGraph,
+  config: AppConfig,
+  observer?: ProviderResponseObserver,
+): Promise<RegionalRefinementResult> {
+  const requests = selectRefinementRequests(
+    graph,
+    graph.canvas,
+    config.maxRegionAnalysis ?? 8,
+  );
+  const warnings: string[] = [];
+  SceneGraphSchema.parse(graph);
+  let refinedGraph = graph;
+
+  for (const request of requests) {
+    try {
+      const crop = await sharp(image)
+        .extract({
+          left: request.crop.x,
+          top: request.crop.y,
+          width: request.crop.width,
+          height: request.crop.height,
+        })
+        .png()
+        .toBuffer();
+      const cropCanvas = {
+        width: request.crop.width,
+        height: request.crop.height,
+      };
+      const localGraph = await requestSceneGraph(
+        crop,
+        cropCanvas,
+        createRegionalScenePrompt(cropCanvas, request),
+        config,
+        observer,
+      );
+      refinedGraph = mergeRefinedSubgraph(refinedGraph, request, localGraph);
+    } catch {
+      warnings.push(
+        `regional_refinement_rejected:${request.reason}:${request.targetNodeIds.join(",")}`,
+      );
+    }
+  }
+
+  return { graph: refinedGraph, requests, warnings };
 }
