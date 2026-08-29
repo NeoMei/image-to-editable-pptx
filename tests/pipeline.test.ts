@@ -29,6 +29,7 @@ import {
 import type {
   CandidateDecision,
   FidelityPlan,
+  OcrResult,
   SlideElement,
 } from "../src/contracts.js";
 import { readSemanticAssetPublication } from "../src/fidelity/build.js";
@@ -690,7 +691,7 @@ test("preserves live-like analysis provenance through a split build", async () =
   }
 });
 
-test("builds offline from a verified v2 package without an external source image", async () => {
+test("builds offline from verified v2 RGBA and restores its Chinese QA glyph", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ppt-pipeline-v2-offline-"));
   const analysisDir = join(directory, "analysis");
   const outDir = join(directory, "output");
@@ -719,6 +720,13 @@ test("builds offline from a verified v2 package without an external source image
     };
     paint(rear, [43, 109, 168, 255]);
     paint(front, [230, 93, 22, 255]);
+    const textBox = { x: 40, y: 120, width: 24, height: 20 };
+    for (let y = 123; y <= 137; y += 1) {
+      rgba.set([35, 57, 77, 255], (y * width + 60) * 4);
+    }
+    for (let x = 52; x <= 61; x += 1) {
+      rgba.set([35, 57, 77, 255], (130 * width + x) * 4);
+    }
     const sourceBytes = await sharp(rgba, {
       raw: { width, height, channels: 4 },
     }).png().toBuffer();
@@ -729,7 +737,18 @@ test("builds offline from a verified v2 package without an external source image
       rgba,
       sourceBytes,
     };
-    const packageOcr = { lines: [] };
+    const packageOcr: OcrResult = {
+      lines: [{
+        text: "文",
+        bbox: textBox,
+        quad: [
+          { x: textBox.x, y: textBox.y },
+          { x: textBox.x + textBox.width, y: textBox.y },
+          { x: textBox.x + textBox.width, y: textBox.y + textBox.height },
+          { x: textBox.x, y: textBox.y + textBox.height },
+        ],
+      }],
+    };
     const packageScene: SceneGraph = {
       graphVersion: 1,
       canvas: { width, height },
@@ -1012,6 +1031,31 @@ test("builds offline from a verified v2 package without an external source image
       "exploded-preview.png",
     ];
     await Promise.all(qaNames.map((name) => access(join(outDir, name))));
+    const [cleanBackground, recompositionPreview] = await Promise.all([
+      sharp(join(outDir, "clean-background.png"))
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      sharp(join(outDir, "recomposition-preview.png"))
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+    ]);
+    const glyphPixel = (image: typeof cleanBackground): number[] => {
+      const offset = (130 * image.info.width + 60) * image.info.channels;
+      return [...image.data.subarray(offset, offset + 4)];
+    };
+    assert.deepEqual(
+      {
+        cleanBackground: glyphPixel(cleanBackground),
+        sourceFaithfulQa: glyphPixel(recompositionPreview),
+      },
+      {
+        cleanBackground: [247, 243, 233, 255],
+        sourceFaithfulQa: [35, 57, 77, 255],
+      },
+      "offline QA must recover the verified RGBA stroke beyond the generic placeholder box",
+    );
     const runLedger = JSON.parse(
       await readFile(result.ledgerPath, "utf8"),
     ) as {

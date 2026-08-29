@@ -342,6 +342,7 @@ function textLayerSvg(
 }
 
 async function sourceTextLayer(
+  verifiedSourceImage: Buffer,
   canvas: SourceCanvas,
   element: ManifestText,
 ): Promise<Buffer | undefined> {
@@ -349,7 +350,7 @@ async function sourceTextLayer(
   if (color === undefined) return undefined;
   try {
     const tightMask = await buildTightTextMask(
-      canvas.sourceBytes,
+      verifiedSourceImage,
       element,
       { dilationPx: 0 },
     );
@@ -395,6 +396,17 @@ async function recompositionPreview(
       (left, right) =>
         left.element.zIndex - right.element.zIndex || left.index - right.index,
     );
+  const verifiedSourceImage = elements.some(({ element }) => element.kind === "text")
+    ? await sharp(input.canvas.rgba, {
+        raw: {
+          width: input.canvas.width,
+          height: input.canvas.height,
+          channels: 4,
+        },
+      })
+        .png()
+        .toBuffer()
+    : undefined;
   const layers: OverlayOptions[] = await Promise.all(elements.map(async ({ element }) => {
     switch (element.kind) {
       case "asset": {
@@ -411,7 +423,11 @@ async function recompositionPreview(
       case "shape":
         return { input: shapeLayerSvg(input.manifest.canvas, element), left: 0, top: 0 };
       case "text": {
-        const sourceLayer = await sourceTextLayer(input.canvas, element);
+        const sourceLayer = await sourceTextLayer(
+          verifiedSourceImage!,
+          input.canvas,
+          element,
+        );
         return {
           input: sourceLayer ?? textLayerSvg(input.manifest.canvas, element),
           left: 0,
