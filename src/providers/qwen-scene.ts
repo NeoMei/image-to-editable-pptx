@@ -118,6 +118,26 @@ const ProviderScenePayloadSchema = z
     }
   });
 
+type ProviderScenePayload = z.infer<typeof ProviderScenePayloadSchema>;
+
+function normalizeProviderRelations(
+  nodes: ProviderScenePayload["nodes"],
+  relations: ProviderScenePayload["relations"],
+): ProviderScenePayload["relations"] {
+  const roleById = new Map(nodes.map((node) => [node.id, node.role]));
+  return relations.map((relation) => {
+    if (relation.kind !== "carries-text") return relation;
+    if (roleById.get(relation.from) === "text-backing") return relation;
+    if (roleById.get(relation.to) !== "text") return relation;
+    return {
+      ...relation,
+      kind: "belongs-to" as const,
+      from: relation.to,
+      to: relation.from,
+    };
+  });
+}
+
 function requireSafeCompatibleBase(config: AppConfig): string {
   if (!WORKSPACE_ID_PATTERN.test(config.workspaceId)) {
     throw new Error("Expected a safe Alibaba China compatible base URL");
@@ -249,6 +269,10 @@ export function parseQwenSceneContent(
 
   try {
     const parsed = ProviderScenePayloadSchema.parse(payload);
+    const relations = normalizeProviderRelations(
+      parsed.nodes,
+      parsed.relations,
+    );
     const nodes = parsed.nodes.map(({ bbox, zIndex, ...node }): SceneNode => {
       const normalizedNode = {
         ...node,
@@ -270,7 +294,7 @@ export function parseQwenSceneContent(
       graphVersion: 1,
       canvas: CanvasSizeSchema.parse(canvas),
       nodes,
-      relations: parsed.relations,
+      relations,
     };
     SceneGraphSchema.parse(graph);
     return graph;

@@ -402,6 +402,38 @@ test("coerces object-shaped provider extractionHints to string arrays", async ()
   assert.deepEqual(graph.nodes[1]?.extractionHints, ["badge"]);
 });
 
+test("normalizes carries-text from non-backing objects to belongs-to", async () => {
+  const fixture = await readFixture();
+  const payload = parseFixturePayload(fixture);
+  payload.relations.push({
+    id: "relation-icon-text",
+    kind: "carries-text",
+    from: "object-1",
+    to: "text-1",
+    confidence: 0.9,
+  });
+
+  const graph = parseQwenSceneContent(JSON.stringify(payload), {
+    width: 1377,
+    height: 811,
+  });
+  const normalized = graph.relations.find(
+    (relation) => relation.id === "relation-icon-text",
+  );
+  assert.deepEqual(normalized, {
+    id: "relation-icon-text",
+    kind: "belongs-to",
+    from: "text-1",
+    to: "object-1",
+    confidence: 0.9,
+  });
+  const backingCarriesText = graph.relations.find(
+    (relation) => relation.kind === "carries-text",
+  );
+  assert.ok(backingCarriesText);
+  assert.equal(backingCarriesText.from, "backing-1");
+});
+
 test("retries a truncated scene response once with corrective instructions", async () => {
   const fixture = await readFixture();
   const content = fixture.choices[0]!.message.content;

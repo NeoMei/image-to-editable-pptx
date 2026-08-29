@@ -19,6 +19,7 @@ Use compound-group only when visible connectivity or a shared contour means the 
 Use text-backing for a visible surface that carries text and link it to the text node with carries-text. OCR is authoritative for text content and geometry; Vision text labels must not replace or duplicate OCR output.
 Describe partial occlusion with occludes and explicit layer order with in-front-of or behind. Do not infer hidden content that is not visible.
 relation kind must be one of: belongs-to | connected-to | carries-text | occludes | in-front-of | behind.
+Use carries-text only from a text-backing surface to the text it carries; when text sits inside a foreground object, link the text node to the object with belongs-to instead.
 For every relation return id, kind, from, to, and confidence, and reference only node IDs present in this response.
 Labels are audit-only descriptions for human review. They must not imply extraction or planning decisions; encode decisions only with roles, relations, geometry, confidence, zIndex, and extractionHints.`;
 }
