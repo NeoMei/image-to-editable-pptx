@@ -1,7 +1,7 @@
 {
   "name": "image-to-editable-pptx",
   "version": "0.1.1",
-  "description": "Convert slide images into high-fidelity PPTX files with editable text and selected elements.",
+  "description": "Reconstruct PNG and JPEG slide images as high-fidelity PPTX files with editable text and safe semantic layers.",
   "author": "NeoMei",
   "license": "MIT",
   "repository": {
@@ -18,6 +18,16 @@
   ],
   "private": true,
   "type": "module",
+  "files": [
+    "src/",
+    "scripts/",
+    "skills/",
+    ".codex-plugin/",
+    ".agents/plugins/marketplace.json",
+    "README.md",
+    "LICENSE",
+    "tsconfig.json"
+  ],
   "engines": { "node": ">=22.6" },
   "scripts": {
     "build": "tsc -p tsconfig.json",

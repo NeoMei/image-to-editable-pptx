@@ -1,148 +1,110 @@
 # Image to Editable PPTX
 
-> High-fidelity image-to-editable slides
->
-> 高保真图片式 PPT 可编辑重构
+> High-fidelity semantic reconstruction for image-based slides
+> 高保真地把图片式幻灯片重构为可编辑 PPTX
 
-这个 Node.js 原型把一张 1280×720 的幻灯片 PNG 重建为单页 16:9 PPTX：OCR 文字是必须成功的可编辑层，只有通过透明提取、文字遮罩重叠、本地修复和重组校验的图标才成为可移动 PNG 资产；面板、色条和纹理等结构家具保留在背景中。背景修复完全在本地完成，默认路径不调用万相或其他图像编辑模型。当前验收目标是《深入理解 AI-Agent》第 7 页，其 10 个 OCR 文字候选必须全部成为可编辑文字。
+Image to Editable PPTX 先由阿里云百炼 OCR 和视觉模型生成通用语义场景图，再在本地把可靠的文字、独立图标、复合前景和文字底板重构成可编辑层。重组或局部验证不达标的候选不会被强行拆出，而是保留在背景中，优先保住视觉保真度。
 
-0.1.1 起，Vision 会优先返回独立可移动图标，但会把由箭头、连线或共享轮廓构成的复合图标作为一个完整资产。本地提取使用 4–32 px 渐进式裁剪搜索，并为图标边缘保留去底色污染的半透明抗锯齿像素。包围盒只有在 IoU 达到强重叠阈值时才合并，以避免同一面板中的相邻图标被误合并。
+这不是 Canva Magic Layers 的调用器，也不会把位图导入冒充可编辑。只有实际写入 PPTX 的文字对象和 PNG 资产才算可编辑层。
+
+## 输入范围
+
+- 支持单张 PNG、JPG 或 JPEG（按 magic bytes 识别，不依赖扩展名）；
+- 文件最大 50 MiB；
+- 宽、高各为 64–8192 px，总像素不超过 40,000,000；
+- 最长边与最短边比不超过 56:1；
+- 仅处理单帧、单页图片，不接受动画或多页文件。
+
+PPTX 会按源图宽高比创建自定义页面，而不是强制转为 16:9。
 
 ## 安装 Codex 插件
-
-添加这个 GitHub marketplace，再安装插件：
 
 ```bash
 codex plugin marketplace add NeoMei/image-to-editable-pptx
 codex plugin add image-to-editable-pptx@image-to-editable-pptx
 ```
 
-安装后重启 Codex，并在新任务中说“把这张幻灯片图片转成高保真可编辑 PPTX”。首次运行需要 Node.js 22.6 或更高版本，插件会在本地安装锁定的 npm 依赖。新分析还需要在运行环境中配置 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_WORKSPACE_ID`；凭证不应写入仓库或命令文本。
+安装后重启 Codex。首次运行需要 Node.js 22.6 或更高版本，并在插件根目录用 `npm ci --include=dev` 安装锁定依赖。
 
 ## 安装 OpenCode Skill
 
-OpenCode 与 Codex Marketplace 的插件安装协议不兼容，不能使用上面的 `codex plugin` 命令。不过 OpenCode 原生支持 `.agents/skills/<name>/SKILL.md`，因此可以把同一仓库作为全局 Agent Skill 使用：
+OpenCode 与 Codex Marketplace 的插件安装协议不兼容，但可以使用同一个 Agent Skill：
 
 ```bash
 git clone https://github.com/NeoMei/image-to-editable-pptx.git "$HOME/.local/share/image-to-editable-pptx"
 cd "$HOME/.local/share/image-to-editable-pptx"
-npm ci
+npm ci --include=dev
 mkdir -p "$HOME/.agents/skills"
 ln -s "$PWD/skills/image-to-editable-pptx" "$HOME/.agents/skills/image-to-editable-pptx"
 opencode debug skill
 ```
 
-在最后一条命令的输出中确认存在 `image-to-editable-pptx`，然后重启 OpenCode，并说“把这张幻灯片图片转成高保真可编辑 PPTX”。如果目标链接已经存在，不要覆盖；先确认它是否指向本仓库。更新时进入克隆目录执行 `git pull --ff-only` 和 `npm ci`。运行要求及百炼环境变量与 Codex 版本相同。
+如果目标链接已存在，不要盲目覆盖；先确认它是否指向本仓库。更新时在克隆目录执行 `git pull --ff-only` 和 `npm ci --include=dev`。
 
-## 准备
+## 百炼凭证
 
-需要 Node.js 22.6 或更高版本（测试脚本使用该版本起支持的原生 glob），然后安装依赖：
-
-```bash
-npm ci
-```
-
-在阿里云百炼中创建 API Key，并取得该 Key 所属的业务空间 ID。可参考阿里云的 [API Key 设置](https://help.aliyun.com/zh/model-studio/get-api-key) 和 [权限管理](https://help.aliyun.com/zh/model-studio/permission-management-overview)。
+只有 `analyze` 和 `run` 会发起网络请求，两者需要进程环境中的：
 
 ```bash
 export DASHSCOPE_API_KEY='<your-api-key>'
 export DASHSCOPE_WORKSPACE_ID='<your-workspace-id>'
 ```
 
-`DASHSCOPE_WORKSPACE_ID` 必须是可用作 DNS 单个 label 的字符串。服务地址由代码固定组成为该空间的阿里云北京地域 HTTPS 地址；不支持从命令行覆盖基础 URL。不要把密钥写入代码、README、录制文件或提交到 Git。
+凭证只能通过环境变量提供。CLI 不接受 API Key、workspace ID、Authorization 或 provider base URL 参数；不要把凭证写入命令、仓库、截图或录制文件。
 
-## CLI
-
-`analyze` 和 `run` 会在发起网络请求前验证两个必需环境变量；纯本地 `build` 不读取或要求 live 凭证。
+## CLI：网络分析与离线构建
 
 ```bash
-# 只做 OCR 和视觉分析；输出目录必须不存在或为空
-npm run cli -- analyze --image <png> --out <analysis-dir> [--record]
+# 生成 self-contained analysis package v2；会调用百炼
+npm run cli -- analyze <source.png> --out <analysis-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
 
-# 使用已有分析结果做本地保真分层、背景修复和 PPTX 导出
-npm run cli -- build --image <png> --analysis <analysis-dir> --out <output-dir> [--required-text-count <n>]
+# 只读 analysis package v2 完成分层、修复、QA 和 PPTX 导出；不读取源图，不读取凭证，不访问网络
+npm run cli -- build --analysis <analysis-dir> --out <output-dir> [--required-text-count <n>]
 
-# 一次完成 analyze 和 build
-npm run cli -- run --image <png> --out <output-dir> [--required-text-count <n>] [--record]
+# 一次完成 analyze + build
+npm run cli -- run <source.jpg> --out <output-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--required-text-count <n>] [--record]
+
+# 仅用于旧 analysis package v1；v1 不自带源像素，因此必须再提供原图
+npm run cli -- build-v1 <source.jpeg> --analysis <legacy-analysis-dir> --out <output-dir> [--required-text-count <n>]
 ```
 
-不论是否加 `--record`，分析目录都会保存经 schema 验证和递归脱敏后的统一 `ocr.json`/`vision.json`，以及 `analysis-ledger.json`。该 analysis ledger 保存 live/replay 模式、模型 ID、OCR/Vision/总分析耗时、告警、record 标记和输入/结果 SHA-256。后续 `build` 会先验证该 ledger 与三项哈希，再将其 provenance 原样带入最终 run ledger，不会把 split build 伪记成 replay/0 ms。为避免混入旧分析结果，独立 `analyze` 只接受新目录或空目录。
+`--max-region-analysis` 的默认值为 8，`--max-occlusion-completions` 的默认值为 4。两者只接受所示范围内的严格整数；设为 `0` 可分别禁用局部视觉精修或遮挡补全。不存在 unlimited 模式。离线 `build`/`build-v1` 拒绝这两个网络阶段参数和 `--record`。为兼容旧脚本，`analyze`/`run` 仍接受 `--image <path>` 别名，但新文档统一使用位置图片参数。
 
-加 `--record` 时，还会创建 `recordings/ocr.json` 和 `recordings/vision.json`：它们是供审计和离线 replay 的统一、可验证快照，不是包含 HTTP 头的原始网络包。Live 与内部 replay 模式都支持该行为；快照不包含 API Key、Authorization 或 DashScope 头。
+## analysis package v2
 
-第 7 页的固定验收命令是：
+`analyze` 在新目录中写入经 schema 验证和 SHA-256 绑定的自包含分析包，包括 `source.rgba`、`ocr.json`、`scene-graph.json`、局部精修/遮挡补全资产及 `analysis-ledger.json`。源图的标准 RGBA 像素已包含在包内，所以 v2 `build` 只需 analysis 目录。路径、哈希、尺寸或资产库存不一致时，离线构建会失败而不是使用未验证文件。
 
-```bash
-bash scripts/accept-slide-07.sh
-```
+`analyze` 默认发起 1 次 OCR 和 1 次整页视觉分析，然后最多进行 8 次局部视觉精修和 4 次遮挡补全。请先确认源图内容符合组织的数据合规要求。
 
-脚本使用已检查的源 PNG 绝对路径，并输出到 `output/slide-07`。如果任一凭证缺失，脚本会在调用 `npm`、进而在任何网络访问之前失败。
+## 输出与 QA 复核
 
-## 输出
+v2 `run` 或 `build` 会导出 manifest v2，成功输出主要包含：
 
-`run` 或 `build` 的输出目录包含：
+- `manifest.json`：`manifestVersion: 2` 的元素、关系、z-order、provenance 和 `reviewRequired`；
+- `clean-background.png` 与 `removal-mask.png`：只包含已接受候选的背景修复和合并遮罩；
+- `assets/*.png`：验证通过的独立/复合前景资产；
+- `recomposition-preview.png`：所有已接受层的整页重组结果；
+- `layer-review.png`：透明棋盘背景上的分层联系表；
+- `exploded-preview.png`：对已接受层做稳定偏移的展开图；
+- `run-ledger.json`：请求计数、决策、告警、路径和主要产物哈希；
+- `slide-editable.pptx` 或基于旧 v1 源图名生成的 `*-editable.pptx`。
 
-- `ocr.json`：统一 OCR 文本行和坐标；
-- `vision.json`：统一视觉元素候选；
-- `analysis-ledger.json`：经验证的分析 provenance、耗时、模型与哈希；
-- `recordings/*.json`：仅在 `--record` 时产生的脱敏、统一 replay 快照；
-- `.image-to-editable-pptx-output.json`：版本化的 pipeline ownership marker，用于安全识别可由本工具替换的输出目录；旧版 `.image-ppt-layers-output.json` 仍可识别，下次成功重跑时会迁移为新标记；
-- `manifest.json`：manifest v1；默认保真路径只包含已接受的 OCR 文字和透明图标，不包含结构形状；
-- `removal-mask.png`：已接受文字和图标遮罩的逐像素并集，不包含被拒绝图标；
-- `clean-background.png`：对已接受遮罩做确定性本地修复后的背景；
-- `assets/*.png`：通过全部安全门、可单独移动和缩放的透明图标；矩形资产不会发布；
-- `<source-name>-editable.pptx`：可编辑的宽屏 PowerPoint；
-- `run-ledger.json`：ledger v2，包含每个文字/图标候选的接受或保留背景决策、修复/重组指标、模型 ID、阶段耗时、告警、输出路径及所有主要产物的 SHA-256；默认路径的 `taskIds` 为空。
+因遮挡补全而包含生成隐藏像素的资产会在 manifest 中标记 `reviewRequired: true`，并仅在 QA 预览中添加可见的 generated-region 复核标记；导出的 PNG 资产和 PPTX 不会被该标记污染。交付前应对照源图查看三张 QA 图，并在 PowerPoint/WPS 中移动代表性前景、编辑文字、撤销后重新打开确认。
 
-ledger、ownership marker 和 JSON 录制使用递归脱敏写入器，并以仅当前用户可读写的 `0600` 权限创建；不会写入 API Key、`Authorization`、access token、Bearer 凭证、带签名查询的 URL 或 `x-dashscope-*`/`x-acs-*`/`x-oss-*` 头。Live OCR/Vision 响应会在解析前做值级脱敏和确定性大小/深度/节点界限后写入 staging；无法解析为 JSON 时也复用同一套文本脱敏规则。正常解析后该临时原始响应被移除，如果 schema/JSON 解析失败，脱敏的 `raw-responses/<provider>.json` 与 `parse-errors/<provider>.json` 会一起留在失败运行目录中。
+文字底板和色条如果被安全拆出，会作为可移动 PNG 位于可编辑文字下方；本工具不会把它们伪装成 PowerPoint 原生形状。无法稳定归属、遮罩或修复的图标、底板、连线和装饰将 fallback 到背景，不会为了可移动性牺牲原图。
 
-`run` 和独立 `build` 都不会直接改写固定输出目录。它们先在目标的同级文件系统中建立 staging 目录；只有 clean background、PPTX、ledger、ownership marker 和所有中间产物都完成后才提升为目标。重跑失败时，上一个成功目标保持逐字节不变，本次失败产物保留在 `<output-dir>.failed-runs/`，不会与成功产物混淆。成功的小 manifest 重跑会整体替换旧目录，因此不会残留旧 asset 或 recording。
+## 安全发布边界
 
-为避免误删用户文件，已存在的输出目录只有在 marker 是目标目录内的普通文件、且其 `markerVersion`/`appId`/`artifactKind` 通过严格 schema 验证时才能被替换。未标记、损坏、伪版本或符号链接 marker 的目录会被拒绝且内容保持不变。`<output-dir>.failed-runs` 如果已存在，也必须是普通目录，符号链接或其他文件类型会在 staging/网络操作之前被拒绝。临时 backup 会在移动后重新验证 marker，只有得到该 ownership 证据的 backup 才会递归删除。
+analysis 目录必须不存在或为空。最终输出先在同文件系统 staging 目录内完成，通过所有验证后才原子提升。只有携带严格 ownership marker 的旧输出目录可被替换；失败重跑不会覆盖上一个成功结果。不要绕过路径、哈希、ownership 或 `--required-text-count` 检查。
 
-输出路径会经过 realpath/canonical 检查。文件系统根目录、空路径、`.`/项目根及其任一祖先、源图本身、源图父目录或其任一祖先都会被拒绝，即使其中放置了伪造 marker 也不例外。已存在的目标本身不能是符号链接，并且父路径中的链接别名会解析到真实位置后再判定，不能用于绕过上述边界。
-
-## 发送到阿里云的数据
-
-每次完整 `run` 默认只进行两类模型调用：
-
-1. 向 `qwen3.5-ocr` 发送整页 PNG 的 Base64 Data URL，使用 `advanced_recognition` 获取 `ocr_result.words_info[]` 文字与坐标；
-2. 向 `qwen3-vl-plus` 发送同一张整页 PNG 和固定结构化提示词，用于候选元素分析；
-
-完整 `run` 只把源图发送给 OCR 和 Vision。随后所有文字遮罩、透明图标提取、局部背景修复、重组校验和 PPTX 导出都在本地执行。万相不是默认第 7 页验收的一部分：默认路径不会向万相/图像编辑服务提交源图或遮罩，也不会产生 Wanx task ID。仓库仍保留隔离的可选 legacy Wanx provider 及其安全测试，但 CLI 的 `run`/`build` 和第 7 页验收脚本均不调用它。
-
-文件不会上传到项目自建服务，也不会在用户机器上运行模型。请在使用前确认源图内容符合组织的数据合规要求。
-
-## 费用估算
-
-每页默认产生 1 次 `qwen3.5-ocr` 和 1 次 `qwen3-vl-plus` 调用，不产生图像编辑计费。截至 2026-08-26，阿里云官方页面显示这两个模型均按输入/输出 token 计费，且视觉模型会随单次请求的 token 区间采用不同档位；免费额度、活动、模型版本和价格都可能变化。因此本项目不承诺或虚构固定单页成本。执行前请根据实际图片折算 token、输出 token、地域和账户权益，在 [`qwen3.5-ocr` 模型页](https://help.aliyun.com/zh/model-studio/qwen3-5-ocr) 与 [阿里云百炼官方计费页](https://help.aliyun.com/zh/model-studio/model-pricing) 重新核算。
-
-## 已知局限
-
-- 只接受精确 1280×720 PNG，只导出单页，没有整套 PPT 批处理、排队或人工校正界面；
-- OCR 文本是权威内容，但字体统一回退为 Microsoft YaHei，不能还原未提供的原始字体文件；
-- 只有垂直间隔不超过较小行高的 75%、左边对齐误差不超过较小估算字号的 50%（最少 4 px）且估算字号比不超过 1.2 的相邻 OCR 行才合并为保留换行的段落；
-- 默认保真路径不重建原生结构形状；面板、色条、纹理和复杂插画保留在背景中；
-- 图标是可选层，可以保留在背景中。本地透明化依赖边缘颜色一致性，透明比例、边框、文字重叠、修复或重组任一安全门失败时，该图标保留在背景中；像执行工具中互相遮挡且内含文字的“扳手 + 盾牌”，会优先保留文字可编辑性和原图保真；矩形回退资产不会进入 manifest 或 PPTX；
-- 本版未集成阿里云 VIAPI 通用分割，不需要第二套 AccessKey/Secret；
-- 文字是必须层。第 7 页固定验收通过 `--required-text-count 10` 在导出和发布前同时校验计划/接受数量；任一文字无法安全本地修复或数量不符时整页失败并保留 failed-run 证据，不会覆盖上一个成功页面；
-- 不同 PowerPoint/WPS 版本的字体替换和文本度量可能造成小范围布局偏差，真实交付前仍需在目标客户端打开验收。
-
-## 离线验证
-
-从源图和目标客户端的 1280×720 渲染图逐文字检查水平前景跨度与左锚点（默认容差分别为 48px 和 12px）：
-
-```bash
-npm run measure:text-span -- --source <source.png> --render <render.png> --manifest <manifest.json> --out <evidence.json>
-```
-
-命令会覆盖 manifest 中全部文字层，任何文字无前景、跨度/锚点超差或没有文字层都会退出非零。
+## 开发验证
 
 ```bash
 npm test
 npm run lint:types
 npm run build
 npm run test:compiled
+npm pack --dry-run
 ```
 
-`npm test` 只运行 TypeScript 源测试；`npm run test:compiled` 在 build 后单独验证编译产物。端到端 pipeline 测试使用脱敏 OCR/Vision fixture 与注入的确定性 fidelity builder，真实 fidelity 集成测试使用程序化生成的本地图片；这些测试都不会访问网络或调用万相。
+测试使用本地 fixture 和可注入 provider，不应访问网络。

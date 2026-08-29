@@ -1,35 +1,91 @@
 ---
 name: image-to-editable-pptx
-description: Convert a 1280×720 slide PNG into a high-fidelity editable PPTX using Alibaba Cloud Model Studio OCR and vision analysis plus deterministic local reconstruction. Use when the user wants editable text and only reliably extracted movable icons from an image-based slide.
+description: Convert a PNG or JPEG slide image into a high-fidelity PPTX with editable text and safely extracted semantic PNG layers. Use when the user wants to edit an image-based slide while preserving uncertain content in the background.
 ---
 
 # Image to Editable PPTX
 
-Reconstruct the supplied slide image with visual fidelity first: every accepted OCR line becomes editable text, reliably isolated icons may become movable PNG layers, and panels, bars, borders, textures, and uncertain graphics remain in the background.
+Reconstruct one image-based slide with fidelity first. OCR text becomes editable text; semantic foreground objects and text backings become movable PNG assets only when their ownership, mask, repair, and recomposition checks pass. Unsafe candidates use the safe fallback and remain pixel-identical in the background.
 
 This Agent Skill supports Codex and OpenCode on macOS or Linux with Node.js 22.6 or newer.
 
+## Resolve the installation
+
+1. Resolve the physical path of this `SKILL.md`, following any symbolic link.
+2. Treat the plugin root as two directory levels above its physical containing directory.
+3. Confirm that root contains `package.json`; run package commands there.
+4. If dependencies are absent, run `npm ci --include=dev` in that root. Do not install global packages.
+5. Put analysis and final output in durable user/project directories, never inside the installed plugin cache.
+
+## Validate the source
+
+Accept exactly one static PNG, JPG, or JPEG image. The decoder uses magic bytes rather than trusting the extension. Reject inputs outside any of these limits:
+
+- maximum file size: 50 MiB;
+- width and height: each 64 through 8192 pixels;
+- maximum decoded area: 40,000,000 pixels;
+- maximum aspect ratio: 56:1;
+- no animation or multipage image.
+
+The slide layout preserves the accepted canvas aspect ratio; it is not limited to 1280×720 or 16:9.
+
+## Credential boundary
+
+New `analyze` and `run` operations need `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID` in the process environment. Never echo, record, commit, paste into a command, or copy these values into a response. The CLI intentionally has no API-key, workspace, Authorization, provider-secret, or base-URL flags.
+
+Explain before live analysis that the slide is sent once for OCR and once for full-page scene analysis. The generic analyzer may also send at most 8 selected crops for regional refinement and at most 4 eligible masked crops for occlusion completion. Both optional stages are bounded and can be disabled independently with zero; there is no unlimited mode.
+
 ## Run the converter
 
-1. Resolve the physical path of this `SKILL.md` first, following any symbolic link; then treat the plugin root as two directory levels above its physical containing directory. Confirm that root contains `package.json`, and work from it for package commands.
-2. Require Node.js 22.6 or newer. If dependencies are absent, run `npm ci --include=dev` in the plugin root. Do not install global packages.
-3. Confirm the source is an exact 1280×720 PNG. Explain the current single-slide limitation if the user provides another format or size.
-4. Choose a durable output directory outside the installed plugin cache. It must not be the source image or an ancestor of the source, and it must not be the current project root or one of its ancestors. Never overwrite an unmarked directory.
-5. For a new analysis, require `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID` in the process environment. Never echo, record, commit, or copy either value into a command, file, or response. Tell the user that the full slide image is sent once to `qwen3.5-ocr` and once to `qwen3-vl-plus`; reconstruction after analysis is local.
-6. Run from the plugin root:
+For a new self-contained manifest v2 analysis package:
 
-   ```bash
-   npm run cli -- run --image <source.png> --out <output-dir> [--required-text-count <n>]
-   ```
+```bash
+npm run cli -- analyze <source.png> --out <analysis-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
+```
 
-   Use `--required-text-count` only when the expected OCR text count is known. If the user supplies a compatible analysis directory, use the offline form instead:
+Build from that verified package offline. This command must not receive the source image, analysis/network limit flags, `--record`, or credentials:
 
-   ```bash
-   npm run cli -- build --image <source.png> --analysis <analysis-dir> --out <output-dir> [--required-text-count <n>]
-   ```
+```bash
+npm run cli -- build --analysis <analysis-dir> --out <output-dir> [--required-text-count <n>]
+```
 
-7. Report the generated `*-editable.pptx` path and the accepted text/icon counts from `manifest.json`. Do not describe a bitmap-only import as editable. For delivery, open or render the PPTX in the user's target PowerPoint/WPS client and verify that representative text objects can actually be edited.
+For a combined network analysis and local build:
 
-## Failure boundary
+```bash
+npm run cli -- run <source.jpg> --out <output-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--required-text-count <n>] [--record]
+```
 
-Keep the previous successful output when a rerun fails. Inspect the retained failed-run evidence instead of bypassing ownership checks or required-text validation. Do not switch to generative inpainting unless the user explicitly requests a different fidelity tradeoff.
+Defaults are 8 regional analyses and 4 occlusion completions. `0` disables the corresponding stage. Use `--required-text-count` only when the expected OCR text count is independently known.
+
+Only a legacy analysis package v1 requires its original image again. Keep that compatibility route explicit:
+
+```bash
+npm run cli -- build-v1 <source.jpeg> --analysis <legacy-analysis-dir> --out <output-dir> [--required-text-count <n>]
+```
+
+Do not use `build-v1` for manifest v2, and do not suggest that v2 needs the image again. `analyze` and `run` retain `--image <path>` only as a compatibility alias for old scripts; prefer the positional image form above.
+
+## Review the result
+
+Read `manifest.json` and require `manifestVersion: 2` for the generic workflow. Report accepted editable-text and PNG-asset counts, rejected/fallback decisions, and every asset with `reviewRequired: true`.
+
+Review these files beside the source:
+
+- `recomposition-preview.png` for whole-slide visual fidelity;
+- `layer-review.png` for individual transparent assets;
+- `exploded-preview.png` for separability and z-order;
+- `clean-background.png`, `removal-mask.png`, `assets/*.png`, `run-ledger.json`, and `slide-editable.pptx` for final evidence.
+
+Generated hidden regions receive a visible generated-region marker only in QA previews. The exported PNG asset and PPTX must remain unmarked. Treat `reviewRequired` as a manual review requirement, not automatic rejection.
+
+Text backing and color-strip layers remain movable PNG assets beneath editable text; they are not native PowerPoint shapes. Do not claim otherwise. If a backing, icon, connector, compound object, or occlusion completion cannot pass validation, accept the safe fallback in the background rather than forcing a low-fidelity layer.
+
+For delivery, open the PPTX in the user's target PowerPoint/WPS client. Move a representative foreground object and a text-backing asset, edit the associated text, undo the changes, explicitly save or discard, close, reopen, and report the observed state.
+
+## Failure and publication boundary
+
+- New analysis output must be absent or empty.
+- Never overwrite an unmarked output directory or bypass canonical-path and ownership checks.
+- Keep the previous successful output when a rerun fails; inspect the retained failed-run evidence.
+- Offline v2 `build` must succeed from the self-contained analysis package without loading live credentials or calling a provider.
+- Do not describe a bitmap-only import as editable, and do not equate this workflow with Canva Magic Layers.
