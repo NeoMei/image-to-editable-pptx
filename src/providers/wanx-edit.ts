@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
+import type { OcclusionCompletionProvider } from "../occlusion/contracts.js";
 
 const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
@@ -12,6 +13,17 @@ const DASHSCOPE_OBSERVED_RESULT_HOSTS = new Set([
 
 const INPAINT_PROMPT =
   "移除白色遮罩区域中的文字、图标、线条和面板边框，延续周围米白色纸张纹理与自然阴影，不添加任何新文字、符号、物体或装饰。";
+
+function completionPrompt(semanticContext: readonly string[]): string {
+  const context = semanticContext.join("\n");
+  return [
+    "Complete only the missing rear contour inside the white hidden-region mask.",
+    "Preserve every visible pixel outside the mask exactly and do not add text or unrelated objects.",
+    context,
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n");
+}
 
 const SubmissionResponseSchema = z.object({
   output: z.object({
@@ -135,11 +147,16 @@ function isConfiguredDeadlineTimeout(signal: AbortSignal): boolean {
   );
 }
 
-export async function inpaintBackground(
+async function runMaskedEdit(
   source: Buffer,
   mask: Buffer,
   config: AppConfig,
-): Promise<{ image: Buffer; taskId: string }> {
+  prompt: string,
+): Promise<{
+  image: Buffer;
+  taskId: string;
+  taskStatus: "SUCCEEDED";
+}> {
   const baseUrl = requireSafeWanxBase(config);
   const deadline = Date.now() + config.requestTimeoutMs;
   const submission = await fetch(
@@ -155,7 +172,7 @@ export async function inpaintBackground(
         model: config.editModel,
         input: {
           function: "description_edit_with_mask",
-          prompt: INPAINT_PROMPT,
+          prompt,
           base_image_url: `data:image/png;base64,${source.toString("base64")}`,
           mask_image_url: `data:image/png;base64,${mask.toString("base64")}`,
         },
@@ -275,6 +292,7 @@ export async function inpaintBackground(
         return {
           image: Buffer.from(await download.arrayBuffer()),
           taskId,
+          taskStatus: "SUCCEEDED",
         };
       } catch (error) {
         if (isConfiguredDeadlineTimeout(downloadSignal)) {
@@ -298,4 +316,39 @@ export async function inpaintBackground(
     }
     await sleep(Math.min(config.pollIntervalMs, remainingMs));
   }
+}
+
+export async function inpaintBackground(
+  source: Buffer,
+  mask: Buffer,
+  config: AppConfig,
+): Promise<{ image: Buffer; taskId: string }> {
+  const { image, taskId } = await runMaskedEdit(
+    source,
+    mask,
+    config,
+    INPAINT_PROMPT,
+  );
+  return { image, taskId };
+}
+
+export function createWanxOcclusionCompletionProvider(
+  config: AppConfig,
+): OcclusionCompletionProvider {
+  return {
+    async complete(request) {
+      const result = await runMaskedEdit(
+        request.crop,
+        request.hiddenMask,
+        config,
+        completionPrompt(request.semanticContext),
+      );
+      return {
+        image: result.image,
+        modelId: config.editModel,
+        taskId: result.taskId,
+        sanitizedMetadata: { taskStatus: result.taskStatus },
+      };
+    },
+  };
 }

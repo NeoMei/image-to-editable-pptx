@@ -32,6 +32,7 @@ test("accepts a valid workspace DNS label and derives exact Beijing API URLs", (
     "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
   );
   assert.equal(config.maxRegionAnalysis, 8);
+  assert.equal(config.maxOcclusionCompletions, 4);
 
   for (const [base, pathname] of [
     [config.dashscopeApiBase, "/api/v1"],
@@ -49,6 +50,35 @@ test("accepts a valid workspace DNS label and derives exact Beijing API URLs", (
     assert.equal(url.pathname, pathname);
     assert.equal(url.search, "");
     assert.equal(url.hash, "");
+  }
+});
+
+test("accepts only strict integer occlusion completion limits from zero through four", () => {
+  for (const [configured, expected] of [
+    ["0", 0],
+    ["4", 4],
+  ] as const) {
+    assert.equal(
+      loadConfig({
+        DASHSCOPE_API_KEY: "secret",
+        DASHSCOPE_WORKSPACE_ID: "workspace-123",
+        MAX_OCCLUSION_COMPLETIONS: configured,
+      }).maxOcclusionCompletions,
+      expected,
+    );
+  }
+
+  for (const configured of ["-1", "5", "1.5", "01", " 1", "1 ", ""]) {
+    assert.throws(
+      () =>
+        loadConfig({
+          DASHSCOPE_API_KEY: "secret",
+          DASHSCOPE_WORKSPACE_ID: "workspace-123",
+          MAX_OCCLUSION_COMPLETIONS: configured,
+        }),
+      /MAX_OCCLUSION_COMPLETIONS/,
+      configured,
+    );
   }
 });
 

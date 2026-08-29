@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import type { AppConfig } from "../src/config.js";
-import { inpaintBackground } from "../src/providers/wanx-edit.js";
+import {
+  createWanxOcclusionCompletionProvider,
+  inpaintBackground,
+} from "../src/providers/wanx-edit.js";
 
 const PROMPT =
   "移除白色遮罩区域中的文字、图标、线条和面板边框，延续周围米白色纸张纹理与自然阴影，不添加任何新文字、符号、物体或装饰。";
@@ -202,6 +205,80 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
     assert.equal(calls[4]?.init?.method, "GET");
     assert.deepEqual(calls[4]?.init?.headers, {});
     assert.equal(calls[4]?.init?.redirect, "error");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("adapts Wanx to the provider-neutral completion contract with sanitized metadata", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: FetchCall[] = [];
+  const downloaded = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), init });
+    if (String(input).endsWith("/image-synthesis")) {
+      return Response.json({
+        request_id: "signed-or-sensitive-submit-id",
+        output: { task_id: "task-completion", task_status: "PENDING" },
+      });
+    }
+    if (String(input).endsWith("/tasks/task-completion")) {
+      return Response.json({
+        request_id: "signed-or-sensitive-poll-id",
+        output: {
+          task_id: "task-completion",
+          task_status: "SUCCEEDED",
+          results: [
+            {
+              url: "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/completed.png",
+            },
+          ],
+        },
+        usage: { image_count: 1 },
+      });
+    }
+    return new Response(downloaded, { status: 200 });
+  };
+
+  try {
+    const provider = createWanxOcclusionCompletionProvider(config);
+    const result = await provider.complete({
+      crop: Buffer.from("candidate-crop"),
+      hiddenMask: Buffer.from("hidden-mask"),
+      protectedVisibleMask: Buffer.from("visible-mask"),
+      semanticContext: ["continue the accepted rear contour"],
+    });
+    assert.deepEqual(result, {
+      image: downloaded,
+      modelId: "wanx2.1-imageedit",
+      taskId: "task-completion",
+      sanitizedMetadata: {
+        taskStatus: "SUCCEEDED",
+      },
+    });
+    assert.equal(calls[0]?.init?.redirect, "error");
+    const body = JSON.parse(String(calls[0]?.init?.body)) as {
+      input: {
+        base_image_url: string;
+        mask_image_url: string;
+        prompt: string;
+      };
+    };
+    assert.equal(
+      body.input.base_image_url,
+      `data:image/png;base64,${Buffer.from("candidate-crop").toString("base64")}`,
+    );
+    assert.equal(
+      body.input.mask_image_url,
+      `data:image/png;base64,${Buffer.from("hidden-mask").toString("base64")}`,
+    );
+    assert.match(body.input.prompt, /accepted rear contour/i);
+    assert.doesNotMatch(
+      JSON.stringify(result.sanitizedMetadata),
+      /request|url|signed/i,
+    );
+    assert.equal(calls[1]?.init?.redirect, "error");
+    assert.equal(calls[2]?.init?.redirect, "error");
   } finally {
     globalThis.fetch = originalFetch;
   }

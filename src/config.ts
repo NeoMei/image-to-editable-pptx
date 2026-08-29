@@ -9,6 +9,7 @@ export type AppConfig = {
   requestTimeoutMs: number;
   pollIntervalMs: number;
   maxRegionAnalysis?: number;
+  maxOcclusionCompletions?: number;
 };
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -74,6 +75,16 @@ export function loadConfig(env: Environment = process.env): AppConfig {
     throw new Error("MAX_REGION_ANALYSIS must be an integer from 0 through 8");
   }
 
+  const configuredMaxOcclusionCompletions = env.MAX_OCCLUSION_COMPLETIONS;
+  if (
+    configuredMaxOcclusionCompletions !== undefined &&
+    !/^[0-4]$/.test(configuredMaxOcclusionCompletions)
+  ) {
+    throw new Error(
+      "MAX_OCCLUSION_COMPLETIONS must be an integer from 0 through 4",
+    );
+  }
+
   return {
     apiKey,
     workspaceId,
@@ -91,5 +102,9 @@ export function loadConfig(env: Environment = process.env): AppConfig {
       configuredMaxRegionAnalysis === undefined
         ? 8
         : Number(configuredMaxRegionAnalysis),
+    maxOcclusionCompletions:
+      configuredMaxOcclusionCompletions === undefined
+        ? 4
+        : Number(configuredMaxOcclusionCompletions),
   };
 }
