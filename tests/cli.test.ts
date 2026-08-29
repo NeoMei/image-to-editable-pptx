@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { parseCliArgs, runCli } from "../src/cli.js";
@@ -184,6 +185,55 @@ test("never accepts provider credentials or an unlimited mode on the command lin
     assert.throws(
       () => parseCliArgs(["analyze", "slide.png", "--out", "analysis", ...args]),
       /Unknown option|integer/i,
+    );
+  }
+});
+
+test("unknown option errors never echo space-separated or equals-form values", () => {
+  const sentinel = "SENTINEL_DO_NOT_ECHO_4ef297";
+  const cases = [
+    ["--provider-token", sentinel],
+    [`--provider-secret=${sentinel}`],
+  ];
+
+  for (const credentialLikeArgs of cases) {
+    assert.throws(
+      () =>
+        parseCliArgs([
+          "analyze",
+          "slide.png",
+          "--out",
+          "analysis",
+          ...credentialLikeArgs,
+        ]),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Unknown option: --provider-(?:token|secret)/);
+        assert.doesNotMatch(error.message, new RegExp(sentinel));
+        return true;
+      },
+    );
+
+    const processResult = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/cli.ts",
+        "analyze",
+        "slide.png",
+        "--out",
+        "analysis",
+        ...credentialLikeArgs,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(processResult.status, 0);
+    assert.equal(processResult.stdout, "");
+    assert.doesNotMatch(processResult.stderr, new RegExp(sentinel));
+    assert.match(
+      processResult.stderr,
+      /Unknown option: --provider-(?:token|secret)/,
     );
   }
 });

@@ -105,17 +105,26 @@ function requireSafeResultUrl(candidate: string): string {
   return url.href;
 }
 
-function timeoutSignal(deadline: number): AbortSignal {
-  const remainingMs = deadline - Date.now();
+export type WanxTiming = {
+  now(): number;
+  createTimeoutSignal(milliseconds: number): AbortSignal;
+  sleep(milliseconds: number): Promise<void>;
+};
+
+const defaultWanxTiming: WanxTiming = {
+  now: () => Date.now(),
+  createTimeoutSignal: (milliseconds) => AbortSignal.timeout(milliseconds),
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+};
+
+function timeoutSignal(deadline: number, timing: WanxTiming): AbortSignal {
+  const remainingMs = deadline - timing.now();
   if (remainingMs <= 0) {
     throw new Error("Wanx request timed out");
   }
 
-  return AbortSignal.timeout(Math.max(1, Math.ceil(remainingMs)));
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return timing.createTimeoutSignal(Math.max(1, Math.ceil(remainingMs)));
 }
 
 function errorDetails(code?: string, message?: string): string {
@@ -128,9 +137,13 @@ function taskError(taskId: string, message: string, cause?: unknown): Error {
     : new Error(`Wanx task ${taskId} ${message}`, { cause });
 }
 
-function taskTimeoutSignal(deadline: number, taskId: string): AbortSignal {
+function taskTimeoutSignal(
+  deadline: number,
+  taskId: string,
+  timing: WanxTiming,
+): AbortSignal {
   try {
-    return timeoutSignal(deadline);
+    return timeoutSignal(deadline, timing);
   } catch (error) {
     throw taskError(taskId, "timed out", error);
   }
@@ -152,13 +165,14 @@ async function runMaskedEdit(
   mask: Buffer,
   config: AppConfig,
   prompt: string,
+  timing: WanxTiming,
 ): Promise<{
   image: Buffer;
   taskId: string;
   taskStatus: "SUCCEEDED";
 }> {
   const baseUrl = requireSafeWanxBase(config);
-  const deadline = Date.now() + config.requestTimeoutMs;
+  const deadline = timing.now() + config.requestTimeoutMs;
   const submission = await fetch(
     `${baseUrl}/services/aigc/image2image/image-synthesis`,
     {
@@ -178,7 +192,7 @@ async function runMaskedEdit(
         },
         parameters: { n: 1 },
       }),
-      signal: timeoutSignal(deadline),
+      signal: timeoutSignal(deadline, timing),
       redirect: "error",
     },
   );
@@ -200,11 +214,11 @@ async function runMaskedEdit(
   const pollUrl = `${baseUrl}/tasks/${encodeURIComponent(taskId)}`;
 
   while (true) {
-    if (Date.now() >= deadline) {
+    if (timing.now() >= deadline) {
       throw taskError(taskId, "timed out");
     }
 
-    const pollSignal = taskTimeoutSignal(deadline, taskId);
+    const pollSignal = taskTimeoutSignal(deadline, taskId, timing);
     let response: Response;
     try {
       response = await fetch(pollUrl, {
@@ -265,7 +279,7 @@ async function runMaskedEdit(
         );
       }
 
-      const downloadSignal = taskTimeoutSignal(deadline, taskId);
+      const downloadSignal = taskTimeoutSignal(deadline, taskId, timing);
       let download: Response;
       try {
         download = await fetch(safeResultUrl, {
@@ -310,11 +324,11 @@ async function runMaskedEdit(
       );
     }
 
-    const remainingMs = deadline - Date.now();
+    const remainingMs = deadline - timing.now();
     if (remainingMs <= 0) {
       throw taskError(taskId, "timed out");
     }
-    await sleep(Math.min(config.pollIntervalMs, remainingMs));
+    await timing.sleep(Math.min(config.pollIntervalMs, remainingMs));
   }
 }
 
@@ -322,18 +336,21 @@ export async function inpaintBackground(
   source: Buffer,
   mask: Buffer,
   config: AppConfig,
+  timing: WanxTiming = defaultWanxTiming,
 ): Promise<{ image: Buffer; taskId: string }> {
   const { image, taskId } = await runMaskedEdit(
     source,
     mask,
     config,
     INPAINT_PROMPT,
+    timing,
   );
   return { image, taskId };
 }
 
 export function createWanxOcclusionCompletionProvider(
   config: AppConfig,
+  timing: WanxTiming = defaultWanxTiming,
 ): OcclusionCompletionProvider {
   return {
     async complete(request) {
@@ -342,6 +359,7 @@ export function createWanxOcclusionCompletionProvider(
         request.hiddenMask,
         config,
         completionPrompt(request.semanticContext),
+        timing,
       );
       return {
         image: result.image,

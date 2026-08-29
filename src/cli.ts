@@ -87,6 +87,11 @@ function usageError(message: string): Error {
   return new Error(`${message}\n\n${USAGE}`);
 }
 
+function optionName(argument: string): string {
+  const equalsIndex = argument.indexOf("=");
+  return equalsIndex === -1 ? argument : argument.slice(0, equalsIndex);
+}
+
 function parseBoundedInteger(
   option: string,
   value: string | undefined,
@@ -141,7 +146,7 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
       argument !== "--max-region-analysis" &&
       argument !== "--max-occlusion-completions"
     ) {
-      throw usageError(`Unknown option: ${argument}`);
+      throw usageError(`Unknown option: ${optionName(argument)}`);
     }
     if (values.has(argument)) {
       throw usageError(`Duplicate option: ${argument}`);

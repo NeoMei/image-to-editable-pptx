@@ -111,6 +111,28 @@ function streamThatErrorsWhenAborted(
   });
 }
 
+function deterministicDeadlineTiming() {
+  let timeoutSignalsCreated = 0;
+  return {
+    timing: {
+      now: () => 0,
+      createTimeoutSignal(milliseconds: number): AbortSignal {
+        assert.ok(milliseconds > 0);
+        timeoutSignalsCreated += 1;
+        const controller = new AbortController();
+        queueMicrotask(() => {
+          controller.abort(
+            new DOMException("Configured deadline elapsed", "TimeoutError"),
+          );
+        });
+        return controller.signal;
+      },
+      sleep: async () => {},
+    },
+    timeoutSignalsCreated: () => timeoutSignalsCreated,
+  };
+}
+
 test("submits masked PNGs, polls pending and running states, then downloads the succeeded image", async () => {
   const originalFetch = globalThis.fetch;
   const calls: FetchCall[] = [];
@@ -438,6 +460,8 @@ test("throws a terminal task failure containing the task_id and provider details
 
 test("classifies an in-flight poll deadline abort as timeout and preserves task_id", async () => {
   const originalFetch = globalThis.fetch;
+  const deadline = deterministicDeadlineTiming();
+  let enteredPollFetch = false;
 
   globalThis.fetch = async (input, init) => {
     if (String(input).endsWith("/image-synthesis")) {
@@ -449,6 +473,7 @@ test("classifies an in-flight poll deadline abort as timeout and preserves task_
 
     const signal = init?.signal;
     assert.ok(signal);
+    enteredPollFetch = true;
     return rejectWhenAborted(signal);
   };
 
@@ -457,7 +482,7 @@ test("classifies an in-flight poll deadline abort as timeout and preserves task_
       inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
         ...config,
         requestTimeoutMs: 25,
-      }),
+      }, deadline.timing),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /task-poll-timeout/);
@@ -467,6 +492,8 @@ test("classifies an in-flight poll deadline abort as timeout and preserves task_
         return true;
       },
     );
+    assert.equal(enteredPollFetch, true);
+    assert.equal(deadline.timeoutSignalsCreated(), 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -474,6 +501,8 @@ test("classifies an in-flight poll deadline abort as timeout and preserves task_
 
 test("classifies a poll response body deadline abort as timeout and preserves task_id", async () => {
   const originalFetch = globalThis.fetch;
+  const deadline = deterministicDeadlineTiming();
+  let enteredPollFetch = false;
 
   globalThis.fetch = async (input, init) => {
     if (String(input).endsWith("/image-synthesis")) {
@@ -485,6 +514,7 @@ test("classifies a poll response body deadline abort as timeout and preserves ta
 
     const signal = init?.signal;
     assert.ok(signal);
+    enteredPollFetch = true;
     const body = streamThatErrorsWhenAborted(signal);
     return new Response(body, {
       status: 200,
@@ -497,7 +527,7 @@ test("classifies a poll response body deadline abort as timeout and preserves ta
       inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
         ...config,
         requestTimeoutMs: 25,
-      }),
+      }, deadline.timing),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /task-body-timeout/);
@@ -507,6 +537,8 @@ test("classifies a poll response body deadline abort as timeout and preserves ta
         return true;
       },
     );
+    assert.equal(enteredPollFetch, true);
+    assert.equal(deadline.timeoutSignalsCreated(), 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -545,11 +577,14 @@ test("does not classify an ordinary poll abort as a configured timeout", async (
 
 test("classifies an in-flight result download deadline abort as timeout and preserves task_id", async () => {
   const originalFetch = globalThis.fetch;
+  const deadline = deterministicDeadlineTiming();
+  let enteredDownloadFetch = false;
   globalThis.fetch = createSuccessfulTaskFetch(
     "task-download-timeout",
     async (_input, init) => {
       const signal = init?.signal;
       assert.ok(signal);
+      enteredDownloadFetch = true;
       return rejectWhenAborted(signal);
     },
   );
@@ -559,7 +594,7 @@ test("classifies an in-flight result download deadline abort as timeout and pres
       inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
         ...config,
         requestTimeoutMs: 25,
-      }),
+      }, deadline.timing),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /task-download-timeout/);
@@ -569,6 +604,8 @@ test("classifies an in-flight result download deadline abort as timeout and pres
         return true;
       },
     );
+    assert.equal(enteredDownloadFetch, true);
+    assert.equal(deadline.timeoutSignalsCreated(), 3);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -576,11 +613,14 @@ test("classifies an in-flight result download deadline abort as timeout and pres
 
 test("classifies a result download body deadline abort as timeout and preserves task_id", async () => {
   const originalFetch = globalThis.fetch;
+  const deadline = deterministicDeadlineTiming();
+  let enteredDownloadFetch = false;
   globalThis.fetch = createSuccessfulTaskFetch(
     "task-download-body-timeout",
     async (_input, init) => {
       const signal = init?.signal;
       assert.ok(signal);
+      enteredDownloadFetch = true;
       const body = streamThatErrorsWhenAborted(signal);
       return new Response(body, {
         status: 200,
@@ -594,7 +634,7 @@ test("classifies a result download body deadline abort as timeout and preserves 
       inpaintBackground(Buffer.from("source"), Buffer.from("mask"), {
         ...config,
         requestTimeoutMs: 25,
-      }),
+      }, deadline.timing),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /task-download-body-timeout/);
@@ -604,6 +644,8 @@ test("classifies a result download body deadline abort as timeout and preserves 
         return true;
       },
     );
+    assert.equal(enteredDownloadFetch, true);
+    assert.equal(deadline.timeoutSignalsCreated(), 3);
   } finally {
     globalThis.fetch = originalFetch;
   }
