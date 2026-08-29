@@ -314,3 +314,107 @@ test("recomposition restores cleared editable text and shapes in manifest z-orde
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("recomposition renders multiple text overlays sequentially and bbox-cropped", async () => {
+  type TextElement = Extract<
+    SlideManifestV2["elements"][number],
+    { kind: "text" }
+  >;
+  type TextOverlay = {
+    input: Buffer;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  };
+  type TextOverlayRenderer = (
+    canvas: SourceCanvas,
+    element: TextElement,
+  ) => Promise<TextOverlay | undefined>;
+  const directory = await mkdtemp(join(tmpdir(), "semantic-qa-bounded-text-"));
+  try {
+    const input = await fixture();
+    const rgba = Buffer.from(input.canvas.rgba);
+    for (let y = 44; y <= 53; y += 1) {
+      rgba.set([17, 34, 51, 255], (y * input.canvas.width + 56) * 4);
+    }
+    for (let x = 50; x <= 57; x += 1) {
+      rgba.set([17, 34, 51, 255], (48 * input.canvas.width + x) * 4);
+    }
+    const secondText: TextElement = {
+      kind: "text",
+      id: "text-second",
+      text: "中",
+      bbox: { x: 36, y: 42, width: 24, height: 14 },
+      rotation: 0,
+      color: "112233",
+      fontSizePx: 14,
+      charSpacingPx: 0,
+      bold: false,
+      align: "left",
+      zIndex: 4,
+    };
+    const multiTextInput = {
+      ...input,
+      canvas: { ...input.canvas, rgba, sourceBytes: Buffer.alloc(0) },
+      manifest: {
+        ...input.manifest,
+        elements: [...input.manifest.elements, secondText],
+      },
+      outDir: directory,
+    };
+    const qaModule = await import("../src/qa/previews.js") as
+      typeof import("../src/qa/previews.js") & {
+        renderQaTextOverlay?: TextOverlayRenderer;
+      };
+    assert.equal(
+      typeof qaModule.renderQaTextOverlay,
+      "function",
+      "QA exposes its production text-overlay renderer for bounded scheduling",
+    );
+    const renderQaTextOverlay = qaModule.renderQaTextOverlay!;
+    let active = 0;
+    let maxActive = 0;
+    const overlaySizes: Array<{ width: number; height: number }> = [];
+    const renderedTextIds: string[] = [];
+    const observedRenderer: TextOverlayRenderer = async (canvas, element) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      renderedTextIds.push(element.id);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        const overlay = await renderQaTextOverlay(canvas, element);
+        if (overlay !== undefined) {
+          const metadata = await sharp(overlay.input).metadata();
+          assert.equal(metadata.width, overlay.width);
+          assert.equal(metadata.height, overlay.height);
+          overlaySizes.push({ width: metadata.width!, height: metadata.height! });
+        }
+        return overlay;
+      } finally {
+        active -= 1;
+      }
+    };
+    const instrumentedWriter = writeQaPreviews as unknown as (
+      value: typeof multiTextInput,
+      dependencies: { renderTextOverlay: TextOverlayRenderer },
+    ) => ReturnType<typeof writeQaPreviews>;
+
+    await instrumentedWriter(multiTextInput, {
+      renderTextOverlay: observedRenderer,
+    });
+
+    assert.equal(maxActive, 1, "text overlays are never rendered concurrently");
+    assert.deepEqual(renderedTextIds, ["text-qa", "text-second"]);
+    assert.equal(overlaySizes.length, 2);
+    assert.ok(
+      overlaySizes.every(
+        ({ width, height }) =>
+          width < input.canvas.width && height < input.canvas.height,
+      ),
+      `text overlays must be cropped, received ${JSON.stringify(overlaySizes)}`,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

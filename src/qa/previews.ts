@@ -17,6 +17,9 @@ const LABEL_HEIGHT = 36;
 const CHECKER_SIZE = 16;
 const MAX_COLUMNS = 3;
 const REVIEW_RED = "D63A36";
+// buildTightTextMask reads a one-pixel surface ring and follows connected
+// glyph fringe by at most eight pixels beyond the OCR bbox.
+const TEXT_MASK_PADDING_PX = 9;
 
 export type QaPreviewRecord = {
   kind: "recomposition" | "layer-review" | "exploded";
@@ -37,6 +40,23 @@ type ManifestShape = Extract<
   SlideManifestV2["elements"][number],
   { kind: "shape" }
 >;
+
+export type QaTextOverlay = {
+  input: Buffer;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+export type QaTextOverlayRenderer = (
+  canvas: SourceCanvas,
+  element: ManifestText,
+) => Promise<QaTextOverlay | undefined>;
+
+export type QaPreviewDependencies = {
+  renderTextOverlay: QaTextOverlayRenderer;
+};
 
 // Recomposition must be deterministic on hosts that do not have Microsoft
 // YaHei. Source-derived glyph masks preserve the original script without a
@@ -341,17 +361,98 @@ function textLayerSvg(
   );
 }
 
-async function sourceTextLayer(
-  verifiedSourceImage: Buffer,
+type PixelBounds = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
+
+function textOverlayBounds(
   canvas: SourceCanvas,
   element: ManifestText,
+): PixelBounds {
+  const left = Math.max(
+    0,
+    Math.floor(element.bbox.x) - TEXT_MASK_PADDING_PX,
+  );
+  const top = Math.max(
+    0,
+    Math.floor(element.bbox.y) - TEXT_MASK_PADDING_PX,
+  );
+  const right = Math.min(
+    canvas.width,
+    Math.ceil(element.bbox.x + element.bbox.width) + TEXT_MASK_PADDING_PX,
+  );
+  const bottom = Math.min(
+    canvas.height,
+    Math.ceil(element.bbox.y + element.bbox.height) + TEXT_MASK_PADDING_PX,
+  );
+  if (right <= left || bottom <= top) {
+    throw new RangeError(
+      `QA text bbox does not intersect the canvas: ${element.id}`,
+    );
+  }
+  return { left, top, right, bottom };
+}
+
+function localTextElement(
+  element: ManifestText,
+  bounds: PixelBounds,
+): ManifestText {
+  return {
+    ...element,
+    bbox: {
+      ...element.bbox,
+      x: element.bbox.x - bounds.left,
+      y: element.bbox.y - bounds.top,
+    },
+  };
+}
+
+function cropCanvasRgba(
+  canvas: SourceCanvas,
+  bounds: PixelBounds,
+): Buffer {
+  if (canvas.rgba.length !== canvas.width * canvas.height * 4) {
+    throw new RangeError("QA source RGBA dimensions do not match its canvas");
+  }
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  const cropped = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const sourceStart = ((bounds.top + y) * canvas.width + bounds.left) * 4;
+    const targetStart = y * width * 4;
+    canvas.rgba.copy(
+      cropped,
+      targetStart,
+      sourceStart,
+      sourceStart + width * 4,
+    );
+  }
+  return cropped;
+}
+
+async function sourceTextLayer(
+  canvas: SourceCanvas,
+  element: ManifestText,
+  bounds: PixelBounds,
 ): Promise<Buffer | undefined> {
   const color = rgbColor(element.color);
   if (color === undefined) return undefined;
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  const localElement = localTextElement(element, bounds);
   try {
+    const croppedSource = cropCanvasRgba(canvas, bounds);
+    const verifiedSourceImage = await sharp(croppedSource, {
+      raw: { width, height, channels: 4 },
+    })
+      .png()
+      .toBuffer();
     const tightMask = await buildTightTextMask(
       verifiedSourceImage,
-      element,
+      localElement,
       { dilationPx: 0 },
     );
     const decodedMask = await sharp(tightMask.mask)
@@ -360,19 +461,19 @@ async function sourceTextLayer(
       .raw()
       .toBuffer({ resolveWithObject: true });
     if (
-      decodedMask.info.width !== canvas.width ||
-      decodedMask.info.height !== canvas.height
+      decodedMask.info.width !== width ||
+      decodedMask.info.height !== height
     ) {
       return undefined;
     }
-    const rgba = Buffer.alloc(canvas.width * canvas.height * 4);
-    for (let index = 0; index < canvas.width * canvas.height; index += 1) {
+    const rgba = Buffer.alloc(width * height * 4);
+    for (let index = 0; index < width * height; index += 1) {
       const alpha = decodedMask.data[index * decodedMask.info.channels]!;
       if (alpha === 0) continue;
       rgba.set([color[0], color[1], color[2], alpha], index * 4);
     }
     return sharp(rgba, {
-      raw: { width: canvas.width, height: canvas.height, channels: 4 },
+      raw: { width, height, channels: 4 },
     }).png().toBuffer();
   } catch {
     // The editable-text builder applies the same conservative mask gate. A
@@ -381,6 +482,28 @@ async function sourceTextLayer(
   }
 }
 
+export async function renderQaTextOverlay(
+  canvas: SourceCanvas,
+  element: ManifestText,
+): Promise<QaTextOverlay> {
+  const bounds = textOverlayBounds(canvas, element);
+  const width = bounds.right - bounds.left;
+  const height = bounds.bottom - bounds.top;
+  const localElement = localTextElement(element, bounds);
+  const sourceLayer = await sourceTextLayer(canvas, element, bounds);
+  return {
+    input: sourceLayer ?? textLayerSvg({ width, height }, localElement),
+    left: bounds.left,
+    top: bounds.top,
+    width,
+    height,
+  };
+}
+
+const defaultQaPreviewDependencies: QaPreviewDependencies = {
+  renderTextOverlay: renderQaTextOverlay,
+};
+
 async function recompositionPreview(
   input: {
     canvas: SourceCanvas;
@@ -388,6 +511,7 @@ async function recompositionPreview(
     manifest: SlideManifestV2;
   },
   assets: readonly AnnotatedAsset[],
+  dependencies: QaPreviewDependencies,
 ): Promise<Buffer> {
   const assetsById = new Map(assets.map((asset) => [asset.candidateId, asset]));
   const elements = input.manifest.elements
@@ -396,50 +520,46 @@ async function recompositionPreview(
       (left, right) =>
         left.element.zIndex - right.element.zIndex || left.index - right.index,
     );
-  const verifiedSourceImage = elements.some(({ element }) => element.kind === "text")
-    ? await sharp(input.canvas.rgba, {
-        raw: {
-          width: input.canvas.width,
-          height: input.canvas.height,
-          channels: 4,
-        },
-      })
-        .png()
-        .toBuffer()
-    : undefined;
-  const layers: OverlayOptions[] = await Promise.all(elements.map(async ({ element }) => {
+  let preview = input.background;
+  for (const { element } of elements) {
+    let layer: OverlayOptions;
     switch (element.kind) {
       case "asset": {
         const asset = assetsById.get(element.id);
         if (asset === undefined) {
           throw new Error(`QA asset is missing from recomposition: ${element.id}`);
         }
-        return {
+        layer = {
           input: asset.image,
           left: Math.floor(element.bbox.x),
           top: Math.floor(element.bbox.y),
         };
+        break;
       }
       case "shape":
-        return { input: shapeLayerSvg(input.manifest.canvas, element), left: 0, top: 0 };
-      case "text": {
-        const sourceLayer = await sourceTextLayer(
-          verifiedSourceImage!,
-          input.canvas,
-          element,
-        );
-        return {
-          input: sourceLayer ?? textLayerSvg(input.manifest.canvas, element),
+        layer = {
+          input: shapeLayerSvg(input.manifest.canvas, element),
           left: 0,
           top: 0,
         };
+        break;
+      case "text": {
+        const sourceLayer = await dependencies.renderTextOverlay(
+          input.canvas,
+          element,
+        );
+        layer = {
+          input:
+            sourceLayer?.input ?? textLayerSvg(input.manifest.canvas, element),
+          left: sourceLayer?.left ?? 0,
+          top: sourceLayer?.top ?? 0,
+        };
+        break;
       }
     }
-  }));
-  return sharp(input.background)
-    .composite(layers)
-    .png()
-    .toBuffer();
+    preview = await sharp(preview).composite([layer]).png().toBuffer();
+  }
+  return preview;
 }
 
 function cellAnnotationSvg(input: {
@@ -622,17 +742,20 @@ async function explodedPreview(input: {
     .toBuffer();
 }
 
-export async function writeQaPreviews(input: {
-  canvas: SourceCanvas;
-  background: Buffer;
-  assets: BuiltAsset[];
-  manifest: SlideManifestV2;
-  outDir: string;
-}): Promise<QaPreviewRecord[]> {
+export async function writeQaPreviews(
+  input: {
+    canvas: SourceCanvas;
+    background: Buffer;
+    assets: BuiltAsset[];
+    manifest: SlideManifestV2;
+    outDir: string;
+  },
+  dependencies: QaPreviewDependencies = defaultQaPreviewDependencies,
+): Promise<QaPreviewRecord[]> {
   const assets = await validatedAssets(input);
   await mkdir(input.outDir, { recursive: true });
   const previews = await Promise.all([
-    recompositionPreview(input, assets),
+    recompositionPreview(input, assets, dependencies),
     layerReviewPreview(assets),
     explodedPreview({ ...input, assets }),
   ]);
