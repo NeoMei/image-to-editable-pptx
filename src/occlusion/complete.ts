@@ -17,6 +17,9 @@ export type {
 } from "./contracts.js";
 
 const MASK_FOREGROUND_ALPHA = 16;
+const CROP_CONTEXT_CANVAS_SCALE_DIVISOR = 64;
+const CROP_CONTEXT_CANDIDATE_SCALE_DIVISOR = 4;
+const CONTACT_ALIGNMENT_CANDIDATE_SCALE_DIVISOR = 16;
 
 type Raster = {
   width: number;
@@ -24,13 +27,16 @@ type Raster = {
   rgba: Buffer;
 };
 
-type ContactAxis = "horizontal" | "vertical";
+type ContactPair = {
+  first: number;
+  second: number;
+};
 
 type HiddenEvidence = {
   mask: Uint8Array;
   components: Array<{
     pixels: number[];
-    axes: Set<ContactAxis>;
+    pairs: ContactPair[];
   }>;
 };
 
@@ -56,6 +62,41 @@ export class OcclusionCompletionBudget {
 
 function sha256(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+function canonicalCropPadding(input: OcclusionCompletionInput): number {
+  const shorterCanvasSide = Math.min(input.canvas.width, input.canvas.height);
+  const shorterCandidateSide = Math.min(
+    input.candidate.bbox.width,
+    input.candidate.bbox.height,
+  );
+  const canvasScale = Math.max(
+    1,
+    Math.round(shorterCanvasSide / CROP_CONTEXT_CANVAS_SCALE_DIVISOR),
+  );
+  const candidateScale = Math.max(
+    1,
+    Math.floor(
+      shorterCandidateSide / CROP_CONTEXT_CANDIDATE_SCALE_DIVISOR,
+    ),
+  );
+  return Math.min(canvasScale, candidateScale);
+}
+
+function contactAlignmentTolerance(input: OcclusionCompletionInput): number {
+  const shorterCandidateSide = Math.min(
+    input.candidate.bbox.width,
+    input.candidate.bbox.height,
+  );
+  return Math.max(
+    1,
+    Math.min(
+      canonicalCropPadding(input),
+      Math.round(
+        shorterCandidateSide / CONTACT_ALIGNMENT_CANDIDATE_SCALE_DIVISOR,
+      ),
+    ),
+  );
 }
 
 function isCandidateCrop(
@@ -87,17 +128,34 @@ function isCandidateCrop(
     return false;
   }
   const bbox = candidate.bbox;
+  if (
+    !(
+      Number.isFinite(bbox.x) &&
+      Number.isFinite(bbox.y) &&
+      Number.isFinite(bbox.width) &&
+      bbox.width > 0 &&
+      Number.isFinite(bbox.height) &&
+      bbox.height > 0 &&
+      bbox.x >= cropBounds.x &&
+      bbox.y >= cropBounds.y &&
+      bbox.x + bbox.width <= cropBounds.x + cropBounds.width &&
+      bbox.y + bbox.height <= cropBounds.y + cropBounds.height
+    )
+  ) {
+    return false;
+  }
+  const padding = canonicalCropPadding(input);
+  const canonical = {
+    left: Math.max(0, Math.floor(bbox.x) - padding),
+    top: Math.max(0, Math.floor(bbox.y) - padding),
+    right: Math.min(canvas.width, Math.ceil(bbox.x + bbox.width) + padding),
+    bottom: Math.min(canvas.height, Math.ceil(bbox.y + bbox.height) + padding),
+  };
   return (
-    Number.isFinite(bbox.x) &&
-    Number.isFinite(bbox.y) &&
-    Number.isFinite(bbox.width) &&
-    bbox.width > 0 &&
-    Number.isFinite(bbox.height) &&
-    bbox.height > 0 &&
-    bbox.x >= cropBounds.x &&
-    bbox.y >= cropBounds.y &&
-    bbox.x + bbox.width <= cropBounds.x + cropBounds.width &&
-    bbox.y + bbox.height <= cropBounds.y + cropBounds.height
+    cropBounds.x >= canonical.left &&
+    cropBounds.y >= canonical.top &&
+    cropBounds.x + cropBounds.width <= canonical.right &&
+    cropBounds.y + cropBounds.height <= canonical.bottom
   );
 }
 
@@ -175,28 +233,104 @@ function connectedComponents(
   return components;
 }
 
-function contactAxes(
+function isAdjacentToComponent(
+  index: number,
+  component: ReadonlySet<number>,
+  width: number,
+  height: number,
+): boolean {
+  const x = index % width;
+  const y = Math.floor(index / width);
+  return (
+    (x > 0 && component.has(index - 1)) ||
+    (x + 1 < width && component.has(index + 1)) ||
+    (y > 0 && component.has(index - width)) ||
+    (y + 1 < height && component.has(index + width))
+  );
+}
+
+function hasVisibleContinuation(
+  contact: number,
+  visibleComponents: readonly number[][],
+  occluderComponent: ReadonlySet<number>,
+  width: number,
+  height: number,
+): boolean {
+  const visibleComponent = visibleComponents.find((pixels) =>
+    pixels.includes(contact),
+  );
+  return (
+    visibleComponent !== undefined &&
+    visibleComponent.some(
+      (index) =>
+        index !== contact &&
+        !isAdjacentToComponent(index, occluderComponent, width, height),
+    )
+  );
+}
+
+function contactPairs(
   pixels: readonly number[],
   visible: Uint8Array,
   width: number,
   height: number,
-): Set<ContactAxis> {
-  let left = false;
-  let right = false;
-  let top = false;
-  let bottom = false;
+  alignmentTolerance: number,
+  visibleComponents: readonly number[][],
+): ContactPair[] {
+  const contacts = {
+    left: new Set<number>(),
+    right: new Set<number>(),
+    top: new Set<number>(),
+    bottom: new Set<number>(),
+  };
   for (const index of pixels) {
     const x = index % width;
     const y = Math.floor(index / width);
-    if (x > 0 && visible[index - 1] !== 0) left = true;
-    if (x + 1 < width && visible[index + 1] !== 0) right = true;
-    if (y > 0 && visible[index - width] !== 0) top = true;
-    if (y + 1 < height && visible[index + width] !== 0) bottom = true;
+    if (x > 0 && visible[index - 1] !== 0) contacts.left.add(index - 1);
+    if (x + 1 < width && visible[index + 1] !== 0) {
+      contacts.right.add(index + 1);
+    }
+    if (y > 0 && visible[index - width] !== 0) {
+      contacts.top.add(index - width);
+    }
+    if (y + 1 < height && visible[index + width] !== 0) {
+      contacts.bottom.add(index + width);
+    }
   }
-  const axes = new Set<ContactAxis>();
-  if (left && right) axes.add("horizontal");
-  if (top && bottom) axes.add("vertical");
-  return axes;
+  const component = new Set(pixels);
+  const hasContinuation = (index: number): boolean =>
+    hasVisibleContinuation(
+      index,
+      visibleComponents,
+      component,
+      width,
+      height,
+    );
+  const pairs: ContactPair[] = [];
+  for (const left of contacts.left) {
+    if (!hasContinuation(left)) continue;
+    for (const right of contacts.right) {
+      if (
+        hasContinuation(right) &&
+        Math.abs(Math.floor(left / width) - Math.floor(right / width)) <=
+          alignmentTolerance
+      ) {
+        pairs.push({ first: left, second: right });
+      }
+    }
+  }
+  for (const top of contacts.top) {
+    if (!hasContinuation(top)) continue;
+    for (const bottom of contacts.bottom) {
+      if (
+        hasContinuation(bottom) &&
+        Math.abs((top % width) - (bottom % width)) <= alignmentTolerance
+      ) {
+        pairs.push({ first: top, second: bottom });
+      }
+    }
+  }
+  return pairs;
 }
 
 function deriveHiddenEvidence(
@@ -204,16 +338,25 @@ function deriveHiddenEvidence(
   occluder: Uint8Array,
   width: number,
   height: number,
+  alignmentTolerance: number,
 ): HiddenEvidence | undefined {
   const possible = Uint8Array.from(occluder, (value, index) =>
     value !== 0 && visible[index] === 0 ? 255 : 0,
   );
+  const visibleComponents = connectedComponents(visible, width, height);
   const acceptedComponents = connectedComponents(possible, width, height)
     .map((pixels) => ({
       pixels,
-      axes: contactAxes(pixels, visible, width, height),
+      pairs: contactPairs(
+        pixels,
+        visible,
+        width,
+        height,
+        alignmentTolerance,
+        visibleComponents,
+      ),
     }))
-    .filter(({ axes }) => axes.size > 0);
+    .filter(({ pairs }) => pairs.length > 0);
   if (acceptedComponents.length === 0) return undefined;
   const mask = new Uint8Array(possible.length);
   for (const { pixels } of acceptedComponents) {
@@ -232,20 +375,44 @@ function changedPixel(left: Buffer, right: Buffer, index: number): boolean {
   );
 }
 
-function bridgesRequiredAxes(
+function touchesContact(
+  generatedComponent: ReadonlySet<number>,
+  contact: number,
+  width: number,
+  height: number,
+): boolean {
+  const x = contact % width;
+  const y = Math.floor(contact / width);
+  return (
+    (x > 0 && generatedComponent.has(contact - 1)) ||
+    (x + 1 < width && generatedComponent.has(contact + 1)) ||
+    (y > 0 && generatedComponent.has(contact - width)) ||
+    (y + 1 < height && generatedComponent.has(contact + width))
+  );
+}
+
+function bridgesRequiredContacts(
   generated: Uint8Array,
-  visible: Uint8Array,
   evidence: HiddenEvidence,
   width: number,
   height: number,
 ): boolean {
-  for (const { pixels, axes } of evidence.components) {
-    const generatedPixels = pixels.filter((index) => generated[index] !== 0);
-    if (generatedPixels.length === 0) return false;
-    const generatedAxes = contactAxes(generatedPixels, visible, width, height);
-    for (const axis of axes) {
-      if (!generatedAxes.has(axis)) return false;
-    }
+  for (const { pixels, pairs } of evidence.components) {
+    const componentMask = new Uint8Array(generated.length);
+    for (const index of pixels) componentMask[index] = generated[index]!;
+    const generatedComponents = connectedComponents(
+      componentMask,
+      width,
+      height,
+    ).map((component) => new Set(component));
+    const bridgesOnePair = pairs.some(({ first, second }) =>
+      generatedComponents.some(
+        (component) =>
+          touchesContact(component, first, width, height) &&
+          touchesContact(component, second, width, height),
+      ),
+    );
+    if (!bridgesOnePair) return false;
   }
   return true;
 }
@@ -332,7 +499,13 @@ export async function completeOccludedCandidate(
         if (decoded[index] !== 0) occluder[index] = 255;
       }
     }
-    const derived = deriveHiddenEvidence(visible, occluder, crop.width, crop.height);
+    const derived = deriveHiddenEvidence(
+      visible,
+      occluder,
+      crop.width,
+      crop.height,
+      contactAlignmentTolerance(input),
+    );
     if (derived === undefined) return undefined;
     evidence = derived;
   } catch {
@@ -340,11 +513,21 @@ export async function completeOccludedCandidate(
   }
 
   if (!input.budget.tryAcquire()) return undefined;
-  const hiddenMask = await grayscaleMaskPng(evidence.mask, crop.width, crop.height);
+  const hiddenMask = await grayscaleMaskPng(
+    evidence.mask,
+    crop.width,
+    crop.height,
+  );
 
-  let completion: Awaited<ReturnType<OcclusionCompletionProvider["complete"]>>;
+  let completion: {
+    image: Buffer;
+    modelId: string;
+    taskId: string;
+    sanitizedMetadata: unknown;
+  };
+  let sanitizedMetadata: z.infer<ReturnType<typeof z.json>>;
   try {
-    completion = await callWithTimeout(
+    const providerResult: unknown = await callWithTimeout(
       provider.complete({
         crop: input.crop,
         hiddenMask,
@@ -353,17 +536,32 @@ export async function completeOccludedCandidate(
       }),
       input.timeoutMs,
     );
-  } catch {
-    return undefined;
-  }
-
-  if (completion.modelId.length === 0 || completion.taskId.length === 0) return undefined;
-  let sanitizedMetadata: z.infer<ReturnType<typeof z.json>>;
-  try {
-    const metadata = z
+    if (
+      typeof providerResult !== "object" ||
+      providerResult === null ||
+      !("image" in providerResult) ||
+      !Buffer.isBuffer(providerResult.image) ||
+      !("modelId" in providerResult) ||
+      typeof providerResult.modelId !== "string" ||
+      providerResult.modelId.trim().length === 0 ||
+      !("taskId" in providerResult) ||
+      typeof providerResult.taskId !== "string" ||
+      providerResult.taskId.trim().length === 0 ||
+      !("sanitizedMetadata" in providerResult)
+    ) {
+      return undefined;
+    }
+    completion = {
+      image: providerResult.image,
+      modelId: providerResult.modelId,
+      taskId: providerResult.taskId,
+      sanitizedMetadata: providerResult.sanitizedMetadata,
+    };
+    sanitizedMetadata = z
       .json()
-      .parse(sanitizeProviderRecording(completion.sanitizedMetadata, "").payload);
-    sanitizedMetadata = metadata;
+      .parse(
+        sanitizeProviderRecording(completion.sanitizedMetadata, "").payload,
+      );
   } catch {
     return undefined;
   }
@@ -388,7 +586,7 @@ export async function completeOccludedCandidate(
     }
   }
   if (
-    !bridgesRequiredAxes(generated, visible, evidence, crop.width, crop.height) ||
+    !bridgesRequiredContacts(generated, evidence, crop.width, crop.height) ||
     !oneContinuousContour(visible, generated, crop.width, crop.height)
   ) {
     return undefined;

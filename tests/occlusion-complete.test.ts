@@ -14,13 +14,17 @@ import {
 const WIDTH = 9;
 const HEIGHT = 5;
 
-function pixelOffset(x: number, y: number): number {
-  return (y * WIDTH + x) * 4;
+function pixelOffset(x: number, y: number, width = WIDTH): number {
+  return (y * width + x) * 4;
 }
 
-async function pngFromRgba(rgba: Buffer): Promise<Buffer> {
+async function pngFromRgba(
+  rgba: Buffer,
+  width = WIDTH,
+  height = HEIGHT,
+): Promise<Buffer> {
   return sharp(rgba, {
-    raw: { width: WIDTH, height: HEIGHT, channels: 4 },
+    raw: { width, height, channels: 4 },
   })
     .png()
     .toBuffer();
@@ -28,11 +32,13 @@ async function pngFromRgba(rgba: Buffer): Promise<Buffer> {
 
 async function maskPng(
   points: ReadonlyArray<readonly [number, number]>,
+  width = WIDTH,
+  height = HEIGHT,
 ): Promise<Buffer> {
-  const mask = Buffer.alloc(WIDTH * HEIGHT);
-  for (const [x, y] of points) mask[y * WIDTH + x] = 255;
+  const mask = Buffer.alloc(width * height);
+  for (const [x, y] of points) mask[y * width + x] = 255;
   return sharp(mask, {
-    raw: { width: WIDTH, height: HEIGHT, channels: 1 },
+    raw: { width, height, channels: 1 },
   })
     .png()
     .toBuffer();
@@ -181,6 +187,120 @@ test("rejects a full-slide request before calling the provider", async () => {
           crop: input.crop,
           hiddenMask: input.visibleMask,
           protectedVisibleMask: input.visibleMask,
+          semanticContext: [],
+        });
+      },
+    },
+  );
+  assert.equal(result, undefined);
+  assert.equal(calls, 0);
+});
+
+test("rejects an almost-full-slide crop that exceeds canonical candidate padding", async () => {
+  const width = 89;
+  const height = 50;
+  const sourceRgba = Buffer.alloc(width * height * 4);
+  for (let index = 0; index < width * height; index += 1) {
+    sourceRgba.set([10, 20, 30, 255], index * 4);
+  }
+  const completedRgba = Buffer.from(sourceRgba);
+  const visiblePoints = [
+    [10, 25],
+    [11, 25],
+    [15, 25],
+    [16, 25],
+  ] as const;
+  for (const [x, y] of visiblePoints) {
+    sourceRgba.set([200, 80, 40, 255], pixelOffset(x, y, width));
+    completedRgba.set([200, 80, 40, 255], pixelOffset(x, y, width));
+  }
+  const occluderPoints: Array<readonly [number, number]> = [];
+  for (let y = 0; y < height; y += 1) {
+    for (const x of [12, 13, 14]) occluderPoints.push([x, y]);
+  }
+  for (const x of [12, 13, 14]) {
+    completedRgba.set([200, 80, 40, 255], pixelOffset(x, 25, width));
+  }
+  let calls = 0;
+  const result = await completeOccludedCandidate(
+    {
+      candidate: {
+        bbox: { x: 10, y: 24, width: 7, height: 3 },
+        occlusion: {
+          occluderIds: ["front-node"],
+          hiddenMaskRequired: true,
+        },
+      },
+      canvas: { width: 90, height: 50 },
+      cropBounds: { x: 0, y: 0, width, height },
+      crop: await pngFromRgba(sourceRgba, width, height),
+      visibleMask: await maskPng(visiblePoints, width, height),
+      occluderMasks: new Map([
+        ["front-node", await maskPng(occluderPoints, width, height)],
+      ]),
+      semanticContext: [],
+      budget: new OcclusionCompletionBudget(1),
+      timeoutMs: 100,
+    },
+    {
+      async complete() {
+        calls += 1;
+        return {
+          image: await pngFromRgba(completedRgba, width, height),
+          modelId: "provider-model",
+          taskId: "provider-task",
+          sanitizedMetadata: {},
+        };
+      },
+    },
+  );
+  assert.equal(result, undefined);
+  assert.equal(calls, 0);
+});
+
+test("rejects opposing occluder contacts that are not locally aligned", async () => {
+  const current = await fixture();
+  const misalignedVisible = await maskPng([
+    [1, 1],
+    [2, 1],
+    [6, 3],
+    [7, 3],
+  ]);
+  let calls = 0;
+  const result = await completeOccludedCandidate(
+    { ...current.input, visibleMask: misalignedVisible },
+    {
+      async complete() {
+        calls += 1;
+        return providerReturning(current.completedCrop).complete({
+          crop: current.input.crop,
+          hiddenMask: current.input.visibleMask,
+          protectedVisibleMask: current.input.visibleMask,
+          semanticContext: [],
+        });
+      },
+    },
+  );
+  assert.equal(result, undefined);
+  assert.equal(calls, 0);
+});
+
+test("rejects aligned contact pixels disconnected from a continuing visible contour", async () => {
+  const current = await fixture();
+  const disconnectedContacts = await maskPng([
+    [2, 2],
+    [6, 2],
+  ]);
+  let calls = 0;
+  const result = await completeOccludedCandidate(
+    { ...current.input, visibleMask: disconnectedContacts },
+    {
+      async complete() {
+        calls += 1;
+        return providerReturning(current.completedCrop).complete({
+          crop: current.input.crop,
+          hiddenMask: current.input.visibleMask,
+          protectedVisibleMask: current.input.visibleMask,
           semanticContext: [],
         });
       },
@@ -441,4 +561,74 @@ test("redacts provider credentials and signed URLs at the generic metadata bound
     JSON.stringify(result.provenance),
     /secret-token-value|secret-signature|Signature/,
   );
+});
+
+test("malformed provider envelopes consume budget and return no layer", async () => {
+  const current = await fixture();
+  const malformedEnvelopes: unknown[] = [
+    undefined,
+    null,
+    {
+      image: "not-a-buffer",
+      modelId: "provider-model",
+      taskId: "provider-task",
+      sanitizedMetadata: {},
+    },
+    {
+      image: current.completedCrop,
+      modelId: "",
+      taskId: "provider-task",
+      sanitizedMetadata: {},
+    },
+    {
+      image: current.completedCrop,
+      modelId: "provider-model",
+      taskId: "",
+      sanitizedMetadata: {},
+    },
+  ];
+
+  for (const malformed of malformedEnvelopes) {
+    const attempt = await fixture();
+    const budget = new OcclusionCompletionBudget(1);
+    let malformedCalls = 0;
+    const provider = {
+      async complete() {
+        malformedCalls += 1;
+        return malformed;
+      },
+    } as unknown as OcclusionCompletionProvider;
+    assert.equal(
+      await completeOccludedCandidate(
+        { ...attempt.input, budget },
+        provider,
+      ),
+      undefined,
+    );
+    assert.equal(malformedCalls, 1);
+
+    let validCalls = 0;
+    assert.equal(
+      await completeOccludedCandidate(
+        { ...attempt.input, budget },
+        {
+          async complete() {
+            validCalls += 1;
+            return providerReturning(attempt.completedCrop).complete({
+              crop: attempt.input.crop,
+              hiddenMask: attempt.input.visibleMask,
+              protectedVisibleMask: attempt.input.visibleMask,
+              semanticContext: [],
+            });
+          },
+        },
+      ),
+      undefined,
+    );
+    assert.equal(
+      validCalls,
+      0,
+      "the malformed started call must consume budget",
+    );
+  }
 });
