@@ -29,7 +29,6 @@ export type RefinementResult = {
 type RankedRequest = RefinementRequest & {
   confidence: number;
   normalizedArea: number;
-  stableNodeId: string;
 };
 
 const MAX_REFINEMENT_REQUESTS = 8;
@@ -42,6 +41,30 @@ const REASON_SEVERITY: Readonly<Record<RefinementReason, number>> = {
   "incomplete-boundary": 2,
   compound: 3,
 };
+
+function compareCodePoints(left: string, right: string): number {
+  const leftCodePoints = [...left];
+  const rightCodePoints = [...right];
+  const sharedLength = Math.min(leftCodePoints.length, rightCodePoints.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference =
+      leftCodePoints[index]!.codePointAt(0)! - rightCodePoints[index]!.codePointAt(0)!;
+    if (difference !== 0) return difference;
+  }
+  return leftCodePoints.length - rightCodePoints.length;
+}
+
+function compareTargetIdTuples(
+  left: readonly string[],
+  right: readonly string[],
+): number {
+  const sharedLength = Math.min(left.length, right.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = compareCodePoints(left[index]!, right[index]!);
+    if (difference !== 0) return difference;
+  }
+  return left.length - right.length;
+}
 
 function isProtectedNode(node: SceneNode): boolean {
   return node.role === "background" || node.role === "text";
@@ -88,7 +111,7 @@ function canonicalTargetNodes(
     .filter((candidate): candidate is SceneNode =>
       candidate !== undefined && !isProtectedNode(candidate),
     )
-    .sort((left, right) => left.id.localeCompare(right.id));
+    .sort((left, right) => compareCodePoints(left.id, right.id));
 }
 
 function normalizedOrder(relation: SceneRelation): [string, string] | undefined {
@@ -156,7 +179,6 @@ export function selectRefinementRequests(
         relationConfidence ?? 1,
       ),
       normalizedArea: bbox.width * bbox.height,
-      stableNodeId: targetNodeIds[0]!,
     };
     const key = targetNodeIds.join("\u0000");
     const existing = rankedByTargets.get(key);
@@ -228,10 +250,10 @@ export function selectRefinementRequests(
         REASON_SEVERITY[left.reason] - REASON_SEVERITY[right.reason] ||
         left.confidence - right.confidence ||
         right.normalizedArea - left.normalizedArea ||
-        left.stableNodeId.localeCompare(right.stableNodeId),
+        compareTargetIdTuples(left.targetNodeIds, right.targetNodeIds),
     )
     .slice(0, limit)
-    .map(({ confidence: _confidence, normalizedArea: _area, stableNodeId: _id, ...request }) => request);
+    .map(({ confidence: _confidence, normalizedArea: _area, ...request }) => request);
 }
 
 export function mergeRefinedSubgraph(

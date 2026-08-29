@@ -137,6 +137,39 @@ test("prioritizes ambiguity by severity, confidence, area, then stable node ID",
   );
 });
 
+test("uses the complete target ID tuple when input order changes at the request cap", () => {
+  const candidates = [
+    node("a", { x: 0.5, y: 0.5, width: 0.125, height: 0.125 }, { confidence: 0.5 }),
+    node("b", { x: 0.25, y: 0.5, width: 0.125, height: 0.125 }, { confidence: 0.5 }),
+    node("c", { x: 0.75, y: 0.5, width: 0.125, height: 0.125 }, { confidence: 0.5 }),
+  ];
+  const relations = [
+    relation("a-c", "connected-to", "a", "c", 0.5),
+    relation("a-b", "connected-to", "a", "b", 0.5),
+  ];
+  const forward = selectRefinementRequests(graph(candidates, relations), canvas, 8);
+  const reversed = selectRefinementRequests(
+    graph([...candidates].reverse(), [...relations].reverse()),
+    canvas,
+    8,
+  );
+
+  assert.deepEqual(
+    forward.map(({ targetNodeIds }) => targetNodeIds),
+    [["a", "b"], ["a", "c"]],
+  );
+  assert.deepEqual(reversed, forward);
+
+  const forwardCapped = selectRefinementRequests(graph(candidates, relations), canvas, 1);
+  const reversedCapped = selectRefinementRequests(
+    graph([...candidates].reverse(), [...relations].reverse()),
+    canvas,
+    1,
+  );
+  assert.deepEqual(forwardCapped, [forward[0]]);
+  assert.deepEqual(reversedCapped, forwardCapped);
+});
+
 test("recognizes generic split, connected, nested, occluded, and contradictory fixtures", () => {
   assert.equal(selectRefinementRequests(splitPair, canvas, 8)[0]?.reason, "compound");
   assert.equal(selectRefinementRequests(connectedCompound, canvas, 8)[0]?.reason, "compound");
