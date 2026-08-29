@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 
-import type { OcrResult, VisionResult } from "../src/contracts.js";
+import {
+  CandidateDecisionSchema,
+  type OcrResult,
+  type VisionResult,
+} from "../src/contracts.js";
 import { planFidelityCandidates } from "../src/fidelity/candidates.js";
 import { parseQwenOcrResponse } from "../src/providers/qwen-ocr.js";
 
@@ -56,6 +60,32 @@ const vision: VisionResult = {
     },
   ],
 };
+
+test("keeps legacy and generic candidate decisions ledger-compatible", () => {
+  const shared = {
+    candidateId: "candidate",
+    decision: "kept_in_background" as const,
+    bbox: { x: 1, y: 2, width: 3, height: 4 },
+    sourceElementIndexes: [],
+    repairMethod: "none" as const,
+    extraction: "none" as const,
+    output: { state: "kept_in_background" as const },
+  };
+
+  assert.equal(CandidateDecisionSchema.parse({ ...shared, kind: "icon" }).kind, "icon");
+  for (const [kind, reason] of [
+    ["foreground-object", "uncertain_candidate"],
+    ["text-backing", "dangling_ocr_association"],
+    ["compound-group", "cycle_in_layer_order"],
+    ["foreground-object", "ambiguous_substantial_overlap"],
+    ["foreground-object", "decoration_candidate"],
+  ] as const) {
+    const parsed = CandidateDecisionSchema.parse({ ...shared, kind, reason });
+    assert.equal(parsed.kind, kind);
+    assert.equal(parsed.reason, reason);
+    assert.deepEqual(parsed.sourceElementIndexes, []);
+  }
+});
 
 test("keeps independent icons in the same panel as separate candidates", () => {
   const plan = planFidelityCandidates(ocr, vision);

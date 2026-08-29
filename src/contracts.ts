@@ -313,7 +313,13 @@ export type RecompositionResult = {
 
 export const CandidateDecisionSchema = z.object({
   candidateId: z.string().min(1),
-  kind: z.enum(["text", "icon"]),
+  kind: z.enum([
+    "text",
+    "icon",
+    "foreground-object",
+    "text-backing",
+    "compound-group",
+  ]),
   decision: z.enum(["accepted", "kept_in_background"]),
   bbox: BBoxSchema,
   sourceElementIndexes: z.array(z.number().int().nonnegative()),
@@ -333,6 +339,11 @@ export const CandidateDecisionSchema = z.object({
     "transparent_extraction_failed",
     "transparent_pixel_ratio_above_92_percent",
     "transparent_pixel_ratio_below_5_percent",
+    "ambiguous_substantial_overlap",
+    "cycle_in_layer_order",
+    "dangling_ocr_association",
+    "decoration_candidate",
+    "uncertain_candidate",
   ]).optional(),
   repairMetrics: z.object({
     maskedPixels: z.number().int().nonnegative(),

@@ -83,6 +83,9 @@ const intersectionOverUnion = (left: BBox, right: BBox): number => {
   return unionArea === 0 ? 0 : intersectionArea / unionArea;
 };
 
+/**
+ * Legacy v1 replay adapter. New semantic builds must use planSemanticLayers.
+ */
 export function planFidelityCandidates(
   ocr: OcrResult,
   vision: VisionResult,
