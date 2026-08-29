@@ -178,3 +178,103 @@ test("attributes an isolated page mismatch but marks overlapping alpha ownership
   assert.equal(overlapping.attribution, "ambiguous");
   assert.deepEqual(overlapping.affectedLayerIds, []);
 });
+
+test("tolerates a sparse rim of edge deviations within the whole-page ratio budget", async () => {
+  const background = await creamCanvas();
+  const asset = await blueAsset("#23394d");
+  const source = await sharp(background)
+    .composite([
+      { input: asset, left: 10, top: 8 },
+      {
+        input: await sharp({
+          create: { width: 5, height: 2, channels: 4, background: "#111111" },
+        }).png().toBuffer(),
+        left: 12,
+        top: 10,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const result = await validateWholePageRecomposition({
+    source,
+    background,
+    layers: [{
+      id: "rim-layer",
+      asset,
+      bbox: { x: 10, y: 8, width: 8, height: 8 },
+      zIndex: 1,
+    }],
+  });
+
+  assert.equal(result.accepted, true);
+  assert.ok(result.metrics.changedPixelRatio > 0);
+  assert.ok(result.metrics.changedPixelRatio <= 0.02);
+});
+
+test("attributes a sparse but above-budget deviation to its owning layer", async () => {
+  const background = await creamCanvas();
+  const asset = await blueAsset("#23394d");
+  const source = await sharp(background)
+    .composite([
+      { input: asset, left: 10, top: 8 },
+      {
+        input: await sharp({
+          create: { width: 5, height: 4, channels: 4, background: "#111111" },
+        }).png().toBuffer(),
+        left: 12,
+        top: 10,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const result = await validateWholePageRecomposition({
+    source,
+    background,
+    layers: [{
+      id: "sparse-layer",
+      asset,
+      bbox: { x: 10, y: 8, width: 8, height: 8 },
+      zIndex: 1,
+    }],
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.attribution, "deterministic");
+  assert.deepEqual(result.affectedLayerIds, ["sparse-layer"]);
+});
+
+test("rejects even a sparse deviation owned by a strict completion layer", async () => {
+  const background = await creamCanvas();
+  const asset = await blueAsset("#23394d");
+  const source = await sharp(background)
+    .composite([
+      { input: asset, left: 10, top: 8 },
+      {
+        input: await sharp({
+          create: { width: 5, height: 2, channels: 4, background: "#111111" },
+        }).png().toBuffer(),
+        left: 12,
+        top: 10,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  const result = await validateWholePageRecomposition({
+    source,
+    background,
+    layers: [{
+      id: "completion-layer",
+      asset,
+      bbox: { x: 10, y: 8, width: 8, height: 8 },
+      zIndex: 1,
+      strict: true,
+    }],
+  });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.attribution, "deterministic");
+  assert.deepEqual(result.affectedLayerIds, ["completion-layer"]);
+});

@@ -302,6 +302,11 @@ export type RecompositionLayer = {
   asset: Buffer;
   bbox: BBox;
   zIndex: number;
+  /**
+   * Strict layers (model completions) must recompose pixel-exactly; sparse
+   * edge deviations are only tolerated for source-visible cutouts.
+   */
+  strict?: boolean;
 };
 
 export type WholePageRecompositionOptions = {

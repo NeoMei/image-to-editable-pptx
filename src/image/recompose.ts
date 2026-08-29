@@ -183,6 +183,9 @@ export async function validateWholePageRecomposition(
   const height = sourceRaw.info.height;
   const maxDeltas: number[] = [];
   const changedPixelIndexes: number[] = [];
+  const strictById = new Map(
+    orderedLayers.map((layer) => [layer.id, layer.strict === true]),
+  );
   let totalChannelDelta = 0;
   for (let index = 0; index < width * height; index += 1) {
     if (ignored !== undefined && ignored.data[index * ignored.info.channels]! >= 128) {
@@ -212,13 +215,8 @@ export async function validateWholePageRecomposition(
     changedPixelRatio:
       comparedPixels === 0 ? 0 : changedPixelIndexes.length / comparedPixels,
   };
-  const accepted =
-    metrics.meanAbsoluteError <= MAX_MEAN_ABSOLUTE_ERROR &&
-    metrics.p95ChannelDelta <= MAX_P95_CHANNEL_DELTA &&
-    changedPixelIndexes.length === 0;
-  if (accepted) return { accepted: true, preview, metrics };
-
   const affected = new Set<string>();
+  const strictViolators = new Set<string>();
   let ambiguous = false;
   for (const pixelIndex of changedPixelIndexes) {
     const canvasX = pixelIndex % width;
@@ -244,18 +242,32 @@ export async function validateWholePageRecomposition(
       if (alpha >= 254) break;
     }
     if (owners.length !== 1) {
+      for (const id of owners) {
+        if (strictById.get(id)) strictViolators.add(id);
+      }
       ambiguous = true;
-      break;
+      continue;
     }
-    affected.add(owners[0]!);
+    const owner = owners[0]!;
+    affected.add(owner);
+    if (strictById.get(owner)) strictViolators.add(owner);
   }
+  const sparseBudgetOk =
+    changedPixelIndexes.length / comparedPixels <= MAX_CHANGED_PIXEL_RATIO;
+  const accepted =
+    metrics.meanAbsoluteError <= MAX_MEAN_ABSOLUTE_ERROR &&
+    metrics.p95ChannelDelta <= MAX_P95_CHANNEL_DELTA &&
+    sparseBudgetOk &&
+    strictViolators.size === 0;
+  if (accepted) return { accepted: true, preview, metrics };
   if (changedPixelIndexes.length === 0 || affected.size === 0) ambiguous = true;
+  const reportedIds = strictViolators.size > 0 ? strictViolators : affected;
   return {
     accepted: false,
     preview,
     metrics,
     reason: "recomposition_mismatch",
     attribution: ambiguous ? "ambiguous" : "deterministic",
-    affectedLayerIds: ambiguous ? [] : [...affected].sort(compareCodePoints),
+    affectedLayerIds: ambiguous ? [] : [...reportedIds].sort(compareCodePoints),
   };
 }

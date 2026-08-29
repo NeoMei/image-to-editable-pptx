@@ -1996,6 +1996,7 @@ export async function buildSemanticLayers(
         asset: stage.image,
         bbox: stage.bbox,
         zIndex: stage.candidate.zOrder,
+        strict: stage.reviewRequired,
       })),
       ignoredMask: protectedTextMask,
     });
