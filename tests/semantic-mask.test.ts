@@ -51,6 +51,7 @@ function semanticCandidate(
     bbox,
     zOrder: 1,
     relations: [],
+    carriedTextIds: [],
   };
 }
 

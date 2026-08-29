@@ -169,6 +169,7 @@ test("combines only explicit composition and keeps transitive membership", () =>
     bbox: { x: 100, y: 50, width: 500, height: 250 },
     zOrder: 0,
     relations: ["inner-outer", "member-connector", "member-inner"],
+    carriedTextIds: [],
   });
   assert.deepEqual(plan.candidates[1]?.nodeIds, ["separate"]);
 });
@@ -270,8 +271,90 @@ test("attaches a valid carries-text relation to its backing", () => {
       bbox: { x: 100, y: 50, width: 300, height: 100 },
       zOrder: 0,
       relations: ["backing-carries"],
+      carriedTextIds: ["ocr-1"],
     },
   ]);
+});
+
+test("maps carries-text to exact OCR IDs without content or input-order inference", () => {
+  const nodes = [
+    node("backing", "text-backing", {
+      x: 0.1,
+      y: 0.1,
+      width: 0.3,
+      height: 0.2,
+    }),
+    node("scene-target", "text", {
+      x: 0.14,
+      y: 0.14,
+      width: 0.1,
+      height: 0.06,
+    }),
+    node("scene-unrelated", "text", {
+      x: 0.26,
+      y: 0.18,
+      width: 0.1,
+      height: 0.06,
+    }),
+    node("object", "foreground-object", {
+      x: 0.6,
+      y: 0.2,
+      width: 0.1,
+      height: 0.2,
+    }),
+  ];
+  const relations = [
+    relation("opaque-carry-audit-id", "carries-text", "backing", "scene-target"),
+  ];
+  const carried = ocrLine("carried content", {
+    x: 140,
+    y: 70,
+    width: 100,
+    height: 30,
+  });
+  const unrelated = ocrLine("fully contained but unrelated", {
+    x: 260,
+    y: 90,
+    width: 100,
+    height: 30,
+  });
+
+  const forward = planSemanticLayers(graph(nodes, relations), {
+    lines: [carried, unrelated],
+  });
+  const reversedGraph = planSemanticLayers(
+    graph(
+      [...nodes]
+        .reverse()
+        .map((sceneNode) => ({ ...sceneNode, label: "different audit label" })),
+      [...relations].reverse(),
+    ),
+    {
+      lines: [
+        { ...carried, text: "renamed carried content" },
+        { ...unrelated, text: "renamed unrelated content" },
+      ],
+    },
+  );
+  const reversedOcr = planSemanticLayers(graph(nodes, relations), {
+    lines: [unrelated, carried],
+  });
+
+  assert.deepEqual(
+    forward.candidates.map(({ id, carriedTextIds }) => ({ id, carriedTextIds })),
+    [
+      { id: "backing", carriedTextIds: ["ocr-1"] },
+      { id: "object", carriedTextIds: [] },
+    ],
+  );
+  assert.deepEqual(reversedGraph.candidates, forward.candidates);
+  assert.deepEqual(
+    reversedOcr.candidates.map(({ id, carriedTextIds }) => ({ id, carriedTextIds })),
+    [
+      { id: "backing", carriedTextIds: ["ocr-2"] },
+      { id: "object", carriedTextIds: [] },
+    ],
+  );
 });
 
 test("uses in-front-of, behind, and occlusion edges for deterministic z-order", () => {

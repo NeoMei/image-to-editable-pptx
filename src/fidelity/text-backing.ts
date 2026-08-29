@@ -12,7 +12,6 @@ import type { SourceCanvas } from "../image/source.js";
 import { buildTightTextMask } from "../image/text-mask.js";
 import type { SemanticCandidate } from "../scene/plan.js";
 
-const MIN_CARRIED_TEXT_COVERAGE = 0.8;
 const MASK_FOREGROUND_ALPHA = 16;
 const SURFACE_FOREGROUND_ALPHA = 128;
 const MAX_SURFACE_RESIDUAL_P95 = 18;
@@ -48,32 +47,50 @@ type Decoded = {
 type Metrics = TextBackingResult["metrics"];
 type RejectionReason = NonNullable<TextBackingResult["reason"]>;
 
-function intersectionArea(left: BBox, right: BBox): number {
-  const width = Math.max(
-    0,
-    Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x),
-  );
-  const height = Math.max(
-    0,
-    Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y),
-  );
-  return width * height;
-}
-
-function associatedTexts(
+function resolveCarriedTexts(
   candidate: SemanticCandidate,
   texts: readonly TextSlideElement[],
-): { carried: TextSlideElement[]; hasUnrelatedOverlap: boolean } {
-  const carried: TextSlideElement[] = [];
-  let hasUnrelatedOverlap = false;
+): { carried: TextSlideElement[]; valid: boolean } {
+  const byId = new Map<string, TextSlideElement>();
   for (const text of texts) {
-    const intersection = intersectionArea(candidate.bbox, text.bbox);
-    if (intersection === 0) continue;
-    const coverage = intersection / (text.bbox.width * text.bbox.height);
-    if (coverage >= MIN_CARRIED_TEXT_COVERAGE) carried.push(text);
-    else hasUnrelatedOverlap = true;
+    if (byId.has(text.id)) return { carried: [], valid: false };
+    byId.set(text.id, text);
   }
-  return { carried, hasUnrelatedOverlap };
+  if (candidate.carriedTextIds.length === 0) return { carried: [], valid: false };
+  const uniqueIds = new Set(candidate.carriedTextIds);
+  if (uniqueIds.size !== candidate.carriedTextIds.length) {
+    return { carried: [], valid: false };
+  }
+  const carried = candidate.carriedTextIds.flatMap((id) => {
+    const text = byId.get(id);
+    return text === undefined ? [] : [text];
+  });
+  return { carried, valid: carried.length === candidate.carriedTextIds.length };
+}
+
+function bboxOverlapsBacking(
+  bbox: BBox,
+  backing: Uint8Array,
+  canvas: SourceCanvas,
+): boolean {
+  const left = Math.max(0, Math.floor(bbox.x));
+  const top = Math.max(0, Math.floor(bbox.y));
+  const right = Math.min(canvas.width, Math.ceil(bbox.x + bbox.width));
+  const bottom = Math.min(canvas.height, Math.ceil(bbox.y + bbox.height));
+  for (let y = top; y < bottom; y += 1) {
+    for (let x = left; x < right; x += 1) {
+      if (
+        x < bbox.x + bbox.width &&
+        x + 1 > bbox.x &&
+        y < bbox.y + bbox.height &&
+        y + 1 > bbox.y &&
+        backing[y * canvas.width + x]! >= MASK_FOREGROUND_ALPHA
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function rejected(
@@ -402,13 +419,11 @@ export async function extractTextBacking(
   candidate: SemanticCandidate,
   texts: TextSlideElement[],
 ): Promise<TextBackingResult> {
-  const association = associatedTexts(candidate, texts);
+  const association = resolveCarriedTexts(candidate, texts);
   const textNodeIds = association.carried.map(({ id }) => id);
   if (
     candidate.kind !== "text-backing" ||
-    candidate.relations.length === 0 ||
-    association.carried.length === 0 ||
-    association.hasUnrelatedOverlap ||
+    !association.valid ||
     canvas.rgba.length !== canvas.width * canvas.height * 4
   ) {
     return rejected(textNodeIds, "backing_mask_invalid");
@@ -428,6 +443,16 @@ export async function extractTextBacking(
     return rejected(textNodeIds, "backing_mask_invalid");
   }
   const projected = await projectMask(chosen, canvas);
+  const carriedIds = new Set(candidate.carriedTextIds);
+  if (
+    texts.some(
+      (text) =>
+        !carriedIds.has(text.id) &&
+        bboxOverlapsBacking(text.bbox, projected.alpha, canvas),
+    )
+  ) {
+    return rejected(textNodeIds, "backing_mask_invalid");
+  }
   const source = await sharp(canvas.rgba, {
     raw: { width: canvas.width, height: canvas.height, channels: 4 },
   })

@@ -25,6 +25,7 @@ export type SemanticCandidate = {
   bbox: BBox;
   zOrder: number;
   relations: string[];
+  carriedTextIds: string[];
   occlusion?: { occluderIds: string[]; hiddenMaskRequired: true };
 };
 
@@ -111,9 +112,8 @@ function planText(
   ocr: OcrResult,
   canvas: CanvasSize,
   warnings: Set<string>,
-): { candidates: FidelityTextCandidate[]; boxes: BBox[] } {
+): FidelityTextCandidate[] {
   const candidates: FidelityTextCandidate[] = [];
-  const boxes: BBox[] = [];
   for (const [sourceIndex, line] of ocr.lines.entries()) {
     const bbox = clipProviderBBox(line.bbox, canvas);
     if (bbox === null) {
@@ -129,7 +129,6 @@ function planText(
       warnings.add("out_of_bounds_clipped");
     }
     const id = `ocr-${sourceIndex + 1}`;
-    boxes.push(bbox);
     candidates.push({
       kind: "text",
       id,
@@ -147,7 +146,7 @@ function planText(
       },
     });
   }
-  return { candidates, boxes };
+  return candidates;
 }
 
 class DisjointSet {
@@ -393,6 +392,7 @@ export function planSemanticLayers(
         .filter(({ from, to }) => nodeIds.includes(from) || nodeIds.includes(to))
         .map(({ id: relationId }) => relationId)
         .sort(compareCodePoints),
+      carriedTextIds: [],
     });
   }
 
@@ -417,13 +417,25 @@ export function planSemanticLayers(
   for (const relation of parsedGraph.relations) {
     if (relation.kind !== "carries-text") continue;
     const targetBox = pixelBoxById.get(relation.to)!;
-    const hasOcrAssociation = textPlan.boxes.some(
-      (ocrBox) =>
-        intersectionOverSmallerArea(targetBox, ocrBox) >= SUBSTANTIAL_OVERLAP_RATIO,
-    );
+    const carriedTextIds = textPlan
+      .filter(
+        ({ element }) =>
+          intersectionOverSmallerArea(targetBox, element.bbox) >=
+          SUBSTANTIAL_OVERLAP_RATIO,
+      )
+      .map(({ id }) => id)
+      .sort(compareCodePoints);
+    const hasOcrAssociation = carriedTextIds.length > 0;
+    const candidateId = candidateIdByNodeId.get(relation.from);
+    if (hasOcrAssociation && candidateId !== undefined) {
+      const draft = drafts.find(({ id }) => id === candidateId)!;
+      draft.carriedTextIds = [...new Set([
+        ...draft.carriedTextIds,
+        ...carriedTextIds,
+      ])].sort(compareCodePoints);
+    }
     if (!hasOcrAssociation) {
       warnings.add(`dangling_ocr_association:${relation.from},${relation.to}`);
-      const candidateId = candidateIdByNodeId.get(relation.from);
       if (candidateId !== undefined) rejected.add(candidateId);
     }
   }
@@ -567,7 +579,7 @@ export function planSemanticLayers(
 
   return {
     canvas: parsedGraph.canvas,
-    text: textPlan.candidates,
+    text: textPlan,
     candidates,
     backgroundNodeId: parsedGraph.nodes.find(({ role }) => role === "background")!.id,
     warnings: [...warnings].sort(compareCodePoints),

@@ -135,6 +135,7 @@ function makeFixture(options: {
       bbox: panel,
       zOrder: 1,
       relations: ["opaque-relation-id"],
+      carriedTextIds: texts.map(({ id }) => id),
     },
     texts,
     backingPixels,
@@ -234,6 +235,7 @@ test("is invariant to audit-only candidate and text naming", async () => {
   right.candidate.relations = ["different-opaque-relation"];
   right.texts[0]!.text = "完全不同的标签";
   right.texts[0]!.id = "renamed-text";
+  right.candidate.carriedTextIds = ["renamed-text"];
 
   const [leftResult, rightResult] = await Promise.all([
     extractTextBacking(left.canvas, left.candidate, left.texts),
@@ -316,6 +318,37 @@ test("atomically rejects an unrelated OCR box intersecting the backing", async (
   fixture.texts.push(
     textElement("unrelated", { x: 94, y: 30, width: 18, height: 14 }, "outside"),
   );
+  await expectAtomicRejection(fixture, "backing_mask_invalid");
+});
+
+test("atomically rejects a fully contained OCR box that is not a carries-text target", async () => {
+  const fixture = makeFixture();
+  fixture.texts.push(
+    textElement("fully-contained-unrelated", {
+      x: 70,
+      y: 20,
+      width: 20,
+      height: 8,
+    }, "not carried"),
+  );
+  for (let y = 22; y < 26; y += 1) {
+    setRgb(fixture.canvas.rgba, y * WIDTH + 76, [20, 24, 28]);
+  }
+
+  await expectAtomicRejection(fixture, "backing_mask_invalid");
+});
+
+test("atomically rejects a subpixel non-target OCR overlap with backing alpha", async () => {
+  const fixture = makeFixture();
+  fixture.texts.push(
+    textElement("subpixel-unrelated", {
+      x: 99.75,
+      y: 30.75,
+      width: 0.4,
+      height: 0.4,
+    }, "tiny unrelated"),
+  );
+
   await expectAtomicRejection(fixture, "backing_mask_invalid");
 });
 
