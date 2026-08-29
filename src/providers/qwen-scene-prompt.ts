@@ -10,6 +10,7 @@ export function createScenePrompt(canvas: CanvasSize): string {
 The source canvas is ${owningCanvas.width} x ${owningCanvas.height} pixels. Use it only as spatial context; do not return pixel coordinates.
 Return exactly {"nodes":[...],"relations":[...]} with no additional fields.
 For every node return id, role, bbox, confidence, label, extractionHints, and optional zIndex.
+extractionHints must be an array of strings; return [] when there are none.
 role must be one of: background | text | text-backing | foreground-object | connector | compound-group | decoration.
 bbox must be [x1,y1,x2,y2] in normalized thousandths from 0 through 1000, where 0 is the top or left edge and 1000 is the bottom or right edge. Coordinates must be integers and x2/y2 must exceed x1/y1.
 Return exactly one background node covering the complete canvas.
@@ -37,6 +38,7 @@ Return exactly one background node covering the complete crop. It is coordinate 
 Return only replacement nodes and relations for the target subgraph. Preserve a target ID for a one-to-one replacement; use stable new IDs only when splitting or joining visible parts requires it.
 Do not return text nodes. OCR and all nodes outside the target subgraph are authoritative and must not be replaced, duplicated, or inferred.
 For every node return id, role, bbox, confidence, label, extractionHints, and optional zIndex.
+extractionHints must be an array of strings; return [] when there are none.
 role must be one of: background | text-backing | foreground-object | connector | compound-group | decoration.
 For every relation return id, kind, from, to, and confidence. relation kind must be one of: belongs-to | connected-to | occludes | in-front-of | behind.
 Reference only node IDs present in this regional response. Labels are audit-only; make decisions only from visible geometry, roles, relations, confidence, zIndex, and extractionHints.`;

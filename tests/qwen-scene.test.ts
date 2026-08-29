@@ -371,7 +371,78 @@ test("sends a generic JSON-only scene request for the owning canvas", async () =
   }
 });
 
-test("observes a content parse failure exactly once without request secrets", async () => {
+test("repairs a truncated scene response at the last complete element", async () => {
+  const fixture = await readFixture();
+  const content = fixture.choices[0]!.message.content;
+  const relationsStart = content.indexOf('"relations"');
+  const firstRelation = content.indexOf('{"id"', relationsStart);
+  const secondRelation = content.indexOf('{"id"', firstRelation + 1);
+  assert.ok(secondRelation > firstRelation);
+  const truncated = content.slice(0, secondRelation + 4);
+
+  const graph = parseQwenSceneContent(truncated, {
+    width: 1377,
+    height: 811,
+  });
+  assert.equal(graph.nodes.length, 7);
+  assert.equal(graph.relations.length, 1);
+});
+
+test("coerces object-shaped provider extractionHints to string arrays", async () => {
+  const fixture = await readFixture();
+  const payload = parseFixturePayload(fixture);
+  payload.nodes[0]!.extractionHints = {};
+  payload.nodes[1]!.extractionHints = { surface: "badge", keep: 7 };
+
+  const graph = parseQwenSceneContent(JSON.stringify(payload), {
+    width: 1377,
+    height: 811,
+  });
+  assert.deepEqual(graph.nodes[0]?.extractionHints, []);
+  assert.deepEqual(graph.nodes[1]?.extractionHints, ["badge"]);
+});
+
+test("retries a truncated scene response once with corrective instructions", async () => {
+  const fixture = await readFixture();
+  const content = fixture.choices[0]!.message.content;
+  const relationsStart = content.indexOf('"relations"');
+  const truncated = content.slice(0, relationsStart + 30);
+  const originalFetch = globalThis.fetch;
+  const image = Buffer.from("private-scene-image");
+  const calls: Array<{ init: RequestInit | undefined }> = [];
+
+  globalThis.fetch = async (_input, init) => {
+    calls.push({ init });
+    return Response.json(
+      completionWithContent(calls.length === 1 ? truncated : content),
+    );
+  };
+
+  try {
+    const graph = await analyzeScene(
+      image,
+      { width: 1377, height: 811 },
+      config,
+    );
+    assert.equal(calls.length, 2);
+    assert.equal(graph.nodes.length, 7);
+    const body = JSON.parse(String(calls[1]?.init?.body)) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    assert.equal(body.messages.length, 3);
+    assert.equal(body.messages[1]?.role, "assistant");
+    assert.equal(body.messages[1]?.content, truncated);
+    assert.equal(body.messages[2]?.role, "user");
+    assert.match(String(body.messages[2]?.content), /complete JSON/i);
+    assert.match(String(body.messages[2]?.content), /extractionHints/i);
+    const serialized = JSON.stringify(body);
+    assert.doesNotMatch(serialized, new RegExp(config.apiKey, "i"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("retries once and observes each content parse failure without request secrets", async () => {
   const originalFetch = globalThis.fetch;
   const image = Buffer.from("private-scene-image");
   const imageBase64 = image.toString("base64");
@@ -390,9 +461,9 @@ test("observes a content parse failure exactly once without request secrets", as
       ),
       /valid JSON/i,
     );
-    assert.equal(observed.rawResponses.length, 1);
+    assert.equal(observed.rawResponses.length, 2);
     assert.equal(observed.rawHttpResponses.length, 0);
-    assert.equal(observed.parseErrors.length, 1);
+    assert.equal(observed.parseErrors.length, 2);
     const serializedObservation = JSON.stringify({
       rawResponses: observed.rawResponses,
       rawHttpResponses: observed.rawHttpResponses,

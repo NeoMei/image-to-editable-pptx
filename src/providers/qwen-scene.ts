@@ -27,6 +27,9 @@ const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
 const PROVIDER_COORDINATE_SCALE = 1000;
 
+const SCENE_RETRY_INSTRUCTION =
+  "Your previous reply was cut off or invalid. Reply again with the complete JSON only: close every bracket and quote, keep each label under ten words, make extractionHints an array of strings (use [] when empty), and return every node and relation required by the earlier field contract.";
+
 const ProviderCoordinateSchema = z
   .number()
   .int()
@@ -57,6 +60,18 @@ const ProviderBBoxSchema = z
     }
   });
 
+const ProviderExtractionHintsSchema = z.preprocess((value) => {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.values(value).filter(
+      (item): item is string => typeof item === "string",
+    );
+  }
+  return [];
+}, z.array(z.string()));
+
 const ProviderScenePayloadSchema = z
   .object({
     nodes: z.array(
@@ -68,7 +83,7 @@ const ProviderScenePayloadSchema = z
           confidence: z.number().finite().min(0).max(1),
           zIndex: z.number().int().safe().optional(),
           label: z.string(),
-          extractionHints: z.array(z.string()),
+          extractionHints: ProviderExtractionHintsSchema,
         })
         .strict(),
     ),
@@ -144,15 +159,92 @@ function stripSingleOuterFence(content: string): string {
   return fenced?.[1]?.trim() ?? trimmed;
 }
 
+function closersForPrefix(prefix: string): string {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < prefix.length; index += 1) {
+    const char = prefix[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{" || char === "[") {
+      stack.push(char);
+    } else if (char === "}" || char === "]") {
+      stack.pop();
+    }
+  }
+  let closers = inString ? '"' : "";
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    closers += stack[index] === "{" ? "}" : "]";
+  }
+  return closers;
+}
+
+export function* truncatedRepairCandidates(text: string): Generator<string> {
+  yield text + closersForPrefix(text);
+  let inString = false;
+  let escaped = false;
+  const elementEnds: number[] = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "}" || char === "]") {
+      elementEnds.push(index + 1);
+    }
+  }
+  for (let index = elementEnds.length - 1; index >= 0; index -= 1) {
+    const candidate = text.slice(0, elementEnds[index]);
+    yield candidate + closersForPrefix(candidate);
+  }
+}
+
 export function parseQwenSceneContent(
   content: string,
   canvas: CanvasSize,
 ): SceneGraph {
+  const stripped = stripSingleOuterFence(content);
   let payload: unknown;
   try {
-    payload = JSON.parse(stripSingleOuterFence(content));
+    payload = JSON.parse(stripped);
   } catch (error) {
-    throw new Error("Qwen scene response is not valid JSON", { cause: error });
+    let repaired: unknown;
+    let repairedOk = false;
+    for (const candidate of truncatedRepairCandidates(stripped)) {
+      try {
+        repaired = JSON.parse(candidate);
+        repairedOk = true;
+        break;
+      } catch {
+        continue;
+      }
+    }
+    if (!repairedOk) {
+      throw new Error("Qwen scene response is not valid JSON", {
+        cause: error,
+      });
+    }
+    payload = repaired;
   }
 
   try {
@@ -197,13 +289,39 @@ export async function analyzeScene(
   return requestSceneGraph(image, canvas, prompt, config, observer);
 }
 
-async function requestSceneGraph(
-  image: Buffer,
-  canvas: CanvasSize,
+type SceneUserContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+type SceneChatMessage =
+  | { role: "user"; content: string | SceneUserContentPart[] }
+  | { role: "assistant"; content: string };
+
+function buildSceneMessages(
   prompt: string,
+  image: Buffer,
+): SceneChatMessage[] {
+  return [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: prompt },
+        {
+          type: "image_url",
+          image_url: {
+            url: "data:image/png;base64," + image.toString("base64"),
+          },
+        },
+      ],
+    },
+  ];
+}
+
+async function createSceneCompletion(
+  messages: SceneChatMessage[],
   config: AppConfig,
   observer?: ProviderResponseObserver,
-): Promise<SceneGraph> {
+): Promise<string | null> {
   const baseURL = requireSafeCompatibleBase(config);
   let outerHttpParseError: Error | undefined;
   const client = new OpenAI({
@@ -231,20 +349,7 @@ async function requestSceneGraph(
   const completion = await client.chat.completions
     .create({
       model: config.visionModel,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:image/png;base64,${image.toString("base64")}`,
-              },
-            },
-          ],
-        },
-      ],
+      messages,
     })
     .catch((error: unknown) => {
       if (outerHttpParseError !== undefined) throw outerHttpParseError;
@@ -254,16 +359,49 @@ async function requestSceneGraph(
   if (outerHttpParseError !== undefined) throw outerHttpParseError;
 
   await observer?.recordRawResponse(completion);
-  try {
-    const content = completion.choices[0]?.message.content;
-    if (typeof content !== "string") {
-      throw new Error("Qwen scene response did not contain text content");
-    }
+  return completion.choices[0]?.message.content ?? null;
+}
 
-    return parseQwenSceneContent(content, canvas);
-  } catch (error) {
-    await observer?.recordParseError(error);
-    throw error;
+function requireSceneContent(content: string | null): string {
+  if (typeof content !== "string") {
+    throw new Error("Qwen scene response did not contain text content");
+  }
+  return content;
+}
+
+async function requestSceneGraph(
+  image: Buffer,
+  canvas: CanvasSize,
+  prompt: string,
+  config: AppConfig,
+  observer?: ProviderResponseObserver,
+): Promise<SceneGraph> {
+  const messages = buildSceneMessages(prompt, image);
+  const firstContent = await createSceneCompletion(messages, config, observer);
+  try {
+    return parseQwenSceneContent(requireSceneContent(firstContent), canvas);
+  } catch (firstError) {
+    await observer?.recordParseError(firstError);
+  }
+
+  const retryMessages: SceneChatMessage[] = [
+    ...messages,
+    {
+      role: "assistant",
+      content: typeof firstContent === "string" ? firstContent : "",
+    },
+    { role: "user", content: SCENE_RETRY_INSTRUCTION },
+  ];
+  const retryContent = await createSceneCompletion(
+    retryMessages,
+    config,
+    observer,
+  );
+  try {
+    return parseQwenSceneContent(requireSceneContent(retryContent), canvas);
+  } catch (retryError) {
+    await observer?.recordParseError(retryError);
+    throw retryError;
   }
 }
 
