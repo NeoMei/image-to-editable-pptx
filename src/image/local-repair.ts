@@ -10,6 +10,7 @@ const MIN_RING_SAMPLES = 16;
 const MAX_RING_CHANNEL_MAD = 18;
 const MAX_RING_SEED_DISTANCE = 64;
 const MAX_FILLED_PIXEL_DISTANCE_P95 = 28;
+const MAX_LOCAL_SURFACE_DELTA_P95 = 32;
 const HARMONIC_SMOOTHING_PASSES = 64;
 
 const DIRECTIONS = [
@@ -30,6 +31,18 @@ function percentile95(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.ceil(sorted.length * 0.95) - 1]!;
+}
+
+export type LocalRepairOptions = {
+  surfaceMask?: Buffer;
+};
+
+function maxChannelDelta(data: Buffer, leftIndex: number, rightIndex: number): number {
+  return Math.max(
+    ...[0, 1, 2].map((channel) =>
+      Math.abs(data[leftIndex * 4 + channel]! - data[rightIndex * 4 + channel]!),
+    ),
+  );
 }
 
 function rgbDistance(
@@ -71,28 +84,53 @@ function neighbors(index: number, width: number, height: number): number[] {
 export async function repairLocalRegion(
   source: Buffer,
   mask: Buffer,
+  options: LocalRepairOptions = {},
 ): Promise<LocalRepairResult> {
-  const [sourceDecoded, maskDecoded] = await Promise.all([
+  const [sourceDecoded, maskDecoded, surfaceDecoded] = await Promise.all([
     sharp(source).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
     sharp(mask)
       .removeAlpha()
       .greyscale()
       .raw()
       .toBuffer({ resolveWithObject: true }),
+    options.surfaceMask === undefined
+      ? Promise.resolve(undefined)
+      : sharp(options.surfaceMask)
+          .removeAlpha()
+          .greyscale()
+          .raw()
+          .toBuffer({ resolveWithObject: true }),
   ]);
   const { width, height } = sourceDecoded.info;
   if (
     maskDecoded.info.width !== width ||
-    maskDecoded.info.height !== height
+    maskDecoded.info.height !== height ||
+    (surfaceDecoded !== undefined &&
+      (surfaceDecoded.info.width !== width || surfaceDecoded.info.height !== height))
   ) {
     throw new RangeError("Source and mask dimensions must match");
   }
 
   const pixelCount = width * height;
   const masked = new Uint8Array(pixelCount);
+  const surface = new Uint8Array(pixelCount);
+  for (let index = 0; index < pixelCount; index += 1) {
+    surface[index] =
+      surfaceDecoded === undefined || surfaceDecoded.data[index]! >= 128 ? 1 : 0;
+  }
   const maskedIndexes: number[] = [];
   for (let index = 0; index < pixelCount; index += 1) {
     if (maskDecoded.data[index]! < 128) continue;
+    if (surface[index] === 0) {
+      const metrics: LocalRepairMetrics = {
+        maskedPixels: 0,
+        outsideMaskChangedPixels: 0,
+        ringSamples: 0,
+        ringChannelMad: 0,
+        filledPixelDistanceP95: 0,
+      };
+      return rejected(source, "surface_samples_insufficient", metrics);
+    }
     masked[index] = 1;
     maskedIndexes.push(index);
   }
@@ -118,6 +156,7 @@ export async function repairLocalRegion(
       for (const neighbor of neighbors(index, width, height)) {
         if (ringSeen[neighbor] !== 0) continue;
         ringSeen[neighbor] = 1;
+        if (surface[neighbor] === 0) continue;
         if (masked[neighbor] !== 0) continue;
         ring.push(neighbor);
         nextFrontier.push(neighbor);
@@ -143,17 +182,36 @@ export async function repairLocalRegion(
       median(values.map((value) => Math.abs(value - ringMedian[channel]!))),
     ),
   );
-  if (metrics.ringChannelMad > MAX_RING_CHANNEL_MAD) {
+  if (surfaceDecoded !== undefined) {
+    const ringSet = new Uint8Array(pixelCount);
+    for (const index of ring) ringSet[index] = 1;
+    const localDeltas: number[] = [];
+    for (const index of ring) {
+      for (const neighbor of neighbors(index, width, height)) {
+        if (ringSet[neighbor] === 0) continue;
+        if (neighbor > index) {
+          localDeltas.push(maxChannelDelta(sourceDecoded.data, index, neighbor));
+        }
+      }
+    }
+    metrics.ringChannelMad = percentile95(localDeltas);
+  }
+  if (
+    metrics.ringChannelMad >
+    (surfaceDecoded === undefined ? MAX_RING_CHANNEL_MAD : MAX_LOCAL_SURFACE_DELTA_P95)
+  ) {
     return rejected(source, "surface_variance_too_high", metrics);
   }
 
-  const safeRing = ring.filter((index) => {
-    const offset = index * 4;
-    return (
-      rgbDistance(sourceDecoded.data, offset, ringMedian) <=
-      MAX_RING_SEED_DISTANCE
-    );
-  });
+  const safeRing = surfaceDecoded === undefined
+    ? ring.filter((index) => {
+        const offset = index * 4;
+        return (
+          rgbDistance(sourceDecoded.data, offset, ringMedian) <=
+          MAX_RING_SEED_DISTANCE
+        );
+      })
+    : ring;
   metrics.ringSamples = safeRing.length;
   if (safeRing.length < MIN_RING_SAMPLES) {
     return rejected(source, "surface_samples_insufficient", metrics);
@@ -230,8 +288,23 @@ export async function repairLocalRegion(
       ),
     ),
   );
-  metrics.filledPixelDistanceP95 = percentile95(filledDistances);
-  if (metrics.filledPixelDistanceP95 > MAX_FILLED_PIXEL_DISTANCE_P95) {
+  if (surfaceDecoded === undefined) {
+    metrics.filledPixelDistanceP95 = percentile95(filledDistances);
+  } else {
+    const seamDistances: number[] = [];
+    for (const index of maskedIndexes) {
+      for (const neighbor of neighbors(index, width, height)) {
+        if (masked[neighbor] === 0 && surface[neighbor] !== 0) {
+          seamDistances.push(maxChannelDelta(output, index, neighbor));
+        }
+      }
+    }
+    metrics.filledPixelDistanceP95 = percentile95(seamDistances);
+  }
+  if (
+    surfaceDecoded === undefined &&
+    metrics.filledPixelDistanceP95 > MAX_FILLED_PIXEL_DISTANCE_P95
+  ) {
     return rejected(source, "filled_pixels_too_different", metrics);
   }
 

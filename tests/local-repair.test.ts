@@ -223,3 +223,69 @@ test("harmonic smoothing removes a hard nearest-seed split and preserves alpha",
     assert.equal(output[index * 4 + 3], rgba[index * 4 + 3]);
   }
 });
+
+test("repairs a wide glyph mask on a smooth gradient within the same surface", async () => {
+  const width = 48;
+  const height = 24;
+  const rgb = Buffer.alloc(width * height * 3);
+  const mask = Buffer.alloc(width * height);
+  const surface = Buffer.alloc(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const value = 70 + x * 3;
+      rgb.set([value, value + 4, value + 8], (y * width + x) * 3);
+      if (x >= 4 && x < 44 && y >= 3 && y < 21) {
+        surface[y * width + x] = 255;
+      }
+      if (x >= 12 && x < 36 && y >= 10 && y < 14) {
+        mask[y * width + x] = 255;
+        rgb.set([20, 20, 20], (y * width + x) * 3);
+      }
+    }
+  }
+  const result = await repairLocalRegion(
+    await encodeRgb(rgb, width, height),
+    await encodeMask(mask, width, height),
+    { surfaceMask: await encodeMask(surface, width, height) },
+  );
+  const output = await sharp(result.image).removeAlpha().raw().toBuffer();
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.metrics.outsideMaskChangedPixels, 0);
+  for (const x of [12, 20, 28, 35]) {
+    const expected = 70 + x * 3;
+    assert.ok(
+      Math.abs(output[(11 * width + x) * 3]! - expected) <= 5,
+      `expected repaired gradient near ${expected} at x=${x}`,
+    );
+  }
+});
+
+test("rejects a high-frequency surface even when constrained to its backing", async () => {
+  const width = 40;
+  const height = 28;
+  const rgb = Buffer.alloc(width * height * 3);
+  const mask = Buffer.alloc(width * height);
+  const surface = Buffer.alloc(width * height);
+  for (let y = 4; y < 24; y += 1) {
+    for (let x = 5; x < 35; x += 1) {
+      const value = (x + y) % 2 === 0 ? 70 : 180;
+      rgb.set([value, value, value], (y * width + x) * 3);
+      surface[y * width + x] = 255;
+      if (x >= 15 && x < 25 && y >= 11 && y < 17) {
+        mask[y * width + x] = 255;
+        rgb.set([20, 20, 20], (y * width + x) * 3);
+      }
+    }
+  }
+  const source = await encodeRgb(rgb, width, height);
+  const result = await repairLocalRegion(
+    source,
+    await encodeMask(mask, width, height),
+    { surfaceMask: await encodeMask(surface, width, height) },
+  );
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "surface_variance_too_high");
+  assert.deepEqual(result.image, source);
+});

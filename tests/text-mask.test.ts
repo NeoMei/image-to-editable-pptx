@@ -32,6 +32,14 @@ async function encodeRgb(
   return sharp(data, { raw: { width, height, channels: 3 } }).png().toBuffer();
 }
 
+async function encodeMask(
+  data: Buffer,
+  width: number,
+  height: number,
+): Promise<Buffer> {
+  return sharp(data, { raw: { width, height, channels: 1 } }).png().toBuffer();
+}
+
 async function decodeMask(mask: Buffer) {
   return sharp(mask).raw().toBuffer({ resolveWithObject: true });
 }
@@ -401,4 +409,62 @@ test("rejects non-finite or negative mask options", async () => {
       /must be a non-negative finite number/,
     );
   }
+});
+
+test("models a smooth gradient inside an explicit same-surface mask", async () => {
+  const width = 48;
+  const height = 24;
+  const rgb = Buffer.alloc(width * height * 3);
+  const surface = Buffer.alloc(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3;
+      const value = 70 + x * 3;
+      rgb.set([value, value + 5, value + 10], offset);
+      if (x >= 4 && x < 44 && y >= 3 && y < 21) {
+        surface[y * width + x] = 255;
+      }
+    }
+  }
+  for (let y = 9; y < 15; y += 1) {
+    for (const x of [20, 21, 27, 28]) {
+      rgb.set([20, 24, 28], (y * width + x) * 3);
+    }
+  }
+  const result = await buildTightTextMask(
+    await encodeRgb(rgb, width, height),
+    textElement("gradient-glyph", { x: 12, y: 6, width: 24, height: 12 }),
+    {
+      dilationPx: 0,
+      surfaceMask: await encodeMask(surface, width, height),
+    },
+  );
+  const { data, info } = await decodeMask(result.mask);
+
+  assert.equal(result.maskedPixels, 24);
+  assert.equal(data[(11 * width + 20) * info.channels], 255);
+  assert.equal(data[(11 * width + 24) * info.channels], 0);
+});
+
+test("clips adaptive text dilation to its accepted surface", async () => {
+  const width = 32;
+  const height = 24;
+  const rgb = Buffer.alloc(width * height * 3, 240);
+  const surface = Buffer.alloc(width * height);
+  for (let y = 5; y < 19; y += 1) {
+    for (let x = 6; x < 26; x += 1) surface[y * width + x] = 255;
+  }
+  rgb.set([20, 20, 20], (10 * width + 7) * 3);
+  const result = await buildTightTextMask(
+    await encodeRgb(rgb, width, height),
+    textElement("surface-clipped", { x: 6, y: 7, width: 8, height: 8 }),
+    {
+      dilationPx: 3,
+      surfaceMask: await encodeMask(surface, width, height),
+    },
+  );
+  const { data, info } = await decodeMask(result.mask);
+
+  assert.equal(data[(10 * width + 6) * info.channels], 255);
+  assert.equal(data[(10 * width + 5) * info.channels], 0);
 });

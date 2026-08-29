@@ -5,6 +5,7 @@ import type { TextSlideElement } from "../contracts.js";
 export type TextMaskOptions = {
   colorDistance?: number;
   dilationPx?: number;
+  surfaceMask?: Buffer;
 };
 
 export type TextMaskResult = {
@@ -32,6 +33,12 @@ const MAX_LINE_LIKE_FRINGE_THICKNESS_PX = 2;
 
 type Rgb = readonly [number, number, number];
 
+type SurfaceSample = {
+  x: number;
+  y: number;
+  color: Rgb;
+};
+
 type Bounds = {
   left: number;
   top: number;
@@ -51,6 +58,12 @@ function median(values: readonly number[]): number {
   const middle = Math.floor(sorted.length / 2);
   const upper = sorted[middle]!;
   return sorted.length % 2 === 0 ? (sorted[middle - 1]! + upper) / 2 : upper;
+}
+
+function percentile95(values: readonly number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.ceil(sorted.length * 0.95) - 1]!;
 }
 
 function channelMedians(colors: readonly Rgb[]): Rgb {
@@ -135,6 +148,143 @@ function localSurfaceRing(
     }
   }
   return colors;
+}
+
+function localSurfaceRingSamples(
+  data: Buffer,
+  width: number,
+  height: number,
+  bounds: Bounds,
+  surfaceMask?: Buffer,
+): SurfaceSample[] {
+  const samples: SurfaceSample[] = [];
+  const ringLeft = Math.max(0, bounds.left - 1);
+  const ringTop = Math.max(0, bounds.top - 1);
+  const ringRight = Math.min(width, bounds.right + 1);
+  const ringBottom = Math.min(height, bounds.bottom + 1);
+  for (let y = ringTop; y < ringBottom; y += 1) {
+    for (let x = ringLeft; x < ringRight; x += 1) {
+      const insideBox =
+        x >= bounds.left &&
+        x < bounds.right &&
+        y >= bounds.top &&
+        y < bounds.bottom;
+      if (insideBox || (surfaceMask !== undefined && surfaceMask[y * width + x]! < 128)) {
+        continue;
+      }
+      samples.push({ x, y, color: rgbAt(data, width, x, y) });
+    }
+  }
+  return samples;
+}
+
+function localSurfaceVariation(samples: readonly SurfaceSample[]): number {
+  const byCoordinate = new Map(
+    samples.map((sample) => [`${sample.x}:${sample.y}`, sample] as const),
+  );
+  const deltas: number[] = [];
+  for (const sample of samples) {
+    for (const [dx, dy] of [[1, 0], [0, 1]] as const) {
+      const neighbor = byCoordinate.get(`${sample.x + dx}:${sample.y + dy}`);
+      if (neighbor !== undefined) {
+        deltas.push(maxChannelDistance(sample.color, neighbor.color));
+      }
+    }
+  }
+  return percentile95(deltas);
+}
+
+function solveLinearSystem(
+  matrix: number[][],
+  values: number[],
+): number[] | undefined {
+  const rows = matrix.map((row, index) => [...row, values[index]!]);
+  for (let column = 0; column < 3; column += 1) {
+    let pivot = column;
+    for (let row = column + 1; row < 3; row += 1) {
+      if (Math.abs(rows[row]![column]!) > Math.abs(rows[pivot]![column]!)) {
+        pivot = row;
+      }
+    }
+    if (Math.abs(rows[pivot]![column]!) < 1e-9) return undefined;
+    [rows[column], rows[pivot]] = [rows[pivot]!, rows[column]!];
+    const divisor = rows[column]![column]!;
+    for (let index = column; index < 4; index += 1) {
+      rows[column]![index]! /= divisor;
+    }
+    for (let row = 0; row < 3; row += 1) {
+      if (row === column) continue;
+      const factor = rows[row]![column]!;
+      for (let index = column; index < 4; index += 1) {
+        rows[row]![index]! -= factor * rows[column]![index]!;
+      }
+    }
+  }
+  return rows.map((row) => row[3]!);
+}
+
+function fitSurfaceModel(
+  samples: readonly SurfaceSample[],
+): ((x: number, y: number) => Rgb) | undefined {
+  const minX = Math.min(...samples.map(({ x }) => x));
+  const maxX = Math.max(...samples.map(({ x }) => x));
+  const minY = Math.min(...samples.map(({ y }) => y));
+  const maxY = Math.max(...samples.map(({ y }) => y));
+  const scaleX = Math.max(1, maxX - minX);
+  const scaleY = Math.max(1, maxY - minY);
+  const normalized = (x: number, y: number) => ({
+    x: (x - minX) / scaleX,
+    y: (y - minY) / scaleY,
+  });
+  let sumX = 0;
+  let sumY = 0;
+  let sumXX = 0;
+  let sumXY = 0;
+  let sumYY = 0;
+  for (const sample of samples) {
+    const { x, y } = normalized(sample.x, sample.y);
+    sumX += x;
+    sumY += y;
+    sumXX += x * x;
+    sumXY += x * y;
+    sumYY += y * y;
+  }
+  const matrix = [
+    [samples.length, sumX, sumY],
+    [sumX, sumXX, sumXY],
+    [sumY, sumXY, sumYY],
+  ];
+  const coefficients: number[][] = [];
+  for (let channel = 0; channel < 3; channel += 1) {
+    let sumValue = 0;
+    let sumXValue = 0;
+    let sumYValue = 0;
+    for (const sample of samples) {
+      const { x, y } = normalized(sample.x, sample.y);
+      const value = sample.color[channel]!;
+      sumValue += value;
+      sumXValue += x * value;
+      sumYValue += y * value;
+    }
+    const solved = solveLinearSystem(matrix, [sumValue, sumXValue, sumYValue]);
+    if (solved === undefined) return undefined;
+    coefficients.push(solved);
+  }
+  return (x, y) => {
+    const local = normalized(x, y);
+    const predicted = coefficients.map((channel) =>
+      Math.max(
+        0,
+        Math.min(
+          255,
+          Math.round(
+            channel[0]! + channel[1]! * local.x + channel[2]! * local.y,
+          ),
+        ),
+      ),
+    );
+    return [predicted[0]!, predicted[1]!, predicted[2]!];
+  };
 }
 
 function maxChannelDistance(left: Rgb, right: Rgb): number {
@@ -395,10 +545,25 @@ export async function buildTightTextMask(
     "dilationPx",
     options.dilationPx ?? DEFAULT_DILATION_PX,
   );
-  const { data, info } = await sharp(source)
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  const [decodedSource, decodedSurface] = await Promise.all([
+    sharp(source).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+    options.surfaceMask === undefined
+      ? Promise.resolve(undefined)
+      : sharp(options.surfaceMask)
+          .removeAlpha()
+          .greyscale()
+          .raw()
+          .toBuffer({ resolveWithObject: true }),
+  ]);
+  const { data, info } = decodedSource;
+  if (
+    decodedSurface !== undefined &&
+    (decodedSurface.info.width !== info.width ||
+      decodedSurface.info.height !== info.height)
+  ) {
+    throw new RangeError("Source and text surface mask dimensions must match");
+  }
+  const surfaceMask = decodedSurface?.data;
   const bounds = clampedBounds(element, info.width, info.height);
   const foregroundBounds = expandBounds(
     bounds,
@@ -409,18 +574,32 @@ export async function buildTightTextMask(
       Math.max(2, Math.round(element.bbox.height / 6)),
     ),
   );
-  const surfaceSamples = localSurfaceRing(
+  const adaptiveSamples = localSurfaceRingSamples(
     data,
     info.width,
     info.height,
     bounds,
+    surfaceMask,
   );
+  const surfaceSamples = options.surfaceMask === undefined
+    ? localSurfaceRing(data, info.width, info.height, bounds)
+    : adaptiveSamples.map(({ color }) => color);
   if (surfaceSamples.length < MIN_SURFACE_SAMPLES) {
     throw new Error("Text mask surface is not locally consistent");
   }
   const surfaceRgb = channelMedians(surfaceSamples);
+  const adaptiveSurface = options.surfaceMask === undefined
+    ? undefined
+    : fitSurfaceModel(adaptiveSamples);
+  if (options.surfaceMask !== undefined && adaptiveSurface === undefined) {
+    throw new Error("Text mask surface is not locally consistent");
+  }
   const surfaceMad = channelMedianAbsoluteDeviations(surfaceSamples, surfaceRgb);
-  if (surfaceMad.some((deviation) => deviation > MAX_SURFACE_CHANNEL_MAD)) {
+  if (
+    options.surfaceMask === undefined
+      ? surfaceMad.some((deviation) => deviation > MAX_SURFACE_CHANNEL_MAD)
+      : localSurfaceVariation(adaptiveSamples) > MAX_SURFACE_CHANNEL_MAD
+  ) {
     throw new Error("Text mask surface is not locally consistent");
   }
 
@@ -429,7 +608,13 @@ export async function buildTightTextMask(
   for (let y = foregroundBounds.top; y < foregroundBounds.bottom; y += 1) {
     for (let x = foregroundBounds.left; x < foregroundBounds.right; x += 1) {
       const color = rgbAt(data, info.width, x, y);
-      if (maxChannelDistance(color, surfaceRgb) < colorDistance) {
+      if (surfaceMask !== undefined && surfaceMask[y * info.width + x]! < 128) {
+        continue;
+      }
+      const localSurface = surfaceMask === undefined
+        ? surfaceRgb
+        : adaptiveSurface!(x, y);
+      if (maxChannelDistance(color, localSurface) < colorDistance) {
         continue;
       }
       candidates[y * info.width + x] = 255;
@@ -481,6 +666,11 @@ export async function buildTightTextMask(
     Math.floor(effectiveDilationPx),
     foregroundBounds,
   );
+  if (surfaceMask !== undefined) {
+    for (let index = 0; index < maskData.length; index += 1) {
+      if (surfaceMask[index]! < 128) maskData[index] = 0;
+    }
+  }
   for (let y = foregroundBounds.top; y < foregroundBounds.bottom; y += 1) {
     for (let x = foregroundBounds.left; x < foregroundBounds.right; x += 1) {
       const outsideBox =
