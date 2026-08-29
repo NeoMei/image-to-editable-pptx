@@ -9,14 +9,13 @@ import {
   open,
   readdir,
   rm,
-  rmdir,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import sharp from "sharp";
+import { z } from "zod";
 
 import {
   AssetProvenanceSchema,
@@ -428,6 +427,10 @@ export type SemanticBuildDependencies = {
     stagedPath: string,
     finalPath: string,
   ) => Promise<void>;
+  writeCompletionMarker: (path: string, bytes: Buffer) => Promise<void>;
+  validateAssetPublication: (
+    directory: string,
+  ) => Promise<SemanticAssetPublication>;
 };
 
 type SemanticStage = {
@@ -801,6 +804,42 @@ export const SEMANTIC_ASSET_OWNERSHIP_MARKER =
 export const SEMANTIC_ASSET_COMPLETION_MARKER =
   ".semantic-assets-complete.json";
 
+const SEMANTIC_ASSET_MARKER_VERSION = 1 as const;
+const SemanticAssetDirectoryBindingSchema = z.object({
+  dev: z.string().regex(/^\d+$/u),
+  ino: z.string().regex(/^\d+$/u),
+}).strict();
+const SemanticAssetInventoryEntrySchema = z.object({
+  path: z.string().regex(/^assets\/[^/\\]+$/u),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict();
+const SemanticAssetOwnershipMarkerSchema = z.object({
+  markerVersion: z.literal(SEMANTIC_ASSET_MARKER_VERSION),
+  kind: z.literal("semantic-assets-owner"),
+  directory: SemanticAssetDirectoryBindingSchema,
+  ownerToken: z.string().uuid(),
+  inventory: z.array(SemanticAssetInventoryEntrySchema),
+}).strict();
+const SemanticAssetCompletionMarkerSchema = z.object({
+  markerVersion: z.literal(SEMANTIC_ASSET_MARKER_VERSION),
+  kind: z.literal("semantic-assets-complete"),
+  directory: SemanticAssetDirectoryBindingSchema,
+  ownerToken: z.string().uuid(),
+  ownershipMarkerSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  inventory: z.array(SemanticAssetInventoryEntrySchema),
+}).strict();
+
+export type SemanticAssetInventoryEntry = z.infer<
+  typeof SemanticAssetInventoryEntrySchema
+>;
+
+export type SemanticAssetPublication = {
+  markerVersion: typeof SEMANTIC_ASSET_MARKER_VERSION;
+  directory: z.infer<typeof SemanticAssetDirectoryBindingSchema>;
+  ownerToken: string;
+  inventory: SemanticAssetInventoryEntry[];
+};
+
 type FileSystemIdentity = {
   dev: bigint;
   ino: bigint;
@@ -846,6 +885,17 @@ async function inspectPublishedFile(
   name: string,
   expectedSha256: string,
 ): Promise<OwnedPublicationEntry> {
+  const { bytes, identity } = await readStablePublishedFile(path, name);
+  if (sha256(bytes) !== expectedSha256) {
+    throw new Error(`Semantic asset publication hash mismatch: ${name}`);
+  }
+  return { ...identity, name, sha256: expectedSha256 };
+}
+
+async function readStablePublishedFile(
+  path: string,
+  name: string,
+): Promise<{ bytes: Buffer; identity: FileSystemIdentity }> {
   const pathStats = await lstat(path, { bigint: true });
   if (!pathStats.isFile() || pathStats.isSymbolicLink()) {
     throw new Error(`Semantic asset publication is contaminated: ${name}`);
@@ -861,10 +911,7 @@ async function inspectPublishedFile(
       throw new Error(`Semantic asset publication is contaminated: ${name}`);
     }
     const bytes = await handle.readFile();
-    if (sha256(bytes) !== expectedSha256) {
-      throw new Error(`Semantic asset publication hash mismatch: ${name}`);
-    }
-    return { ...identity, name, sha256: expectedSha256 };
+    return { bytes, identity };
   } finally {
     await handle.close();
   }
@@ -910,33 +957,6 @@ async function verifyPublicationEntries(
   }
 }
 
-async function cleanupOwnedPublication(
-  directory: string,
-  directoryIdentity: FileSystemIdentity | undefined,
-  entries: readonly OwnedPublicationEntry[],
-): Promise<void> {
-  if (
-    directoryIdentity === undefined ||
-    !(await directoryHasIdentity(directory, directoryIdentity))
-  ) {
-    return;
-  }
-  for (const entry of [...entries].reverse()) {
-    if (!(await entryStillOwned(directory, entry))) continue;
-    try {
-      await unlink(join(directory, entry.name));
-    } catch {
-      // A concurrent replacement is foreign; leave it untouched.
-    }
-  }
-  if (!(await directoryHasIdentity(directory, directoryIdentity))) return;
-  try {
-    if ((await readdir(directory)).length === 0) await rmdir(directory);
-  } catch {
-    // A foreign entry or replacement keeps the directory intentionally intact.
-  }
-}
-
 const HARD_LINK_UNSUPPORTED = new Set([
   "EXDEV",
   "EMLINK",
@@ -954,6 +974,114 @@ export async function publishAssetNoReplace(
   } catch (error) {
     if (!HARD_LINK_UNSUPPORTED.has(errnoCode(error) ?? "")) throw error;
     await copyFile(stagedPath, finalPath, fsConstants.COPYFILE_EXCL);
+  }
+}
+
+function assertCanonicalAssetInventory(
+  inventory: readonly SemanticAssetInventoryEntry[],
+): void {
+  const names = inventory.map(({ path }) => path.slice("assets/".length));
+  if (
+    new Set(names).size !== names.length ||
+    names.includes(SEMANTIC_ASSET_OWNERSHIP_MARKER) ||
+    names.includes(SEMANTIC_ASSET_COMPLETION_MARKER)
+  ) {
+    throw new Error("Semantic asset inventory contains duplicate or reserved paths");
+  }
+  const sorted = [...inventory].sort((left, right) =>
+    compareCodePoints(left.path, right.path),
+  );
+  if (!isDeepStrictEqual(inventory, sorted)) {
+    throw new Error("Semantic asset inventory is not canonical");
+  }
+}
+
+async function readSemanticAssetPublicationUnchecked(
+  directory: string,
+): Promise<SemanticAssetPublication> {
+  const directoryIdentity = await readDirectoryIdentity(directory);
+  const ownerPath = join(directory, SEMANTIC_ASSET_OWNERSHIP_MARKER);
+  const completionPath = join(directory, SEMANTIC_ASSET_COMPLETION_MARKER);
+  const [ownerFile, completionFile] = await Promise.all([
+    readStablePublishedFile(ownerPath, SEMANTIC_ASSET_OWNERSHIP_MARKER),
+    readStablePublishedFile(completionPath, SEMANTIC_ASSET_COMPLETION_MARKER),
+  ]);
+  const owner = SemanticAssetOwnershipMarkerSchema.parse(
+    JSON.parse(ownerFile.bytes.toString("utf8")),
+  );
+  const completion = SemanticAssetCompletionMarkerSchema.parse(
+    JSON.parse(completionFile.bytes.toString("utf8")),
+  );
+  assertCanonicalAssetInventory(owner.inventory);
+  assertCanonicalAssetInventory(completion.inventory);
+
+  const currentDirectory = {
+    dev: directoryIdentity.dev.toString(),
+    ino: directoryIdentity.ino.toString(),
+  };
+  if (
+    !isDeepStrictEqual(owner.directory, currentDirectory) ||
+    !isDeepStrictEqual(completion.directory, currentDirectory) ||
+    owner.ownerToken !== completion.ownerToken ||
+    !isDeepStrictEqual(owner.inventory, completion.inventory) ||
+    completion.ownershipMarkerSha256 !== sha256(ownerFile.bytes)
+  ) {
+    throw new Error("Semantic asset marker ownership binding does not match");
+  }
+
+  const expectedNames = [
+    SEMANTIC_ASSET_OWNERSHIP_MARKER,
+    SEMANTIC_ASSET_COMPLETION_MARKER,
+    ...completion.inventory.map(({ path }) => path.slice("assets/".length)),
+  ].sort(compareCodePoints);
+  const actualNames = (await readdir(directory)).sort(compareCodePoints);
+  if (!isDeepStrictEqual(actualNames, expectedNames)) {
+    throw new Error("Semantic asset publication inventory is not exact");
+  }
+  for (const entry of completion.inventory) {
+    const name = entry.path.slice("assets/".length);
+    await inspectPublishedFile(join(directory, name), name, entry.sha256);
+  }
+  const [verifiedOwner, verifiedCompletion] = await Promise.all([
+    inspectPublishedFile(
+      ownerPath,
+      SEMANTIC_ASSET_OWNERSHIP_MARKER,
+      sha256(ownerFile.bytes),
+    ),
+    inspectPublishedFile(
+      completionPath,
+      SEMANTIC_ASSET_COMPLETION_MARKER,
+      sha256(completionFile.bytes),
+    ),
+  ]);
+  if (
+    !sameIdentity(verifiedOwner, ownerFile.identity) ||
+    !sameIdentity(verifiedCompletion, completionFile.identity) ||
+    !(await directoryHasIdentity(directory, directoryIdentity)) ||
+    !isDeepStrictEqual(
+      (await readdir(directory)).sort(compareCodePoints),
+      expectedNames,
+    )
+  ) {
+    throw new Error("Semantic asset publication changed during validation");
+  }
+  return {
+    markerVersion: SEMANTIC_ASSET_MARKER_VERSION,
+    directory: currentDirectory,
+    ownerToken: owner.ownerToken,
+    inventory: completion.inventory.map((entry) => ({ ...entry })),
+  };
+}
+
+export async function readSemanticAssetPublication(
+  directory: string,
+): Promise<SemanticAssetPublication> {
+  try {
+    return await readSemanticAssetPublicationUnchecked(directory);
+  } catch (error) {
+    throw new Error("Invalid semantic asset publication ownership or inventory", {
+      cause: error,
+    });
   }
 }
 
@@ -1004,9 +1132,25 @@ async function publishSemanticAssets(
     }
     directoryIdentity = await readDirectoryIdentity(finalDirectory);
 
+    const directoryBinding = {
+      dev: directoryIdentity.dev.toString(),
+      ino: directoryIdentity.ino.toString(),
+    };
+    const ownerToken = randomUUID();
+    const inventory: SemanticAssetInventoryEntry[] = assets
+      .map((asset, index) => ({
+        path: `assets/${stagedNames[index]!}`,
+        sha256: sha256(asset.image),
+      }))
+      .sort((left, right) => compareCodePoints(left.path, right.path));
+    assertCanonicalAssetInventory(inventory);
+
     const ownerBytes = Buffer.from(`${JSON.stringify({
-      format: "semantic-assets-owner-v1",
-      token: randomUUID(),
+      markerVersion: SEMANTIC_ASSET_MARKER_VERSION,
+      kind: "semantic-assets-owner",
+      directory: directoryBinding,
+      ownerToken,
+      inventory,
     })}\n`);
     const ownerPath = join(finalDirectory, SEMANTIC_ASSET_OWNERSHIP_MARKER);
     await writeFile(ownerPath, ownerBytes, { flag: "wx", mode: 0o600 });
@@ -1040,40 +1184,29 @@ async function publishSemanticAssets(
     await rm(stagingDir, { recursive: true, force: true });
 
     const completionBytes = Buffer.from(`${JSON.stringify({
-      format: "semantic-assets-complete-v1",
-      assets: assets.map((asset, index) => ({
-        path: `assets/${stagedNames[index]!}`,
-        sha256: sha256(asset.image),
-      })),
+      markerVersion: SEMANTIC_ASSET_MARKER_VERSION,
+      kind: "semantic-assets-complete",
+      directory: directoryBinding,
+      ownerToken,
+      ownershipMarkerSha256: sha256(ownerBytes),
+      inventory,
     })}\n`);
     const completionPath = join(
       finalDirectory,
       SEMANTIC_ASSET_COMPLETION_MARKER,
     );
-    await writeFile(completionPath, completionBytes, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    ownedEntries.push(
-      await inspectPublishedFile(
-        completionPath,
-        SEMANTIC_ASSET_COMPLETION_MARKER,
-        sha256(completionBytes),
-      ),
-    );
-    await verifyPublicationEntries(
-      finalDirectory,
-      directoryIdentity,
-      ownedEntries,
-    );
+    await dependencies.writeCompletionMarker(completionPath, completionBytes);
+    const validated = await dependencies.validateAssetPublication(finalDirectory);
+    if (
+      !isDeepStrictEqual(validated.directory, directoryBinding) ||
+      validated.ownerToken !== ownerToken ||
+      !isDeepStrictEqual(validated.inventory, inventory)
+    ) {
+      throw new Error("Semantic asset publication validation did not match the build");
+    }
     published = true;
   } finally {
     if (!published) {
-      await cleanupOwnedPublication(
-        finalDirectory,
-        directoryIdentity,
-        ownedEntries,
-      );
       await rm(stagingDir, { recursive: true, force: true });
     }
   }
@@ -1219,6 +1352,9 @@ const defaultSemanticBuildDependencies: SemanticBuildDependencies = {
   writeAsset: writeFile,
   createAssetsDirectory: async (path) => mkdir(path),
   publishAssetNoReplace,
+  writeCompletionMarker: async (path, bytes) =>
+    writeFile(path, bytes, { flag: "wx", mode: 0o600 }),
+  validateAssetPublication: readSemanticAssetPublication,
 };
 
 export async function buildSemanticLayers(

@@ -7,8 +7,10 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,6 +24,7 @@ import {
   buildSemanticLayers,
   repairCommittedUnion,
 } from "../src/fidelity/build.js";
+import * as fidelityBuild from "../src/fidelity/build.js";
 import {
   chooseSemanticMask,
   deriveSemanticMasks,
@@ -405,6 +408,16 @@ test("atomically builds graph-ordered semantic layers and rolls back one exposed
     for (const asset of result.acceptedAssets) {
       assert.deepEqual(await readFile(join(workDir, asset.assetPath)), asset.image);
     }
+    const publication = await fidelityBuild.readSemanticAssetPublication(
+      join(workDir, "assets"),
+    );
+    assert.deepEqual(
+      publication.inventory.map(({ path, sha256: hash }) => ({ path, hash })),
+      result.acceptedAssets.map((asset) => ({
+        path: asset.assetPath,
+        hash: sha256(asset.image),
+      })),
+    );
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
@@ -709,9 +722,115 @@ test("retains a foreign file injected during publication without completing", as
       /unexpected entry|contaminated/,
     );
     assert.ok(publishedFiles >= 1);
-    assert.deepEqual(await readdir(assetsDir), ["competitor.txt"]);
+    const evidence = await readdir(assetsDir);
+    assert.ok(evidence.includes("competitor.txt"));
+    assert.ok(evidence.includes(".semantic-assets-owner.json"));
+    assert.ok(evidence.some((name) => name.endsWith(".png")));
+    assert.equal(evidence.includes(".semantic-assets-complete.json"), false);
     assert.equal(await readFile(join(assetsDir, "competitor.txt"), "utf8"), "foreign");
     assert.deepEqual(await readdir(workDir), ["assets"]);
+    await assert.rejects(
+      fidelityBuild.readSemanticAssetPublication(assetsDir),
+      /completion|inventory|unexpected/,
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects a completion marker written into a replacement directory", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-dir-replacement-"));
+  const assetsDir = join(workDir, "assets");
+  const displacedDir = join(workDir, "claimed-assets-evidence");
+  let replacementCreated = false;
+  try {
+    await assert.rejects(
+      buildSemanticLayers(
+        {
+          source: fixture.source,
+          ocr: fixture.ocr,
+          graph: fixture.graph,
+          plan,
+          completions: new Map(),
+          workDir,
+        },
+        {
+          writeCompletionMarker: async (path: string, bytes: Buffer) => {
+            await rename(assetsDir, displacedDir);
+            await mkdir(assetsDir);
+            await writeFile(join(assetsDir, "competitor.txt"), "foreign");
+            await writeFile(path, bytes, { flag: "wx" });
+            replacementCreated = true;
+          },
+        },
+      ),
+      /ownership|directory|publication/,
+    );
+    assert.equal(replacementCreated, true);
+    assert.equal(await readFile(join(assetsDir, "competitor.txt"), "utf8"), "foreign");
+    assert.ok((await readdir(assetsDir)).includes(".semantic-assets-complete.json"));
+    assert.ok((await readdir(displacedDir)).includes(".semantic-assets-owner.json"));
+    assert.equal(
+      (await readdir(displacedDir)).includes(".semantic-assets-complete.json"),
+      false,
+    );
+    await assert.rejects(
+      fidelityBuild.readSemanticAssetPublication(assetsDir),
+      /ownership|directory|inventory/,
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("retains all incomplete evidence when an asset is replaced before validation", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-file-replacement-"));
+  const assetsDir = join(workDir, "assets");
+  let replacedName: string | undefined;
+  try {
+    await assert.rejects(
+      buildSemanticLayers(
+        {
+          source: fixture.source,
+          ocr: fixture.ocr,
+          graph: fixture.graph,
+          plan,
+          completions: new Map(),
+          workDir,
+        },
+        {
+          validateAssetPublication: async (directory: string) => {
+            replacedName = (await readdir(directory)).find((name) =>
+              name.endsWith(".png"),
+            );
+            assert.ok(replacedName);
+            await unlink(join(directory, replacedName));
+            await writeFile(join(directory, replacedName), "foreign replacement", {
+              flag: "wx",
+            });
+            return fidelityBuild.readSemanticAssetPublication(directory);
+          },
+        },
+      ),
+      /hash|publication|inventory/,
+    );
+    assert.ok(replacedName);
+    assert.equal(
+      await readFile(join(assetsDir, replacedName), "utf8"),
+      "foreign replacement",
+    );
+    const evidence = await readdir(assetsDir);
+    assert.ok(evidence.includes(".semantic-assets-owner.json"));
+    assert.ok(evidence.includes(".semantic-assets-complete.json"));
+    assert.ok(evidence.filter((name) => name.endsWith(".png")).length > 1);
+    await assert.rejects(
+      fidelityBuild.readSemanticAssetPublication(assetsDir),
+      /hash|publication|inventory/,
+    );
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
