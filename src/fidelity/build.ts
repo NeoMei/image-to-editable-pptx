@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import sharp from "sharp";
 
@@ -50,6 +57,7 @@ import type {
   SemanticCandidate,
   SemanticLayerPlan,
 } from "../scene/plan.js";
+import { planSemanticLayers } from "../scene/plan.js";
 import { extractTextBacking } from "./text-backing.js";
 import { inferEditableTextStyle } from "./text-style.js";
 
@@ -385,6 +393,31 @@ export type SemanticBuildResult = {
   recomposition: RecompositionResult;
 };
 
+export type CommittedMaskOwner = {
+  candidateId: string;
+  required: boolean;
+  mask: Buffer;
+};
+
+export type CommittedUnionRepairInput = {
+  source: Buffer;
+  canvas: { width: number; height: number };
+  unionMask: Buffer;
+  owners: readonly CommittedMaskOwner[];
+};
+
+export type CommittedUnionRepairResult = LocalRepairResult & {
+  attribution: "deterministic" | "ambiguous";
+  failingCandidateIds: string[];
+};
+
+export type SemanticBuildDependencies = {
+  repairCommittedUnion: (
+    input: CommittedUnionRepairInput,
+  ) => Promise<CommittedUnionRepairResult>;
+  writeAsset: (path: string, image: Buffer) => Promise<void>;
+};
+
 type SemanticStage = {
   candidate: SemanticCandidate;
   image: Buffer;
@@ -508,15 +541,6 @@ async function projectLocalMask(
   }).png().toBuffer();
 }
 
-async function maskHasPixels(mask: Buffer): Promise<boolean> {
-  const decoded = await sharp(mask)
-    .removeAlpha()
-    .greyscale()
-    .raw()
-    .toBuffer();
-  return decoded.some((value) => value >= 128);
-}
-
 async function outsideMaskUnchanged(
   source: SourceCanvas,
   image: Buffer,
@@ -552,19 +576,53 @@ async function outsideMaskUnchanged(
   return true;
 }
 
-async function repairCommittedMasks(
-  source: Buffer,
-  canvas: { width: number; height: number },
-  masks: readonly Buffer[],
-): Promise<LocalRepairResult> {
-  if (masks.length === 0) {
-    return {
-      image: source,
-      accepted: true,
-      metrics: EMPTY_REPAIR_METRICS,
-    };
+function addRepairMetrics(total: LocalRepairMetrics, next: LocalRepairMetrics): void {
+  total.maskedPixels += next.maskedPixels;
+  total.outsideMaskChangedPixels += next.outsideMaskChangedPixels;
+  total.ringSamples += next.ringSamples;
+  total.ringChannelMad = Math.max(total.ringChannelMad, next.ringChannelMad);
+  total.filledPixelDistanceP95 = Math.max(
+    total.filledPixelDistanceP95,
+    next.filledPixelDistanceP95,
+  );
+}
+
+export async function repairCommittedUnion(
+  input: CommittedUnionRepairInput,
+): Promise<CommittedUnionRepairResult> {
+  const [unionDecoded, ownerDecoded, sourceDecoded] = await Promise.all([
+    sharp(input.unionMask)
+      .removeAlpha()
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true }),
+    Promise.all(
+      input.owners.map(({ mask }) =>
+        sharp(mask)
+          .removeAlpha()
+          .greyscale()
+          .raw()
+          .toBuffer({ resolveWithObject: true }),
+      ),
+    ),
+    sharp(input.source)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true }),
+  ]);
+  const { width, height } = input.canvas;
+  if (
+    unionDecoded.info.width !== width ||
+    unionDecoded.info.height !== height ||
+    sourceDecoded.info.width !== width ||
+    sourceDecoded.info.height !== height ||
+    ownerDecoded.some(({ info }) => info.width !== width || info.height !== height)
+  ) {
+    throw new Error("Committed semantic mask dimensions do not match the canvas");
   }
-  const parent = masks.map((_mask, index) => index);
+  const pixelOwner = new Int32Array(width * height);
+  pixelOwner.fill(-1);
+  const parent = input.owners.map((_owner, index) => index);
   const find = (index: number): number => {
     let root = index;
     while (parent[root] !== root) root = parent[root]!;
@@ -575,85 +633,109 @@ async function repairCommittedMasks(
     }
     return root;
   };
-  const union = (left: number, right: number): void => {
+  const unionOwners = (left: number, right: number): void => {
     const leftRoot = find(left);
     const rightRoot = find(right);
     if (leftRoot === rightRoot) return;
     parent[Math.max(leftRoot, rightRoot)] = Math.min(leftRoot, rightRoot);
   };
-  const owner = new Int32Array(canvas.width * canvas.height);
-  for (const [maskIndex, mask] of masks.entries()) {
-    const decoded = await sharp(mask)
-      .removeAlpha()
-      .greyscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    if (decoded.info.width !== canvas.width || decoded.info.height !== canvas.height) {
-      throw new Error("Committed semantic mask dimensions do not match the canvas");
-    }
-    for (let pixelIndex = 0; pixelIndex < owner.length; pixelIndex += 1) {
-      if (decoded.data[pixelIndex * decoded.info.channels]! < 128) continue;
-      const previous = owner[pixelIndex]!;
-      if (previous === 0) owner[pixelIndex] = maskIndex + 1;
-      else union(maskIndex, previous - 1);
+  const ownerHasPixels = new Uint8Array(input.owners.length);
+  for (const [ownerIndex, decoded] of ownerDecoded.entries()) {
+    for (let index = 0; index < pixelOwner.length; index += 1) {
+      if (decoded.data[index * decoded.info.channels]! < 128) continue;
+      ownerHasPixels[ownerIndex] = 1;
+      const previousOwner = pixelOwner[index]!;
+      if (previousOwner >= 0) unionOwners(ownerIndex, previousOwner);
+      else pixelOwner[index] = ownerIndex;
     }
   }
-  const groups = new Map<number, Buffer[]>();
-  for (const [index, mask] of masks.entries()) {
-    const root = find(index);
-    const group = groups.get(root) ?? [];
-    group.push(mask);
-    groups.set(root, group);
+  let unionHasPixels = false;
+  for (let index = 0; index < pixelOwner.length; index += 1) {
+    const unionOn = unionDecoded.data[index * unionDecoded.info.channels]! >= 128;
+    const owned = pixelOwner[index]! >= 0;
+    if (unionOn !== owned) {
+      throw new Error("Committed union does not match its candidate ownership masks");
+    }
+    if (unionOn) unionHasPixels = true;
+  }
+  if (!unionHasPixels) {
+    return {
+      image: input.source,
+      accepted: true,
+      metrics: { ...EMPTY_REPAIR_METRICS },
+      attribution: "deterministic",
+      failingCandidateIds: [],
+    };
   }
 
-  const sourceDecoded = await sharp(source)
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  const output = Buffer.from(sourceDecoded.data);
+  const groups = new Map<number, number[]>();
+  for (let ownerIndex = 0; ownerIndex < input.owners.length; ownerIndex += 1) {
+    if (ownerHasPixels[ownerIndex] === 0) continue;
+    const root = find(ownerIndex);
+    const members = groups.get(root) ?? [];
+    members.push(ownerIndex);
+    groups.set(root, members);
+  }
   const metrics: LocalRepairMetrics = { ...EMPTY_REPAIR_METRICS };
-  for (const group of groups.values()) {
-    const groupMask = await orMasks(group, canvas);
-    const repaired = await repairLocalRegion(source, groupMask);
-    metrics.maskedPixels += repaired.metrics.maskedPixels;
-    metrics.outsideMaskChangedPixels += repaired.metrics.outsideMaskChangedPixels;
-    metrics.ringSamples += repaired.metrics.ringSamples;
-    metrics.ringChannelMad = Math.max(
-      metrics.ringChannelMad,
-      repaired.metrics.ringChannelMad,
+  const successful: Array<{ mask: Buffer; image: Buffer }> = [];
+  const failingCandidateIds = new Set<string>();
+  let failureReason: LocalRepairResult["reason"];
+  let attribution: CommittedUnionRepairResult["attribution"] = "deterministic";
+  for (const ownerIndexes of groups.values()) {
+    const groupMask = await orMasks(
+      ownerIndexes.map((ownerIndex) => input.owners[ownerIndex]!.mask),
+      input.canvas,
     );
-    metrics.filledPixelDistanceP95 = Math.max(
-      metrics.filledPixelDistanceP95,
-      repaired.metrics.filledPixelDistanceP95,
-    );
+    const repaired = await repairLocalRegion(input.source, groupMask);
+    addRepairMetrics(metrics, repaired.metrics);
     if (!repaired.accepted || repaired.metrics.outsideMaskChangedPixels !== 0) {
-      return {
-        image: source,
-        accepted: false,
-        metrics,
-        reason: repaired.reason ?? "filled_pixels_too_different",
-      };
+      failureReason ??= repaired.reason ?? "filled_pixels_too_different";
+      if (ownerIndexes.length === 0) attribution = "ambiguous";
+      for (const ownerIndex of ownerIndexes) {
+        failingCandidateIds.add(input.owners[ownerIndex]!.candidateId);
+      }
+      continue;
     }
-    const [repairedDecoded, maskDecoded] = await Promise.all([
-      sharp(repaired.image).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
-      sharp(groupMask)
+    successful.push({ mask: groupMask, image: repaired.image });
+  }
+  if (failureReason !== undefined) {
+    return {
+      image: input.source,
+      accepted: false,
+      metrics,
+      reason: failureReason,
+      attribution,
+      failingCandidateIds: [...failingCandidateIds].sort(compareCodePoints),
+    };
+  }
+
+  const output = Buffer.from(sourceDecoded.data);
+  for (const component of successful) {
+    const [decoded, maskDecoded] = await Promise.all([
+      sharp(component.image)
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true }),
+      sharp(component.mask)
         .removeAlpha()
         .greyscale()
         .raw()
         .toBuffer({ resolveWithObject: true }),
     ]);
-    for (let pixelIndex = 0; pixelIndex < owner.length; pixelIndex += 1) {
-      if (maskDecoded.data[pixelIndex * maskDecoded.info.channels]! < 128) continue;
-      const offset = pixelIndex * 4;
-      repairedDecoded.data.copy(output, offset, offset, offset + 4);
+    for (let index = 0; index < pixelOwner.length; index += 1) {
+      if (maskDecoded.data[index * maskDecoded.info.channels]! < 128) continue;
+      const offset = index * 4;
+      decoded.data.copy(output, offset, offset, offset + 4);
     }
   }
   return {
     image: await sharp(output, {
-      raw: { width: canvas.width, height: canvas.height, channels: 4 },
+      raw: { width, height, channels: 4 },
     }).png().toBuffer(),
     accepted: true,
     metrics,
+    attribution: "deterministic",
+    failingCandidateIds: [],
   };
 }
 
@@ -700,6 +782,45 @@ function assetPathFor(candidate: SemanticCandidate): string {
   const sequence = String(candidate.zOrder + 1).padStart(3, "0");
   const suffix = sha256(Buffer.from(candidate.id)).slice(0, 10);
   return `assets/semantic-${sequence}-${suffix}.png`;
+}
+
+async function assertAssetsTargetAbsent(workDir: string): Promise<void> {
+  try {
+    await lstat(join(workDir, "assets"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error("Semantic assets target already exists");
+}
+
+async function publishSemanticAssets(
+  workDir: string,
+  assets: readonly BuiltAsset[],
+  dependencies: SemanticBuildDependencies,
+): Promise<void> {
+  await assertAssetsTargetAbsent(workDir);
+  const stagingDir = await mkdtemp(join(workDir, ".semantic-assets-staging-"));
+  let published = false;
+  try {
+    for (const asset of assets) {
+      if (!asset.assetPath.startsWith("assets/")) {
+        throw new Error("Semantic asset path must be under assets");
+      }
+      const fileName = asset.assetPath.slice("assets/".length);
+      if (fileName.length === 0 || fileName.includes("/") || fileName === ".") {
+        throw new Error("Semantic asset path must name one staged file");
+      }
+      await dependencies.writeAsset(join(stagingDir, fileName), asset.image);
+    }
+    await assertAssetsTargetAbsent(workDir);
+    await rename(stagingDir, join(workDir, "assets"));
+    published = true;
+  } finally {
+    if (!published) {
+      await rm(stagingDir, { recursive: true, force: true });
+    }
+  }
 }
 
 async function validateLocalStage(input: {
@@ -837,25 +958,41 @@ function candidateRelations(
     .sort((left, right) => compareCodePoints(left.id, right.id));
 }
 
+const defaultSemanticBuildDependencies: SemanticBuildDependencies = {
+  repairCommittedUnion,
+  writeAsset: writeFile,
+};
+
 export async function buildSemanticLayers(
   input: SemanticBuildInput,
+  dependencyOverrides: Partial<SemanticBuildDependencies> = {},
 ): Promise<SemanticBuildResult> {
   OcrResultSchema.parse(input.ocr);
   SceneGraphSchema.parse(input.graph);
+  const canonicalPlan = planSemanticLayers(input.graph, input.ocr);
+  if (!isDeepStrictEqual(input.plan, canonicalPlan)) {
+    throw new Error("Supplied semantic plan must exactly match the canonical semantic plan");
+  }
+  const plan = canonicalPlan;
+  const dependencies: SemanticBuildDependencies = {
+    ...defaultSemanticBuildDependencies,
+    ...dependencyOverrides,
+  };
   if (
-    input.source.width !== input.plan.canvas.width ||
-    input.source.height !== input.plan.canvas.height ||
-    input.graph.canvas.width !== input.plan.canvas.width ||
-    input.graph.canvas.height !== input.plan.canvas.height ||
+    input.source.width !== plan.canvas.width ||
+    input.source.height !== plan.canvas.height ||
+    input.graph.canvas.width !== plan.canvas.width ||
+    input.graph.canvas.height !== plan.canvas.height ||
     input.source.rgba.length !== input.source.width * input.source.height * 4
   ) {
     throw new Error("Semantic build source, graph, and plan canvases must match");
   }
+  await assertAssetsTargetAbsent(input.workDir);
   const source = await encodeSource(input.source);
   const textMasks: Buffer[] = [];
   const manifestTexts: TextSlideElement[] = [];
   const decisions: CandidateDecision[] = [];
-  for (const textCandidate of input.plan.text) {
+  for (const textCandidate of plan.text) {
     const mask = await buildTightTextMask(source, textCandidate.element, {
       dilationPx: adaptiveTextDilation(textCandidate.element.bbox.height),
     });
@@ -883,11 +1020,11 @@ export async function buildSemanticLayers(
       },
     });
   }
-  const protectedTextMask = await orMasks(textMasks, input.plan.canvas);
+  const protectedTextMask = await orMasks(textMasks, plan.canvas);
   const stages: SemanticStage[] = [];
   const textElementsForBacking = manifestTexts.map((text) => ({ ...text }));
 
-  for (const candidate of input.plan.candidates) {
+  for (const candidate of plan.candidates) {
     const path = assetPathFor(candidate);
     if (candidate.kind === "text-backing") {
       const backing = await extractTextBacking(
@@ -1007,7 +1144,7 @@ export async function buildSemanticLayers(
       const removalMask = await projectLocalMask(
         completion.visibleMask,
         selected.bbox,
-        input.plan.canvas,
+        plan.canvas,
       );
       const decision = semanticDecision(candidate, {
         decision: "accepted",
@@ -1032,7 +1169,7 @@ export async function buildSemanticLayers(
     const removalMask = await buildAssetRemovalMask(
       selected.mask,
       selected.bbox,
-      input.plan.canvas,
+      plan.canvas,
     );
     const local = await validateLocalStage({
       source,
@@ -1085,55 +1222,81 @@ export async function buildSemanticLayers(
 
   let active = [...stages];
   let background = source;
-  let combinedMask = await orMasks(textMasks, input.plan.canvas);
+  let combinedMask = await orMasks(textMasks, plan.canvas);
   let recomposition: RecompositionResult | undefined;
   let finalRepairMetrics = EMPTY_REPAIR_METRICS;
   for (let attempt = 0; attempt <= stages.length + 1; attempt += 1) {
-    const committedMasks = [
-      ...textMasks,
-      ...active.map(({ removalMask }) => removalMask),
+    const committedOwners: CommittedMaskOwner[] = [
+      ...plan.text.map((textCandidate, index) => ({
+        candidateId: textCandidate.id,
+        required: true,
+        mask: textMasks[index]!,
+      })),
+      ...active.map(({ candidate, removalMask }) => ({
+        candidateId: candidate.id,
+        required: false,
+        mask: removalMask,
+      })),
     ];
-    combinedMask = await orMasks(committedMasks, input.plan.canvas);
-    if (await maskHasPixels(combinedMask)) {
-      const repaired = await repairCommittedMasks(
-        source,
-        input.plan.canvas,
-        committedMasks,
-      );
-      finalRepairMetrics = repaired.metrics;
-      if (
-        !repaired.accepted ||
-        repaired.metrics.outsideMaskChangedPixels !== 0 ||
-        !(await outsideMaskUnchanged(input.source, repaired.image, combinedMask))
-      ) {
-        if (active.length === 0) {
-          throw new Error("Required OCR text could not be repaired safely");
-        }
-        const reason: CandidateRejectionReason =
-          repaired.metrics.outsideMaskChangedPixels !== 0
-            ? "outside_mask_changed"
-            : (repaired.reason ?? "local_repair_failed");
-        for (const stage of active) {
-          Object.assign(
-            stage.decision,
-            semanticDecision(stage.candidate, {
-              decision: "kept_in_background",
-              repairMethod: "local_nearest_surface",
-              extraction: "transparent",
-              reason,
-              repairMetrics: repaired.metrics,
-              bbox: stage.bbox,
-            }),
-          );
-        }
-        active = [];
-        continue;
+    combinedMask = await orMasks(
+      committedOwners.map(({ mask }) => mask),
+      plan.canvas,
+    );
+    const repaired = await dependencies.repairCommittedUnion({
+      source,
+      canvas: plan.canvas,
+      unionMask: combinedMask,
+      owners: committedOwners,
+    });
+    finalRepairMetrics = repaired.metrics;
+    if (
+      !repaired.accepted ||
+      repaired.metrics.outsideMaskChangedPixels !== 0 ||
+      !(await outsideMaskUnchanged(input.source, repaired.image, combinedMask))
+    ) {
+      if (active.length === 0) {
+        throw new Error("Required OCR text could not be repaired safely");
       }
-      background = repaired.image;
-    } else {
-      finalRepairMetrics = EMPTY_REPAIR_METRICS;
-      background = source;
+      const reason: CandidateRejectionReason =
+        repaired.metrics.outsideMaskChangedPixels !== 0
+          ? "outside_mask_changed"
+          : (repaired.reason ?? "local_repair_failed");
+      const knownOwnerIds = new Set(
+        committedOwners.map(({ candidateId }) => candidateId),
+      );
+      const exactFailure =
+        repaired.attribution === "deterministic" &&
+        repaired.failingCandidateIds.length > 0 &&
+        repaired.failingCandidateIds.every((id) => knownOwnerIds.has(id));
+      const reportedIds = new Set(repaired.failingCandidateIds);
+      const rollbackIds = new Set(
+        active
+          .filter(({ candidate }) =>
+            exactFailure ? reportedIds.has(candidate.id) : true,
+          )
+          .map(({ candidate }) => candidate.id),
+      );
+      if (rollbackIds.size === 0) {
+        throw new Error("Required OCR text could not be repaired safely");
+      }
+      for (const stage of active) {
+        if (!rollbackIds.has(stage.candidate.id)) continue;
+        Object.assign(
+          stage.decision,
+          semanticDecision(stage.candidate, {
+            decision: "kept_in_background",
+            repairMethod: "local_nearest_surface",
+            extraction: "transparent",
+            reason,
+            repairMetrics: repaired.metrics,
+            bbox: stage.bbox,
+          }),
+        );
+      }
+      active = active.filter(({ candidate }) => !rollbackIds.has(candidate.id));
+      continue;
     }
+    background = repaired.image;
 
     recomposition = await validateWholePageRecomposition({
       source,
@@ -1185,7 +1348,7 @@ export async function buildSemanticLayers(
     decision.repairMetrics = finalRepairMetrics;
     decision.recompositionMetrics = recomposition.metrics;
   }
-  const maximumAssetZ = input.plan.candidates.reduce(
+  const maximumAssetZ = plan.candidates.reduce(
     (maximum, candidate) => Math.max(maximum, candidate.zOrder),
     -1,
   );
@@ -1210,12 +1373,12 @@ export async function buildSemanticLayers(
   }));
   const manifest = SlideManifestV2Schema.parse({
     manifestVersion: 2,
-    canvas: input.plan.canvas,
+    canvas: plan.canvas,
     elements: [...assetElements, ...textElements].sort(
       (left, right) =>
         left.zIndex - right.zIndex || compareCodePoints(left.id, right.id),
     ),
-    warnings: input.plan.warnings,
+    warnings: plan.warnings,
   });
   const acceptedAssets: BuiltAsset[] = active
     .sort(
@@ -1233,18 +1396,14 @@ export async function buildSemanticLayers(
       reviewRequired: stage.reviewRequired,
       provenance: stage.provenance,
     }));
-  await mkdir(join(input.workDir, "assets"), { recursive: true });
-  await Promise.all(
-    acceptedAssets.map((asset) =>
-      writeFile(join(input.workDir, asset.assetPath), asset.image),
-    ),
-  );
+  const parsedDecisions = CandidateDecisionSchema.array().parse(decisions);
+  await publishSemanticAssets(input.workDir, acceptedAssets, dependencies);
   return {
     manifest,
     background,
     combinedMask,
     acceptedAssets,
-    decisions: CandidateDecisionSchema.array().parse(decisions),
+    decisions: parsedDecisions,
     recomposition,
   };
 }

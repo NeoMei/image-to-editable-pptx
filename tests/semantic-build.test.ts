@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,7 +17,10 @@ import test from "node:test";
 import sharp from "sharp";
 
 import type { BBox, OcrResult } from "../src/contracts.js";
-import { buildSemanticLayers } from "../src/fidelity/build.js";
+import {
+  buildSemanticLayers,
+  repairCommittedUnion,
+} from "../src/fidelity/build.js";
 import {
   chooseSemanticMask,
   deriveSemanticMasks,
@@ -265,6 +277,14 @@ async function rgbaPixels(image: Buffer): Promise<Buffer> {
   return sharp(image).ensureAlpha().raw().toBuffer();
 }
 
+const rejectedRepairMetrics = {
+  maskedPixels: 1,
+  outsideMaskChangedPixels: 0,
+  ringSamples: 16,
+  ringChannelMad: 0,
+  filledPixelDistanceP95: 0,
+};
+
 test("atomically builds graph-ordered semantic layers and rolls back one exposed completion", async () => {
   const fixture = await semanticFixture();
   const plan = planSemanticLayers(fixture.graph, fixture.ocr);
@@ -386,5 +406,229 @@ test("atomically builds graph-ordered semantic layers and rolls back one exposed
     }
   } finally {
     await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects an empty supplied plan before publishing files", async () => {
+  const fixture = await semanticFixture();
+  const canonical = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-empty-plan-"));
+  await writeFile(join(workDir, "keep.txt"), "unrelated");
+  try {
+    await assert.rejects(
+      buildSemanticLayers({
+        source: fixture.source,
+        ocr: fixture.ocr,
+        graph: fixture.graph,
+        plan: { ...canonical, text: [], candidates: [] },
+        completions: new Map(),
+        workDir,
+      }),
+      /canonical semantic plan/,
+    );
+    assert.deepEqual(await readdir(workDir), ["keep.txt"]);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects a stale supplied plan that reintroduces a graph cycle", async () => {
+  const fixture = await semanticFixture();
+  const canonical = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-stale-plan-"));
+  const staleCandidate: SemanticCandidate = {
+    id: "cycle-a",
+    kind: "foreground-object",
+    nodeIds: ["cycle-a"],
+    bbox: { x: 260, y: 120, width: 16, height: 20 },
+    zOrder: canonical.candidates.length,
+    relations: ["cycle-a-front", "cycle-b-front"],
+    carriedTextIds: [],
+  };
+  try {
+    await assert.rejects(
+      buildSemanticLayers({
+        source: fixture.source,
+        ocr: fixture.ocr,
+        graph: fixture.graph,
+        plan: {
+          ...canonical,
+          candidates: [...canonical.candidates, staleCandidate],
+        },
+        completions: new Map(),
+        workDir,
+      }),
+      /canonical semantic plan/,
+    );
+    assert.deepEqual(await readdir(workDir), []);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("rolls back only the candidate identified by committed-union repair", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-repair-owner-"));
+  let repairCalls = 0;
+  try {
+    const result = await buildSemanticLayers(
+      {
+        source: fixture.source,
+        ocr: fixture.ocr,
+        graph: fixture.graph,
+        plan,
+        completions: new Map(),
+        workDir,
+      },
+      {
+        repairCommittedUnion: async (transaction) => {
+          repairCalls += 1;
+          if (repairCalls === 1) {
+            return {
+              image: transaction.source,
+              accepted: false,
+              metrics: rejectedRepairMetrics,
+              reason: "surface_variance_too_high",
+              attribution: "deterministic",
+              failingCandidateIds: ["independent"],
+            };
+          }
+          return repairCommittedUnion(transaction);
+        },
+      },
+    );
+
+    assert.equal(repairCalls, 2);
+    assert.equal(result.manifest.elements.some(({ id }) => id === "independent"), false);
+    assert.equal(result.manifest.elements.some(({ id }) => id === "compound"), true);
+    assert.equal(
+      result.decisions.find(({ candidateId }) => candidateId === "independent")?.decision,
+      "kept_in_background",
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("passes the complete committed mask through one union-repair transaction", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-union-repair-"));
+  const receivedMasks: Buffer[] = [];
+  try {
+    const result = await buildSemanticLayers(
+      {
+        source: fixture.source,
+        ocr: fixture.ocr,
+        graph: fixture.graph,
+        plan,
+        completions: new Map(),
+        workDir,
+      },
+      {
+        repairCommittedUnion: async (transaction) => {
+          receivedMasks.push(transaction.unionMask);
+          return repairCommittedUnion(transaction);
+        },
+      },
+    );
+
+    assert.equal(receivedMasks.length, 1);
+    assert.deepEqual(
+      await maskPixels(receivedMasks[0]!),
+      await maskPixels(result.combinedMask),
+    );
+    const pixels = await maskPixels(receivedMasks[0]!);
+    assert.ok(pixels[30 * WIDTH + 30]! >= 128, "foreground mask is in full union");
+    assert.ok(pixels[140 * WIDTH + 116]! >= 128, "required OCR mask is in full union");
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("removes owned staging when the second asset write fails", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-write-failure-"));
+  await writeFile(join(workDir, "keep.txt"), "unrelated");
+  let writes = 0;
+  try {
+    await assert.rejects(
+      buildSemanticLayers(
+        {
+          source: fixture.source,
+          ocr: fixture.ocr,
+          graph: fixture.graph,
+          plan,
+          completions: new Map(),
+          workDir,
+        },
+        {
+          writeAsset: async (path, image) => {
+            writes += 1;
+            if (writes === 2) throw new Error("injected second asset write failure");
+            await writeFile(path, image);
+          },
+        },
+      ),
+      /injected second asset write failure/,
+    );
+    assert.equal(writes, 2);
+    assert.deepEqual(await readdir(workDir), ["keep.txt"]);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("refuses to overwrite an existing assets directory", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-existing-assets-"));
+  await mkdir(join(workDir, "assets"));
+  await writeFile(join(workDir, "assets", "foreign.txt"), "unrelated");
+  try {
+    await assert.rejects(
+      buildSemanticLayers({
+        source: fixture.source,
+        ocr: fixture.ocr,
+        graph: fixture.graph,
+        plan,
+        completions: new Map(),
+        workDir,
+      }),
+      /assets target already exists/,
+    );
+    assert.equal(await readFile(join(workDir, "assets", "foreign.txt"), "utf8"), "unrelated");
+    assert.deepEqual(await readdir(join(workDir, "assets")), ["foreign.txt"]);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("refuses an assets symlink without touching its target", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-symlink-"));
+  const externalDir = await mkdtemp(join(tmpdir(), "semantic-assets-external-"));
+  await writeFile(join(externalDir, "foreign.txt"), "unrelated");
+  await symlink(externalDir, join(workDir, "assets"));
+  try {
+    await assert.rejects(
+      buildSemanticLayers({
+        source: fixture.source,
+        ocr: fixture.ocr,
+        graph: fixture.graph,
+        plan,
+        completions: new Map(),
+        workDir,
+      }),
+      /assets target already exists/,
+    );
+    assert.equal((await lstat(join(workDir, "assets"))).isSymbolicLink(), true);
+    assert.deepEqual(await readdir(externalDir), ["foreign.txt"]);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+    await rm(externalDir, { recursive: true, force: true });
   }
 });
