@@ -17,6 +17,14 @@ Image to Editable PPTX 先由阿里云百炼 OCR 和视觉模型生成通用语�
 
 PPTX 会按源图宽高比创建自定义页面，而不是强制转为 16:9。
 
+## 安装 npm 包
+
+```bash
+npm install image-to-editable-pptx
+```
+
+npm 包与 GitHub Release 的版本同步。它包含运行时源码、Codex 插件元数据和 Agent Skill，便于在 Node 项目中锁定依赖和审计实现。当前 npm 包不注册全局 CLI，也没有承诺稳定的 JavaScript API；独立命令行和插件安装请使用下面的 Codex 插件或源码运行方式。
+
 ## 安装 Codex 插件
 
 ```bash
