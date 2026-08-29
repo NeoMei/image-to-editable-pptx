@@ -434,6 +434,30 @@ test("normalizes carries-text from non-backing objects to belongs-to", async () 
   assert.equal(backingCarriesText.from, "backing-1");
 });
 
+test("normalizes percent-scale provider confidence to the unit interval", async () => {
+  const fixture = await readFixture();
+  const payload = parseFixturePayload(fixture);
+  payload.nodes[1]!.confidence = 95;
+  payload.relations[0]!.confidence = 88;
+
+  const graph = parseQwenSceneContent(JSON.stringify(payload), {
+    width: 1377,
+    height: 811,
+  });
+  assert.equal(graph.nodes[1]?.confidence, 0.95);
+  assert.equal(graph.relations[0]?.confidence, 0.88);
+  assert.throws(
+    () => {
+      payload.nodes[1]!.confidence = 150;
+      parseQwenSceneContent(JSON.stringify(payload), {
+        width: 1377,
+        height: 811,
+      });
+    },
+    /Invalid Qwen scene response/,
+  );
+});
+
 test("retries a truncated scene response once with corrective instructions", async () => {
   const fixture = await readFixture();
   const content = fixture.choices[0]!.message.content;

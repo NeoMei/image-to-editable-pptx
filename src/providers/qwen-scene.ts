@@ -72,6 +72,18 @@ const ProviderExtractionHintsSchema = z.preprocess((value) => {
   return [];
 }, z.array(z.string()));
 
+const ProviderConfidenceSchema = z.preprocess((value) => {
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value > 1 &&
+    value <= 100
+  ) {
+    return value / 100;
+  }
+  return value;
+}, z.number().finite().min(0).max(1));
+
 const ProviderScenePayloadSchema = z
   .object({
     nodes: z.array(
@@ -80,7 +92,7 @@ const ProviderScenePayloadSchema = z
           id: z.string().min(1),
           role: SceneRoleSchema,
           bbox: ProviderBBoxSchema,
-          confidence: z.number().finite().min(0).max(1),
+          confidence: ProviderConfidenceSchema,
           zIndex: z.number().int().safe().optional(),
           label: z.string(),
           extractionHints: ProviderExtractionHintsSchema,
@@ -94,7 +106,7 @@ const ProviderScenePayloadSchema = z
           kind: SceneRelationKindSchema,
           from: z.string().min(1),
           to: z.string().min(1),
-          confidence: z.number().finite().min(0).max(1),
+          confidence: ProviderConfidenceSchema,
         })
         .strict(),
     ),
@@ -393,7 +405,7 @@ function requireSceneContent(content: string | null): string {
   return content;
 }
 
-async function requestSceneGraph(
+export async function requestSceneGraph(
   image: Buffer,
   canvas: CanvasSize,
   prompt: string,
