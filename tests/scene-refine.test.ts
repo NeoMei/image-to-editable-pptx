@@ -269,6 +269,69 @@ test("regional results cannot replace unrelated OCR or global nodes", () => {
   );
 });
 
+test("drops near-identical refined duplicates while keeping distinct splits", () => {
+  const original = graph([
+    node("panel", { x: 0.1, y: 0.2, width: 0.6, height: 0.6 }),
+  ]);
+  const request = {
+    targetNodeIds: ["panel"],
+    crop: { x: 100, y: 100, width: 600, height: 300 },
+    reason: "compound" as const,
+  };
+  const eyeBox = { x: 0.1, y: 0.2, width: 0.15, height: 0.3 };
+  const local = graph(
+    [
+      node("icon-eye", eyeBox, { confidence: 0.9 }),
+      node("eye-icon", eyeBox, { confidence: 0.7 }),
+      node("radar-chart", { x: 0.55, y: 0.2, width: 0.3, height: 0.3 }),
+    ],
+    [
+      relation("eye-link", "connected-to", "eye-icon", "icon-eye"),
+      relation("radar-link", "connected-to", "radar-chart", "icon-eye"),
+    ],
+    { width: 600, height: 300 },
+  );
+
+  const merged = mergeRefinedSubgraph(original, request, local);
+  const mergedIds = merged.nodes.map(({ id }) => id);
+
+  assert.ok(mergedIds.includes("icon-eye"));
+  assert.ok(mergedIds.includes("radar-chart"));
+  assert.ok(!mergedIds.includes("eye-icon"));
+  assert.equal(mergedIds.filter((id) => id === "icon-eye").length, 1);
+  assert.ok(
+    !merged.relations.some(({ id }) => id === "eye-link"),
+    "relations referencing dropped duplicates must be removed",
+  );
+  assert.ok(merged.relations.some(({ id }) => id === "radar-link"));
+});
+
+test("refined duplicate preference keeps the refinement target ID over a higher-confidence twin", () => {
+  const original = graph([
+    node("panel", { x: 0.1, y: 0.2, width: 0.6, height: 0.6 }),
+  ]);
+  const request = {
+    targetNodeIds: ["panel"],
+    crop: { x: 100, y: 100, width: 600, height: 300 },
+    reason: "compound" as const,
+  };
+  const panelBox = { x: 0.05, y: 0.05, width: 0.9, height: 0.9 };
+  const local = graph(
+    [
+      node("panel", panelBox, { confidence: 0.6 }),
+      node("panel-fine", panelBox, { confidence: 0.95 }),
+    ],
+    [],
+    { width: 600, height: 300 },
+  );
+
+  const merged = mergeRefinedSubgraph(original, request, local);
+  const mergedIds = merged.nodes.map(({ id }) => id);
+
+  assert.ok(mergedIds.includes("panel"));
+  assert.ok(!mergedIds.includes("panel-fine"));
+});
+
 test("rejects a local graph whose owning canvas escapes the requested crop", () => {
   const original = graph([
     node("target", { x: 0.2, y: 0.2, width: 0.2, height: 0.2 }),

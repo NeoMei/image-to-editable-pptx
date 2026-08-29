@@ -34,6 +34,7 @@ type RankedRequest = RefinementRequest & {
 const MAX_REFINEMENT_REQUESTS = 8;
 const CROP_PADDING_RATIO = 0.05;
 const EDGE_EPSILON = 1e-9;
+const DUPLICATE_IOU_THRESHOLD = 0.8;
 
 const REASON_SEVERITY: Readonly<Record<RefinementReason, number>> = {
   "conflicting-relations": 0,
@@ -68,6 +69,44 @@ function compareTargetIdTuples(
 
 function isProtectedNode(node: SceneNode): boolean {
   return node.role === "background" || node.role === "text";
+}
+
+function intersectionOverUnion(left: BBox, right: BBox): number {
+  const interLeft = Math.max(left.x, right.x);
+  const interTop = Math.max(left.y, right.y);
+  const interRight = Math.min(left.x + left.width, right.x + right.width);
+  const interBottom = Math.min(left.y + left.height, right.y + right.height);
+  const intersectionWidth = Math.max(0, interRight - interLeft);
+  const intersectionHeight = Math.max(0, interBottom - interTop);
+  const intersection = intersectionWidth * intersectionHeight;
+  const union = left.width * left.height + right.width * right.height - intersection;
+  return union <= 0 ? 0 : intersection / union;
+}
+
+function deduplicateRefinedNodes(
+  nodes: readonly SceneNode[],
+  targetNodeIds: ReadonlySet<string>,
+): { nodes: SceneNode[]; droppedIds: ReadonlySet<string> } {
+  const ranked = [...nodes].sort(
+    (left, right) =>
+      Number(targetNodeIds.has(right.id)) - Number(targetNodeIds.has(left.id)) ||
+      right.confidence - left.confidence ||
+      compareCodePoints(left.id, right.id),
+  );
+  const kept: SceneNode[] = [];
+  const droppedIds = new Set<string>();
+  for (const candidate of ranked) {
+    const duplicatesKeptNode = kept.some(
+      (existing) =>
+        intersectionOverUnion(existing.bbox, candidate.bbox) > DUPLICATE_IOU_THRESHOLD,
+    );
+    if (duplicatesKeptNode) {
+      droppedIds.add(candidate.id);
+    } else {
+      kept.push(candidate);
+    }
+  }
+  return { nodes: kept, droppedIds };
 }
 
 function unionNormalizedBBox(nodes: readonly SceneNode[]): SceneNode["bbox"] {
@@ -313,9 +352,10 @@ export function mergeRefinedSubgraph(
       height: (localNode.bbox.height * crop.height) / parsedGraph.canvas.height,
     },
   }));
+  const { nodes: dedupedNodes } = deduplicateRefinedNodes(mappedNodes, targetNodeIds);
   const nodes = [
     ...parsedGraph.nodes.filter(({ id }) => !targetNodeIds.has(id)),
-    ...mappedNodes,
+    ...dedupedNodes,
   ];
   const mergedNodeIds = new Set(nodes.map(({ id }) => id));
 
@@ -326,7 +366,7 @@ export function mergeRefinedSubgraph(
     return mergedNodeIds.has(from) && mergedNodeIds.has(to);
   });
   const keptRelationIds = new Set(keptRelations.map(({ id }) => id));
-  const localNodeIds = new Set(localNodes.map(({ id }) => id));
+  const localNodeIds = new Set(dedupedNodes.map(({ id }) => id));
   const localRelations = parsedLocalGraph.relations.filter(({ from, to }) => {
     return localNodeIds.has(from) && localNodeIds.has(to);
   });
