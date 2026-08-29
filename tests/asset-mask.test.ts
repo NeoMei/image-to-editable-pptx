@@ -3,7 +3,41 @@ import test from "node:test";
 
 import sharp from "sharp";
 
-import { buildAssetRemovalMask } from "../src/image/asset-mask.js";
+import {
+  buildAssetRemovalMask,
+  dilateAlphaMask,
+  placeAlphaMask,
+} from "../src/image/asset-mask.js";
+
+test("preserves soft alpha while projecting a local mask onto the canvas", () => {
+  const local = Uint8Array.from([0, 64, 128, 255]);
+  const projected = placeAlphaMask(
+    local,
+    2,
+    2,
+    { x: 3, y: 4, width: 2, height: 2 },
+    { width: 8, height: 8 },
+  );
+
+  assert.equal(projected[4 * 8 + 3], 0);
+  assert.equal(projected[4 * 8 + 4], 64);
+  assert.equal(projected[5 * 8 + 3], 128);
+  assert.equal(projected[5 * 8 + 4], 255);
+});
+
+test("max-dilates alpha without hardening the source fringe", () => {
+  const source = Uint8Array.from([
+    0, 0, 0,
+    0, 96, 0,
+    0, 0, 0,
+  ]);
+
+  assert.deepEqual(
+    [...dilateAlphaMask(source, 3, 3, 1)],
+    [96, 96, 96, 96, 96, 96, 96, 96, 96],
+  );
+  assert.equal(source[4], 96);
+});
 
 test("places asset alpha at its canvas bbox without masking transparent pixels", async () => {
   const pixels = Buffer.alloc(4 * 4 * 4);

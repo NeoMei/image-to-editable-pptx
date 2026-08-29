@@ -34,6 +34,16 @@ export type ExtractedAsset = {
 type AlphaMetrics = ExtractedAsset["metrics"];
 type FallbackReason = NonNullable<ExtractedAsset["fallbackReason"]>;
 
+export type BackgroundRemovalProposal = {
+  rgba: Buffer;
+  metrics: AlphaMetrics;
+};
+
+export type BackgroundRemovalOptions = {
+  removeInteriorMatches?: boolean;
+  minimumEdgeColorConsistency?: number;
+};
+
 type Rgb = readonly [number, number, number];
 
 function median(values: number[]): number {
@@ -82,11 +92,12 @@ function hasConsistentEdgeColor(
   colors: readonly Rgb[],
   edgeColor: Rgb,
   tolerance: number,
+  minimumConsistency = MIN_EDGE_COLOR_CONSISTENCY,
 ): boolean {
   const consistentSamples = colors.filter(
     (color) => maxChannelDistance(color, edgeColor) <= tolerance,
   ).length;
-  return consistentSamples / colors.length >= MIN_EDGE_COLOR_CONSISTENCY;
+  return consistentSamples / colors.length >= minimumConsistency;
 }
 
 function removeConnectedBackground(
@@ -229,6 +240,67 @@ function calculateAlphaMetrics(
   };
 }
 
+export function removeBackgroundFromRgba(
+  sourceRgba: Buffer,
+  width: number,
+  height: number,
+  colorTolerance = DEFAULT_COLOR_TOLERANCE,
+  options: BackgroundRemovalOptions = {},
+): BackgroundRemovalProposal | undefined {
+  if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new RangeError("RGBA dimensions must be positive integers");
+  }
+  if (sourceRgba.length !== width * height * 4) {
+    throw new Error("RGBA buffer length does not match its dimensions");
+  }
+  if (!Number.isFinite(colorTolerance) || colorTolerance < 0) {
+    throw new RangeError("colorTolerance must be a non-negative finite number");
+  }
+  const minimumEdgeColorConsistency =
+    options.minimumEdgeColorConsistency ?? MIN_EDGE_COLOR_CONSISTENCY;
+  if (
+    !Number.isFinite(minimumEdgeColorConsistency) ||
+    minimumEdgeColorConsistency < 0 ||
+    minimumEdgeColorConsistency > 1
+  ) {
+    throw new RangeError("minimumEdgeColorConsistency must be between zero and one");
+  }
+
+  const rgba = Buffer.from(sourceRgba);
+  const sampledEdgeColors = edgeColors(rgba, width, height);
+  const edgeColor = medianEdgeColor(sampledEdgeColors);
+  if (
+    !hasConsistentEdgeColor(
+      sampledEdgeColors,
+      edgeColor,
+      colorTolerance,
+      minimumEdgeColorConsistency,
+    )
+  ) {
+    return undefined;
+  }
+  const removed = removeConnectedBackground(
+    rgba,
+    width,
+    height,
+    edgeColor,
+    colorTolerance,
+  );
+  if (options.removeInteriorMatches === true) {
+    for (let index = 0; index < width * height; index += 1) {
+      if (removed[index] === 1) continue;
+      const offset = index * 4;
+      const observed: Rgb = [rgba[offset]!, rgba[offset + 1]!, rgba[offset + 2]!];
+      if (maxChannelDistance(observed, edgeColor) <= colorTolerance) {
+        removed[index] = 1;
+        rgba[offset + 3] = 0;
+      }
+    }
+  }
+  applySoftAlphaFringe(rgba, width, height, edgeColor, colorTolerance, removed);
+  return { rgba, metrics: calculateAlphaMetrics(rgba, width, height) };
+}
+
 function rectangularFallback(
   image: Buffer,
   metrics: AlphaMetrics,
@@ -285,35 +357,20 @@ export async function extractAsset(
     .ensureAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
-  const colorTolerance = options.colorTolerance ?? DEFAULT_COLOR_TOLERANCE;
-  if (!Number.isFinite(colorTolerance) || colorTolerance < 0) {
-    throw new RangeError("colorTolerance must be a non-negative finite number");
-  }
-  const sampledEdgeColors = edgeColors(data, info.width, info.height);
-  const edgeColor = medianEdgeColor(sampledEdgeColors);
-  if (!hasConsistentEdgeColor(sampledEdgeColors, edgeColor, colorTolerance)) {
+  const proposal = removeBackgroundFromRgba(
+    data,
+    info.width,
+    info.height,
+    options.colorTolerance ?? DEFAULT_COLOR_TOLERANCE,
+  );
+  if (proposal === undefined) {
     return rectangularFallback(
       rectangularImage,
       calculateAlphaMetrics(data, info.width, info.height),
       "edge_colors_inconsistent",
     );
   }
-  const removed = removeConnectedBackground(
-    data,
-    info.width,
-    info.height,
-    edgeColor,
-    colorTolerance,
-  );
-  applySoftAlphaFringe(
-    data,
-    info.width,
-    info.height,
-    edgeColor,
-    colorTolerance,
-    removed,
-  );
-  const metrics = calculateAlphaMetrics(data, info.width, info.height);
+  const { rgba, metrics } = proposal;
 
   if (metrics.transparentRatio < MIN_TRANSPARENT_RATIO) {
     return rectangularFallback(
@@ -337,7 +394,7 @@ export async function extractAsset(
     );
   }
 
-  const image = await sharp(data, {
+  const image = await sharp(rgba, {
     raw: { width: info.width, height: info.height, channels: 4 },
   })
     .png()

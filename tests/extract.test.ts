@@ -3,7 +3,37 @@ import test from "node:test";
 
 import sharp from "sharp";
 
-import { extractAsset } from "../src/image/extract.js";
+import {
+  extractAsset,
+  removeBackgroundFromRgba,
+} from "../src/image/extract.js";
+
+test("derives a transparent proposal from canonical RGBA without mutating it", () => {
+  const width = 12;
+  const height = 12;
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let index = 0; index < width * height; index += 1) {
+    rgba.set([247, 243, 233, 255], index * 4);
+  }
+  for (let y = 3; y < 9; y += 1) {
+    for (let x = 3; x < 9; x += 1) {
+      rgba.set([35, 57, 77, 255], (y * width + x) * 4);
+    }
+  }
+  const before = Buffer.from(rgba);
+
+  const proposal = removeBackgroundFromRgba(rgba, width, height, 24);
+
+  assert.ok(proposal);
+  assert.deepEqual(rgba, before);
+  assert.equal(proposal.rgba[(1 * width + 1) * 4 + 3], 0);
+  assert.equal(proposal.rgba[(6 * width + 6) * 4 + 3], 255);
+  assert.deepEqual(proposal.metrics, {
+    transparentRatio: 0.75,
+    opaqueBorderRatio: 0,
+    foregroundPixels: 36,
+  });
+});
 
 test("removes a cream border connected to the crop edge", async () => {
   const source = await sharp({
