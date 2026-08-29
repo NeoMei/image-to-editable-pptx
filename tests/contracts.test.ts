@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AssetProvenanceSchema,
   OcrResultSchema,
   ProviderBBoxSchema,
   SlideManifestSchema,
+  SlideManifestV2Schema,
   VisionResultSchema,
 } from "../src/contracts.js";
 
@@ -81,6 +83,117 @@ test("rejects a bbox that extends below the slide canvas", () => {
   };
 
   assert.throws(() => SlideManifestSchema.parse(invalidManifest));
+});
+
+const hash = (character: string): string => character.repeat(64);
+
+const validManifestV2 = {
+  manifestVersion: 2,
+  canvas: { width: 1600, height: 900 },
+  elements: [
+    {
+      kind: "asset",
+      id: "object-1",
+      label: "movable object",
+      bbox: { x: 1300, y: 700, width: 300, height: 200 },
+      extraction: "transparent",
+      assetPath: "assets/object-1.png",
+      zIndex: 2,
+      role: "foreground-object",
+      groupId: null,
+      provenance: {
+        kind: "source-visible",
+        sourceCropSha256: hash("a"),
+        visibleMaskSha256: hash("b"),
+        assetSha256: hash("c"),
+      },
+      relations: [],
+      reviewRequired: false,
+    },
+  ],
+  warnings: [],
+};
+
+test("keeps manifest v1 readable through the versioned union", () => {
+  const parsed = SlideManifestSchema.parse(validManifest);
+
+  assert.equal(parsed.manifestVersion, 1);
+});
+
+test("requires every semantic asset field in manifest v2", () => {
+  for (const field of [
+    "role",
+    "groupId",
+    "provenance",
+    "relations",
+    "reviewRequired",
+  ] as const) {
+    const fixture = structuredClone(validManifestV2);
+    delete (fixture.elements[0]! as Record<string, unknown>)[field];
+    assert.throws(() => SlideManifestV2Schema.parse(fixture));
+  }
+});
+
+test("validates manifest v2 asset boxes against its dynamic canvas", () => {
+  assert.doesNotThrow(() => SlideManifestSchema.parse(validManifestV2));
+
+  const overflow = structuredClone(validManifestV2);
+  overflow.elements[0]!.bbox.width = 301;
+  assert.throws(() => SlideManifestSchema.parse(overflow));
+});
+
+test("parses all provider-neutral asset provenance forms", () => {
+  const sourceVisible = {
+    kind: "source-visible",
+    sourceCropSha256: hash("1"),
+    visibleMaskSha256: hash("2"),
+    assetSha256: hash("3"),
+  };
+  const generatedHidden = {
+    kind: "generated-hidden",
+    sourceCropSha256: hash("4"),
+    generatedMaskSha256: hash("5"),
+    assetSha256: hash("6"),
+    modelId: "provider-neutral-model",
+    taskId: "sanitized-task-id",
+    sanitizedProviderMetadata: { requestClass: "image-edit", attempts: 1 },
+  };
+  const composite = {
+    kind: "composite",
+    sourceCropSha256: hash("7"),
+    visibleMaskSha256: hash("8"),
+    generatedMaskSha256: hash("9"),
+    assetSha256: hash("a"),
+    modelId: "provider-neutral-model",
+    taskId: "sanitized-task-id",
+  };
+
+  assert.deepEqual(AssetProvenanceSchema.parse(sourceVisible), sourceVisible);
+  assert.deepEqual(AssetProvenanceSchema.parse(generatedHidden), generatedHidden);
+  assert.deepEqual(AssetProvenanceSchema.parse(composite), composite);
+  assert.throws(() =>
+    AssetProvenanceSchema.parse({
+      ...composite,
+      generatedMaskSha256: undefined,
+    }),
+  );
+});
+
+test("requires review for assets containing generated hidden pixels", () => {
+  for (const kind of ["generated-hidden", "composite"] as const) {
+    const fixture = structuredClone(validManifestV2);
+    fixture.elements[0]!.reviewRequired = false;
+    (fixture.elements[0]! as Record<string, unknown>).provenance = {
+      kind,
+      sourceCropSha256: hash("d"),
+      generatedMaskSha256: hash("e"),
+      assetSha256: hash("f"),
+      modelId: "provider-neutral-model",
+      taskId: "sanitized-task-id",
+      ...(kind === "composite" ? { visibleMaskSha256: hash("0") } : {}),
+    };
+    assert.throws(() => SlideManifestV2Schema.parse(fixture));
+  }
 });
 
 const validOcrResult = {

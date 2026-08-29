@@ -1,30 +1,20 @@
 import { z } from "zod";
 
+import {
+  CanvasSizeSchema,
+  SceneRelationSchema,
+  SceneRoleSchema,
+} from "./scene/contracts.js";
+import { createBBoxSchema } from "./scene/geometry.js";
+
 export const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const BBoxSchema = z
   .object({
-    x: z.number().min(0).max(1280),
-    y: z.number().min(0).max(720),
-    width: z.number().positive().max(1280),
-    height: z.number().positive().max(720),
-  })
-  .superRefine((bbox, context) => {
-    if (bbox.x + bbox.width > 1280) {
-      context.addIssue({
-        code: "custom",
-        message: "x + width must not exceed 1280",
-        path: ["width"],
-      });
-    }
-
-    if (bbox.y + bbox.height > 720) {
-      context.addIssue({
-        code: "custom",
-        message: "y + height must not exceed 720",
-        path: ["height"],
-      });
-    }
+    x: z.number().finite().nonnegative(),
+    y: z.number().finite().nonnegative(),
+    width: z.number().finite().positive(),
+    height: z.number().finite().positive(),
   });
 
 export const ProviderBBoxSchema = z.object({
@@ -34,42 +24,48 @@ export const ProviderBBoxSchema = z.object({
   height: z.number().finite().positive(),
 });
 
+const TextSlideElementSchema = z.object({
+  kind: z.literal("text"),
+  id: z.string(),
+  text: z.string(),
+  bbox: BBoxSchema,
+  rotation: z.number(),
+  color: z.string(),
+  fontSizePx: z.number().positive(),
+  charSpacingPx: z.number().min(0).max(36).optional(),
+  bold: z.boolean().optional(),
+  align: z.enum(["left", "center", "right"]),
+  zIndex: z.number().int(),
+});
+
+const ShapeSlideElementSchema = z.object({
+  kind: z.literal("shape"),
+  id: z.string(),
+  label: z.string(),
+  shape: z.enum(["rect", "roundRect", "ellipse", "line"]),
+  bbox: BBoxSchema,
+  fillColor: z.string(),
+  strokeColor: z.string(),
+  strokeWidthPx: z.number().nonnegative(),
+  cornerRadiusPx: z.number().nonnegative(),
+  zIndex: z.number().int(),
+});
+
+const AssetSlideElementV1Schema = z.object({
+  kind: z.literal("asset"),
+  id: z.string(),
+  label: z.string(),
+  bbox: BBoxSchema,
+  extraction: z.enum(["transparent", "rectangular"]),
+  assetPath: z.string(),
+  zIndex: z.number().int(),
+  fallbackReason: z.string().optional(),
+});
+
 export const SlideElementSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("text"),
-    id: z.string(),
-    text: z.string(),
-    bbox: BBoxSchema,
-    rotation: z.number(),
-    color: z.string(),
-    fontSizePx: z.number().positive(),
-    charSpacingPx: z.number().min(0).max(36).optional(),
-    bold: z.boolean().optional(),
-    align: z.enum(["left", "center", "right"]),
-    zIndex: z.number().int(),
-  }),
-  z.object({
-    kind: z.literal("shape"),
-    id: z.string(),
-    label: z.string(),
-    shape: z.enum(["rect", "roundRect", "ellipse", "line"]),
-    bbox: BBoxSchema,
-    fillColor: z.string(),
-    strokeColor: z.string(),
-    strokeWidthPx: z.number().nonnegative(),
-    cornerRadiusPx: z.number().nonnegative(),
-    zIndex: z.number().int(),
-  }),
-  z.object({
-    kind: z.literal("asset"),
-    id: z.string(),
-    label: z.string(),
-    bbox: BBoxSchema,
-    extraction: z.enum(["transparent", "rectangular"]),
-    assetPath: z.string(),
-    zIndex: z.number().int(),
-    fallbackReason: z.string().optional(),
-  }),
+  TextSlideElementSchema,
+  ShapeSlideElementSchema,
+  AssetSlideElementV1Schema,
 ]);
 
 const ProviderPointSchema = z.object({
@@ -116,22 +112,152 @@ export const VisionResultSchema = z.object({
   ),
 });
 
-export const SlideManifestSchema = z.object({
-  manifestVersion: z.literal(1),
-  canvas: z.object({
-    width: z.literal(1280),
-    height: z.literal(720),
-  }),
-  elements: z.array(SlideElementSchema),
-  warnings: z.array(z.string()),
-});
+const SourceVisibleProvenanceSchema = z
+  .object({
+    kind: z.literal("source-visible"),
+    sourceCropSha256: Sha256Schema,
+    visibleMaskSha256: Sha256Schema,
+    assetSha256: Sha256Schema,
+  })
+  .strict();
+
+const GeneratedHiddenProvenanceSchema = z
+  .object({
+    kind: z.literal("generated-hidden"),
+    sourceCropSha256: Sha256Schema,
+    generatedMaskSha256: Sha256Schema,
+    assetSha256: Sha256Schema,
+    modelId: z.string().min(1),
+    taskId: z.string().min(1),
+    sanitizedProviderMetadata: z.json().optional(),
+  })
+  .strict();
+
+const CompositeProvenanceSchema = z
+  .object({
+    kind: z.literal("composite"),
+    sourceCropSha256: Sha256Schema,
+    visibleMaskSha256: Sha256Schema,
+    generatedMaskSha256: Sha256Schema,
+    assetSha256: Sha256Schema,
+    modelId: z.string().min(1),
+    taskId: z.string().min(1),
+    sanitizedProviderMetadata: z.json().optional(),
+  })
+  .strict();
+
+export const AssetProvenanceSchema = z.discriminatedUnion("kind", [
+  SourceVisibleProvenanceSchema,
+  GeneratedHiddenProvenanceSchema,
+  CompositeProvenanceSchema,
+]);
+
+export const SlideElementV2Schema = z.discriminatedUnion("kind", [
+  TextSlideElementSchema,
+  ShapeSlideElementSchema,
+  AssetSlideElementV1Schema.extend({
+    role: SceneRoleSchema,
+    groupId: z.string().min(1).nullable(),
+    provenance: AssetProvenanceSchema,
+    relations: z.array(SceneRelationSchema),
+    reviewRequired: z.boolean(),
+  })
+    .strict()
+    .superRefine((asset, context) => {
+      if (
+        asset.provenance.kind !== "source-visible" &&
+        !asset.reviewRequired
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "assets containing generated hidden pixels require review",
+          path: ["reviewRequired"],
+        });
+      }
+    }),
+]);
+
+function validateManifestBBoxes(
+  manifest: {
+    canvas: { width: number; height: number };
+    elements: Array<{ bbox: z.infer<typeof BBoxSchema> }>;
+  },
+  context: z.RefinementCtx,
+): void {
+  const bboxSchema = createBBoxSchema(manifest.canvas);
+  for (const [index, element] of manifest.elements.entries()) {
+    const result = bboxSchema.safeParse(element.bbox);
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        context.addIssue({
+          code: "custom",
+          message: issue.message,
+          path: ["elements", index, "bbox", ...issue.path],
+        });
+      }
+    }
+  }
+}
+
+export const SlideManifestV1Schema = z
+  .object({
+    manifestVersion: z.literal(1),
+    canvas: z.object({
+      width: z.literal(1280),
+      height: z.literal(720),
+    }),
+    elements: z.array(SlideElementSchema),
+    warnings: z.array(z.string()),
+  })
+  .superRefine(validateManifestBBoxes);
+
+export const SlideManifestV2Schema = z
+  .object({
+    manifestVersion: z.literal(2),
+    canvas: CanvasSizeSchema,
+    elements: z.array(SlideElementV2Schema),
+    warnings: z.array(z.string()),
+  })
+  .strict()
+  .superRefine(validateManifestBBoxes);
+
+const VersionedSlideManifestSchema = z.discriminatedUnion("manifestVersion", [
+  SlideManifestV1Schema,
+  SlideManifestV2Schema,
+]);
+
+export type SlideManifestV1 = z.infer<typeof SlideManifestV1Schema>;
+export type SlideManifestV2 = z.infer<typeof SlideManifestV2Schema>;
+export type VersionedSlideManifest = z.infer<
+  typeof VersionedSlideManifestSchema
+>;
+
+type SlideManifestCompatibilitySchema = Omit<
+  typeof VersionedSlideManifestSchema,
+  "parse"
+> & {
+  parse(data: SlideManifestV1): SlideManifestV1;
+  parse(data: SlideManifestV2): SlideManifestV2;
+  parse(data: unknown): SlideManifestV1;
+};
+
+// The runtime schema is the v1/v2 discriminated union. The overloads retain
+// precise v1 inference for the existing planner and builder during migration.
+export const SlideManifestSchema =
+  VersionedSlideManifestSchema as SlideManifestCompatibilitySchema;
 
 export type BBox = z.infer<typeof BBoxSchema>;
 export type ProviderBBox = z.infer<typeof ProviderBBoxSchema>;
-export type SlideElement = z.infer<typeof SlideElementSchema>;
+export type AssetProvenance = z.infer<typeof AssetProvenanceSchema>;
+export type SlideElementV1 = z.infer<typeof SlideElementSchema>;
+export type SlideElementV2 = z.infer<typeof SlideElementV2Schema>;
+// Compatibility alias for the existing v1 planner/builder path. New semantic
+// consumers use SlideElementV2 explicitly until that path emits manifest v2.
+export type SlideElement = SlideElementV1;
 export type OcrResult = z.infer<typeof OcrResultSchema>;
 export type VisionResult = z.infer<typeof VisionResultSchema>;
-export type SlideManifest = z.infer<typeof SlideManifestSchema>;
+// Compatibility alias for runtime code that still builds and exports v1.
+export type SlideManifest = SlideManifestV1;
 
 export type TextSlideElement = Extract<SlideElement, { kind: "text" }>;
 
