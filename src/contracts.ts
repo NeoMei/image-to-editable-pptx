@@ -370,6 +370,7 @@ export const CandidateDecisionSchema = z.object({
     "repair_seam",
     "surface_unstable",
     "semantic_mask_unavailable",
+    "text_mask_unavailable",
     "occlusion_completion_unavailable",
     "completion_provenance_invalid",
   ]).optional(),

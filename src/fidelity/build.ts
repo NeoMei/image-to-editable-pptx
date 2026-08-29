@@ -121,6 +121,23 @@ async function orMasks(
   }).png().toBuffer();
 }
 
+async function filledRectMask(
+  bbox: BBox,
+  canvas: { width: number; height: number },
+): Promise<Buffer> {
+  const mask = Buffer.alloc(canvas.width * canvas.height, 0);
+  const left = Math.max(0, Math.floor(bbox.x));
+  const top = Math.max(0, Math.floor(bbox.y));
+  const right = Math.min(canvas.width, Math.ceil(bbox.x + bbox.width));
+  const bottom = Math.min(canvas.height, Math.ceil(bbox.y + bbox.height));
+  for (let y = top; y < bottom; y += 1) {
+    mask.fill(255, y * canvas.width + left, y * canvas.width + right);
+  }
+  return sharp(mask, {
+    raw: { width: canvas.width, height: canvas.height, channels: 1 },
+  }).png().toBuffer();
+}
+
 async function maskOverlapRatio(
   candidateMask: Buffer,
   protectedTextMask: Buffer,
@@ -425,6 +442,7 @@ export type SemanticBuildDependencies = {
   repairCommittedUnion: (
     input: CommittedUnionRepairInput,
   ) => Promise<CommittedUnionRepairResult>;
+  buildTextMask: typeof buildTightTextMask;
   writeAsset: (path: string, image: Buffer) => Promise<void>;
   createAssetsDirectory: (path: string) => Promise<void>;
   publishAssetNoReplace: (
@@ -1679,6 +1697,7 @@ function compoundMemberCandidates(
 
 const defaultSemanticBuildDependencies: SemanticBuildDependencies = {
   repairCommittedUnion,
+  buildTextMask: buildTightTextMask,
   writeAsset: writeFile,
   createAssetsDirectory: async (path) => mkdir(path),
   publishAssetNoReplace,
@@ -1714,13 +1733,37 @@ export async function buildSemanticLayers(
   await assertAssetsTargetAbsent(input.workDir);
   const source = await encodeSource(input.source);
   const textMasks: Buffer[] = [];
+  const committedTextOwners: CommittedMaskOwner[] = [];
+  const degradedTextRegions: BBox[] = [];
   const manifestTexts: TextSlideElement[] = [];
   const decisions: CandidateDecision[] = [];
   for (const textCandidate of plan.text) {
-    const mask = await buildTightTextMask(source, textCandidate.element, {
-      dilationPx: adaptiveTextDilation(textCandidate.element.bbox.height),
-    });
+    let mask: Awaited<ReturnType<typeof buildTightTextMask>>;
+    try {
+      mask = await dependencies.buildTextMask(source, textCandidate.element, {
+        dilationPx: adaptiveTextDilation(textCandidate.element.bbox.height),
+      });
+    } catch {
+      degradedTextRegions.push(textCandidate.element.bbox);
+      decisions.push({
+        candidateId: textCandidate.id,
+        kind: "text",
+        decision: "kept_in_background",
+        bbox: textCandidate.element.bbox,
+        sourceElementIndexes: [],
+        repairMethod: "none",
+        extraction: "none",
+        reason: "text_mask_unavailable",
+        output: { state: "kept_in_background" },
+      });
+      continue;
+    }
     textMasks.push(mask.mask);
+    committedTextOwners.push({
+      candidateId: textCandidate.id,
+      required: true,
+      mask: mask.mask,
+    });
     manifestTexts.push({
       ...textCandidate.element,
       color: rgbToHex(mask.glyphRgb),
@@ -1745,6 +1788,17 @@ export async function buildSemanticLayers(
     });
   }
   const protectedTextMask = await orMasks(textMasks, plan.canvas);
+  const candidateTextBarrier = degradedTextRegions.length === 0
+    ? protectedTextMask
+    : await orMasks(
+      [
+        protectedTextMask,
+        ...(await Promise.all(
+          degradedTextRegions.map((bbox) => filledRectMask(bbox, plan.canvas)),
+        )),
+      ],
+      plan.canvas,
+    );
   const stages: SemanticStage[] = [];
   const textElementsForBacking = manifestTexts.map((text) => ({ ...text }));
 
@@ -1878,7 +1932,7 @@ export async function buildSemanticLayers(
 
     const selected = chooseSemanticMask(
       await deriveSemanticMasks(input.source, candidate),
-      protectedTextMask,
+      candidateTextBarrier,
     );
     if (selected === undefined) {
       decisions.push(
@@ -1892,7 +1946,7 @@ export async function buildSemanticLayers(
       for (const member of compoundMemberCandidates(candidate, input.graph, plan.canvas)) {
         const memberSelected = chooseSemanticMask(
           await deriveSemanticMasks(input.source, member),
-          protectedTextMask,
+          candidateTextBarrier,
         );
         if (memberSelected === undefined) {
           decisions.push(
@@ -1976,11 +2030,7 @@ export async function buildSemanticLayers(
   let finalRepairMetrics = EMPTY_REPAIR_METRICS;
   for (let attempt = 0; attempt <= stages.length + 1; attempt += 1) {
     const committedOwners: CommittedMaskOwner[] = [
-      ...plan.text.map((textCandidate, index) => ({
-        candidateId: textCandidate.id,
-        required: true,
-        mask: textMasks[index]!,
-      })),
+      ...committedTextOwners,
       ...active.map(({ candidate, removalMask }) => ({
         candidateId: candidate.id,
         required: false,

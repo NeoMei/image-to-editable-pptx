@@ -155,3 +155,23 @@ Task 14 除完成定义第 10 条的 WPS 交互链留证外全部完成；该链
 - run8-build5 重建与 build4 等价：manifest.json 与资产 PNG 逐字节一致；slide1.xml 在规范化每次构建的随机 staging 目录名后一致；pptx 条目列表与全部内嵌媒体一致；ledger 差异仅为耗时/inode/ownerToken。
 - 四个 fixture 重建（build3）与 build2 元素结构一致（canvas-4x3: 1 资产；canvas-portrait: 0（刻意空画布）；must-fallback: 0（分析被拒记录，非回归）；text-backing: 1 资产）。
 - 扳手资产剥离后为 1 个连通分量；盾牌本体（fg-4）按"呈现优先"授权仍保留在背景（无法独立拖动但呈现完整）。
+
+## 10. 文字拆分失败安全降级轮（验收后追加）
+
+用户反馈：拖动过的整页插画风 PPT 中，图像/文字拆分容易整单翻车；取舍原则为"效果是重点，拆不好不如不拆"。
+
+根因（实证 4 张真实样张）：`buildSemanticLayers` 文字循环裸调 `buildTightTextMask`，任何一条 OCR 文字的 mask 守卫失败（如 deck00-11 的 `Text mask fringe would remove too much outside the OCR box`、deck01-04 的 `Text mask surface is not locally consistent`）都会让整个 build 抛错退出，零产物。
+
+修复（通用机制，无 label/坐标特判）：
+
+- 文字 mask 构建失败 → 该文字候选记为 `kept_in_background`（reason `text_mask_unavailable`），像素不从背景移除，其余文字/资产照常分层；contracts reason 枚举新增 `text_mask_unavailable`。
+- 语义构建依赖新增 `buildTextMask` 注入 seam（与 v1 路径同款），用于测试注入失败。
+- 候选屏障：降级文字的 OCR bbox 以填充矩形并入 `chooseSemanticMask` 使用的保护掩码，任何 mask 与之重叠的资产候选被守卫拒绝（`semantic_mask_unavailable`），防止图标抠图带走降级文字墨迹，并避免整页 recomposition 失败的非确定性归因回滚波及全页资产。`ignoredMask`（像素级验证）保持仅含成功文字 mask，验证严格性不变。
+- 关联底板安全链不受影响：降级文字不再进入 `textElementsForBacking`，其底板因 carried-text 关联失效被拒（`resolveCarriedTexts`），不会抹除背景文字。
+- 明确不做：修复阶段（`repairCommittedUnion`）文字失败仍抛错；v1 legacy 路径不变；`--required-text-count` 语义不变。
+
+证据：
+
+- 门禁：lint:types ✓；源码测试 363/363 ✓（新增 2 例：文字 mask 失败降级、降级区域候选屏障）；build ✓；编译测试 363/363 ✓（均 env -u 离线）。
+- 三张此前翻车/中断页用保留的分析包离线重建全部 exit 0：deck00-11（11 文字分层 + ocr-12 留背景 + 5 资产）、deck01-04（20 文字 + ocr-21 留背景）、deck01-07（21 文字 + ocr-22 留背景 + 5 资产）；三条降级文字墨迹经像素对比确认完整保留在 clean-background 中，与 barrier 前结果逐项一致（barrier 为纯安全网）。
+- deck00-11 exploded 预览人工目检：机器人×3、灯泡、星星独立分层，标题栏/底部色条/降级文字留在背景，整页观感完整。

@@ -30,6 +30,7 @@ import {
   deriveSemanticMasks,
 } from "../src/image/semantic-mask.js";
 import type { SourceCanvas } from "../src/image/source.js";
+import { buildTightTextMask } from "../src/image/text-mask.js";
 import type { CompletedCandidate } from "../src/occlusion/contracts.js";
 import type {
   SceneGraph,
@@ -417,6 +418,89 @@ test("atomically builds graph-ordered semantic layers and rolls back one exposed
         path: asset.assetPath,
         hash: sha256(asset.image),
       })),
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("keeps a text candidate in background when its tight mask cannot be built", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const byId = new Map(plan.candidates.map((candidate) => [candidate.id, candidate]));
+  const completions = new Map<string, CompletedCandidate>([
+    [
+      "good-rear",
+      await completionFor(
+        fixture.source,
+        byId.get("good-rear")!,
+        GOOD_REAR,
+        GOOD_FRONT,
+        [43, 109, 168, 255],
+      ),
+    ],
+    [
+      "bad-rear",
+      await completionFor(
+        fixture.source,
+        byId.get("bad-rear")!,
+        BAD_REAR,
+        BAD_FRONT,
+        [58, 142, 92, 255],
+      ),
+    ],
+  ]);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-build-text-mask-fallback-"));
+  try {
+    const result = await buildSemanticLayers(
+      {
+        source: fixture.source,
+        ocr: fixture.ocr,
+        graph: fixture.graph,
+        plan,
+        completions,
+        workDir,
+      },
+      {
+        buildTextMask: async (source, element, options) => {
+          if (element.text === "Accepted backing") {
+            throw new Error("injected tight-text-mask failure");
+          }
+          return buildTightTextMask(source, element, options);
+        },
+      },
+    );
+
+    const decisions = new Map(
+      result.decisions.map((decision) => [decision.candidateId, decision]),
+    );
+    const failedText = decisions.get("ocr-1");
+    assert.equal(failedText?.decision, "kept_in_background");
+    assert.equal(failedText?.reason, "text_mask_unavailable");
+    assert.equal(failedText?.repairMethod, "none");
+    assert.equal(failedText?.extraction, "none");
+    const survivingText = decisions.get("ocr-2");
+    assert.equal(survivingText?.decision, "accepted");
+
+    const elements = new Map(
+      result.manifest.elements.map((element) => [element.id, element]),
+    );
+    assert.equal(elements.has("ocr-1"), false);
+    assert.equal(elements.get("ocr-2")?.kind, "text");
+    assert.equal(result.recomposition.accepted, true);
+
+    const combined = await maskPixels(result.combinedMask);
+    assert.equal(combined[138 * WIDTH + 116], 0);
+    assert.ok(combined[138 * WIDTH + 22]! >= 128);
+
+    const [before, after] = await Promise.all([
+      Promise.resolve(fixture.source.rgba),
+      rgbaPixels(result.background),
+    ]);
+    const glyphOffset = (138 * WIDTH + 116) * 4;
+    assert.deepEqual(
+      after.subarray(glyphOffset, glyphOffset + 4),
+      before.subarray(glyphOffset, glyphOffset + 4),
     );
   } finally {
     await rm(workDir, { recursive: true, force: true });
@@ -996,6 +1080,59 @@ test("falls back to per-member extraction when a compound mask overlaps protecte
     const cleanMemberDecision = decisions.get("tagged:tagged-clean");
     assert.equal(cleanMemberDecision?.decision, "accepted");
     assert.equal(result.recomposition.accepted, true);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("keeps asset candidates out of a degraded text region", async () => {
+  const source = fillCanvas();
+  const textBBox = { x: 40, y: 80, width: 48, height: 16 };
+  const iconBBox = { x: 56, y: 82, width: 24, height: 10 };
+  paintRect(source, iconBBox, [64, 120, 160, 255]);
+  paintGlyphs(source, textBBox);
+  source.sourceBytes = await sharp(source.rgba, {
+    raw: { width: WIDTH, height: HEIGHT, channels: 4 },
+  }).png().toBuffer();
+  const ocr = { lines: [line("Overlay label", textBBox)] };
+  const graph: SceneGraph = {
+    graphVersion: 1,
+    canvas: { width: WIDTH, height: HEIGHT },
+    nodes: [
+      node("background", "background", { x: 0, y: 0, width: WIDTH, height: HEIGHT }, 0),
+      node("icon", "foreground-object", iconBBox, 1),
+    ],
+    relations: [],
+  };
+  const plan = planSemanticLayers(graph, ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-build-degraded-barrier-"));
+  try {
+    const result = await buildSemanticLayers(
+      { source, ocr, graph, plan, completions: new Map(), workDir },
+      {
+        buildTextMask: async () => {
+          throw new Error("injected tight-text-mask failure");
+        },
+      },
+    );
+
+    const decisions = new Map(
+      result.decisions.map((decision) => [decision.candidateId, decision]),
+    );
+    const degradedText = decisions.get("ocr-1");
+    assert.equal(degradedText?.decision, "kept_in_background");
+    assert.equal(degradedText?.reason, "text_mask_unavailable");
+    const icon = decisions.get("icon");
+    assert.equal(icon?.decision, "kept_in_background");
+    assert.equal(icon?.reason, "semantic_mask_unavailable");
+    assert.equal(result.recomposition.accepted, true);
+
+    const glyphOffset = (84 * WIDTH + 63) * 4;
+    const after = await rgbaPixels(result.background);
+    assert.deepEqual(
+      after.subarray(glyphOffset, glyphOffset + 4),
+      source.rgba.subarray(glyphOffset, glyphOffset + 4),
+    );
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
