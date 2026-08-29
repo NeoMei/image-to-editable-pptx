@@ -22,7 +22,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SLIDE_IMAGE="/Users/neomei/项目/codexprojects/PPT 编辑/.codex-tmp/deck-audit/template-inspect/source-slides/source-slide-07.png"
+SLIDE_IMAGE="${SLIDE_IMAGE:-$PROJECT_ROOT/.codex-tmp/deck-audit/template-inspect/source-slides/source-slide-07.png}"
 
 if [[ ! -f "$SLIDE_IMAGE" ]]; then
   printf 'Slide 7 source image not found: %s\n' "$SLIDE_IMAGE" >&2

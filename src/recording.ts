@@ -459,6 +459,13 @@ export async function writeRecording(
   }
 }
 
+export async function writeProviderMetadataRecording(
+  path: string,
+  payload: unknown,
+): Promise<void> {
+  await writeRecording(path, sanitizeRecordingPayload(payload));
+}
+
 export async function readRecording<T>(
   path: string,
   schema: z.ZodType<T>,

@@ -88,6 +88,16 @@ async function snapshotTree(
   return snapshot;
 }
 
+async function collectJsonPaths(directory: string): Promise<string[]> {
+  const paths: string[] = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) paths.push(...await collectJsonPaths(path));
+    else if (entry.isFile() && entry.name.endsWith(".json")) paths.push(path);
+  }
+  return paths;
+}
+
 async function writeNormalizedReplay(
   directory: string,
   ocr: unknown,
@@ -345,6 +355,13 @@ test("runs the complete pipeline from recorded provider fixtures", async () => {
       .async("string");
     assert.match(slideXml, /<a:t>第 4 章 工具<\/a:t>/);
     assert.doesNotMatch(slideXml, /name="shape-/);
+    if (process.platform !== "win32") {
+      const generatedJson = await collectJsonPaths(outDir);
+      assert.ok(generatedJson.length >= 5);
+      for (const path of generatedJson) {
+        assert.equal((await stat(path)).mode & 0o777, 0o600, path);
+      }
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

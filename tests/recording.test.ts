@@ -20,8 +20,47 @@ import {
   sanitizeProviderMetadata,
   sanitizeProviderRecording,
   sanitizeRecordingPayload,
+  writeProviderMetadataRecording,
   writeRecording,
 } from "../src/recording.js";
+
+test("recursively redacts regional and completion metadata in private JSON files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ppt-provider-metadata-"));
+  const canaries = [
+    "regional-bearer-canary-123456789",
+    "completion-secret-canary-987654321",
+    "signed-regional-canary-2468",
+  ];
+  const paths = [
+    join(directory, "regional", "request.json"),
+    join(directory, "completion", "result.json"),
+  ];
+  try {
+    await Promise.all([
+      writeProviderMetadataRecording(paths[0]!, {
+        region: {
+          harmlessField: `Bearer ${canaries[0]}`,
+          nested: [{ url: `https://bucket.example/crop?X-OSS-Signature=${canaries[2]}&Expires=9` }],
+          status: "SUCCEEDED",
+        },
+      }),
+      writeProviderMetadataRecording(paths[1]!, {
+        completion: {
+          details: { apiKey: canaries[1], attempts: 1 },
+          status: "SUCCEEDED",
+        },
+      }),
+    ]);
+    for (const path of paths) {
+      const text = await readFile(path, "utf8");
+      assert.doesNotMatch(text, new RegExp(canaries.join("|"), "i"));
+      assert.equal((await stat(path)).mode & 0o777, 0o600);
+      assert.match(text, /SUCCEEDED/);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("drops opaque provider identifiers while preserving useful status metadata", () => {
   const sanitized = sanitizeProviderMetadata({

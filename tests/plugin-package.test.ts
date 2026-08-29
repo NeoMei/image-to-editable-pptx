@@ -5,13 +5,16 @@ import test from "node:test";
 import { parseCliArgs } from "../src/cli.js";
 
 test("packages the project as the approved Codex plugin", async () => {
-  const [packageJson, pluginJson] = await Promise.all([
+  const [packageJson, pluginJson, packageLock] = await Promise.all([
     readJson("package.json"),
     readJson(".codex-plugin/plugin.json"),
+    readJson("package-lock.json"),
   ]);
 
   assert.equal(pluginJson.name, "image-to-editable-pptx");
   assert.equal(pluginJson.version, packageJson.version);
+  assert.equal(packageLock.version, packageJson.version);
+  assert.equal(packageLock.packages[""].version, packageJson.version);
   assert.equal(pluginJson.skills, "./skills/");
   assert.equal(
     pluginJson.repository,

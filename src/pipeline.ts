@@ -88,6 +88,7 @@ import {
   readRecording,
   sanitizeProviderRecording,
   sanitizeRecordingPayload,
+  writeProviderMetadataRecording,
   writeRecording,
 } from "./recording.js";
 import { SceneGraphSchema, type SceneGraph } from "./scene/contracts.js";
@@ -513,7 +514,7 @@ async function writeRefinementArtifacts(
       const path = `refinements/refinement-${String(index + 1).padStart(3, "0")}.json`;
       const rejectedWarning =
         `regional_refinement_rejected:${request.reason}:${request.targetNodeIds.join(",")}`;
-      await writeRecording(join(outDir, path), {
+      await writeProviderMetadataRecording(join(outDir, path), {
         request,
         accepted: !result.warnings.includes(rejectedWarning),
       });
@@ -1592,41 +1593,25 @@ export async function buildSlide(options: BuildOptions): Promise<PipelineResult>
   } else {
     analysis = await loadAnalysisPackageV2(analysisDir, ledger);
   }
-  const publication = await validatePublicationTarget({
+  return publishOutputAtomically({
     targetPath: options.outDir,
     ...(ledger.analysisVersion === 1
       ? { sourceImagePath: options.imagePath! }
       : {}),
     protectedPaths: [analysisDir],
+    build: async (stagingDir, targetDir) => {
+      const built = await buildFromAnalysis(
+        { ...options, outDir: stagingDir },
+        { analysis, startedAt, publishedOutDir: targetDir },
+      );
+      return {
+        outDir: targetDir,
+        manifestPath: join(targetDir, "manifest.json"),
+        pptxPath: join(targetDir, basename(built.pptxPath)),
+        ledgerPath: join(targetDir, "run-ledger.json"),
+      };
+    },
   });
-  const targetDir = publication.targetDir;
-  const targetParent = dirname(targetDir);
-  await mkdir(targetParent, { recursive: true });
-  const stagingDir = await mkdtemp(
-    join(targetParent, `.${basename(targetDir)}.staging-`),
-  );
-
-  try {
-    const built = await buildFromAnalysis(
-      { ...options, outDir: stagingDir },
-      { analysis, startedAt, publishedOutDir: targetDir },
-    );
-    await promoteSuccessfulRun(
-      stagingDir,
-      targetDir,
-      ledger.analysisVersion === 1 ? options.imagePath : undefined,
-      [analysisDir],
-    );
-    return {
-      outDir: targetDir,
-      manifestPath: join(targetDir, "manifest.json"),
-      pptxPath: join(targetDir, basename(built.pptxPath)),
-      ledgerPath: join(targetDir, "run-ledger.json"),
-    };
-  } catch (error) {
-    await retainFailedRun(stagingDir, targetDir);
-    throw error;
-  }
 }
 
 function isNotFound(error: unknown): boolean {
@@ -1716,17 +1701,21 @@ async function retainFailedRun(
   }
 }
 
-export async function runPipeline(
-  options: RunPipelineOptions,
-): Promise<PipelineResult> {
-  const startedAt = performance.now();
+export async function publishOutputAtomically<T>(options: {
+  targetPath: string;
+  sourceImagePath?: string;
+  protectedPaths?: string[];
+  build: (stagingDirectory: string, targetDirectory: string) => Promise<T>;
+}): Promise<T> {
   const publication = await validatePublicationTarget({
-    targetPath: options.outDir,
-    sourceImagePath: options.imagePath,
+    targetPath: options.targetPath,
+    ...(options.sourceImagePath === undefined
+      ? {}
+      : { sourceImagePath: options.sourceImagePath }),
+    ...(options.protectedPaths === undefined
+      ? {}
+      : { protectedPaths: options.protectedPaths }),
   });
-  const config =
-    options.config ??
-    (options.replay === undefined ? loadConfig() : undefined);
   const targetDir = publication.targetDir;
   const targetParent = dirname(targetDir);
   await mkdir(targetParent, { recursive: true });
@@ -1735,44 +1724,66 @@ export async function runPipeline(
   );
 
   try {
-    const analyzed = await analyzeIntoDirectory({
-      imagePath: options.imagePath,
-      outDir: stagingDir,
-      ...(options.replay === undefined ? {} : { replay: options.replay }),
-      ...(options.record === undefined ? {} : { record: options.record }),
-      ...(config === undefined ? {} : { config }),
-    });
-    let analysis: AnalysisResult = analyzed;
-    if (analyzed.analysisVersion === 2) {
-      const verifiedLedger = await readAnalysisPackage(stagingDir);
-      if (verifiedLedger.analysisVersion !== 2) {
-        throw new Error("Live analysis did not publish an analysis package v2");
-      }
-      analysis = await loadAnalysisPackageV2(stagingDir, verifiedLedger);
-    }
-    const built = await buildFromAnalysis(
-      {
-        imagePath: options.imagePath,
-        analysisDir: stagingDir,
-        outDir: stagingDir,
-        ...(options.requiredTextCount === undefined
-          ? {}
-          : { requiredTextCount: options.requiredTextCount }),
-        ...(options.fidelityBuild === undefined
-          ? {}
-          : { fidelityBuild: options.fidelityBuild }),
-      },
-      { analysis, startedAt, publishedOutDir: targetDir },
+    const result = await options.build(stagingDir, targetDir);
+    await promoteSuccessfulRun(
+      stagingDir,
+      targetDir,
+      options.sourceImagePath,
+      options.protectedPaths,
     );
-    await promoteSuccessfulRun(stagingDir, targetDir, options.imagePath);
-    return {
-      outDir: targetDir,
-      manifestPath: join(targetDir, "manifest.json"),
-      pptxPath: join(targetDir, basename(built.pptxPath)),
-      ledgerPath: join(targetDir, "run-ledger.json"),
-    };
+    return result;
   } catch (error) {
     await retainFailedRun(stagingDir, targetDir);
     throw error;
   }
+}
+
+export async function runPipeline(
+  options: RunPipelineOptions,
+): Promise<PipelineResult> {
+  const startedAt = performance.now();
+  return publishOutputAtomically({
+    targetPath: options.outDir,
+    sourceImagePath: options.imagePath,
+    build: async (stagingDir, targetDir) => {
+      const config =
+        options.config ??
+        (options.replay === undefined ? loadConfig() : undefined);
+      const analyzed = await analyzeIntoDirectory({
+        imagePath: options.imagePath,
+        outDir: stagingDir,
+        ...(options.replay === undefined ? {} : { replay: options.replay }),
+        ...(options.record === undefined ? {} : { record: options.record }),
+        ...(config === undefined ? {} : { config }),
+      });
+      let analysis: AnalysisResult = analyzed;
+      if (analyzed.analysisVersion === 2) {
+        const verifiedLedger = await readAnalysisPackage(stagingDir);
+        if (verifiedLedger.analysisVersion !== 2) {
+          throw new Error("Live analysis did not publish an analysis package v2");
+        }
+        analysis = await loadAnalysisPackageV2(stagingDir, verifiedLedger);
+      }
+      const built = await buildFromAnalysis(
+        {
+          imagePath: options.imagePath,
+          analysisDir: stagingDir,
+          outDir: stagingDir,
+          ...(options.requiredTextCount === undefined
+            ? {}
+            : { requiredTextCount: options.requiredTextCount }),
+          ...(options.fidelityBuild === undefined
+            ? {}
+            : { fidelityBuild: options.fidelityBuild }),
+        },
+        { analysis, startedAt, publishedOutDir: targetDir },
+      );
+      return {
+        outDir: targetDir,
+        manifestPath: join(targetDir, "manifest.json"),
+        pptxPath: join(targetDir, basename(built.pptxPath)),
+        ledgerPath: join(targetDir, "run-ledger.json"),
+      };
+    },
+  });
 }

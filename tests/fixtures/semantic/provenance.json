@@ -1,0 +1,43 @@
+{
+  "generatedBy": "generate.mjs",
+  "license": "CC0-1.0",
+  "note": "Deterministic geometric fixtures generated in-repository; no third-party slide artwork.",
+  "files": {
+    "canvas-16x9.png": {
+      "sha256": "2a161d4874b79c9cc2e770889fc6491650a7ae8253bbf79729205300a73d2bb9",
+      "purpose": "16:9 PNG canvas contract and transform coverage."
+    },
+    "canvas-4x3.jpg": {
+      "sha256": "53fb673b1bac764a85b07097a1c144b2462a3d988c356667e894d4022e0697f5",
+      "purpose": "4:3 JPEG decode and compression-ringing coverage."
+    },
+    "canvas-portrait.png": {
+      "sha256": "4dbeebeb6a249679bbbd50687ae1cf1abd82d253fcbc08a853e3d8b23d81a335",
+      "purpose": "Portrait canvas transform and bounded-layout coverage."
+    },
+    "canvas-square.png": {
+      "sha256": "f3f0d0a00ddbba778cb7d15bbdedffbbb7d8a76b28e6c79bf44f9868e92d44ad",
+      "purpose": "Square canvas transform and scaling coverage."
+    },
+    "canvas-ultrawide.png": {
+      "sha256": "e10c19bf8a889328b87d6214e3ed43d91a2a311a41503373f27b2f46fe3f2f9d",
+      "purpose": "Ultrawide bounded-layout and aspect-ratio coverage."
+    },
+    "text-backing.png": {
+      "sha256": "a9634451442877d0db4861243c293307b7f50d929e145429a64c471b871eee7f",
+      "purpose": "Editable text backing extraction without embedded fonts."
+    },
+    "connected-composition.png": {
+      "sha256": "9c261a47fb504a88bd3eed8cdb144e693268573129dced4a8fee62ddd8664813",
+      "purpose": "Connected compound grouping and shared-mask coverage."
+    },
+    "occlusion.png": {
+      "sha256": "18a6a6c09838bddc71daeed901881590ffc4cd6cb6bea29c21a32b2767ab4042",
+      "purpose": "Occlusion ordering and hidden-region review coverage."
+    },
+    "must-fallback.png": {
+      "sha256": "043df727d9754c98ab6c02fb0bef222682f8b74cb99e2757ece6ce1968ac7212",
+      "purpose": "Dense crossing texture that must remain in the background."
+    }
+  }
+}
