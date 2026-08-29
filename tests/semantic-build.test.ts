@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   lstat,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -630,5 +631,88 @@ test("refuses an assets symlink without touching its target", async () => {
   } finally {
     await rm(workDir, { recursive: true, force: true });
     await rm(externalDir, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when a competitor claims assets after preflight", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-claim-race-"));
+  const assetsDir = join(workDir, "assets");
+  let competitorRan = false;
+  try {
+    await assert.rejects(
+      buildSemanticLayers(
+        {
+          source: fixture.source,
+          ocr: fixture.ocr,
+          graph: fixture.graph,
+          plan,
+          completions: new Map(),
+          workDir,
+        },
+        {
+          createAssetsDirectory: async (path: string) => {
+            competitorRan = true;
+            await mkdir(path);
+            await writeFile(join(path, "competitor.txt"), "foreign");
+            await mkdir(path);
+          },
+        },
+      ),
+      /assets target already exists|EEXIST/,
+    );
+    assert.equal(competitorRan, true);
+    assert.deepEqual(await readdir(assetsDir), ["competitor.txt"]);
+    assert.equal(await readFile(join(assetsDir, "competitor.txt"), "utf8"), "foreign");
+    assert.equal(
+      (await readdir(assetsDir)).includes(".semantic-assets-complete.json"),
+      false,
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("retains a foreign file injected during publication without completing", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-contamination-"));
+  const assetsDir = join(workDir, "assets");
+  let publishedFiles = 0;
+  try {
+    await assert.rejects(
+      buildSemanticLayers(
+        {
+          source: fixture.source,
+          ocr: fixture.ocr,
+          graph: fixture.graph,
+          plan,
+          completions: new Map(),
+          workDir,
+        },
+        {
+          publishAssetNoReplace: async (
+            stagedPath: string,
+            finalPath: string,
+          ) => {
+            await link(stagedPath, finalPath);
+            publishedFiles += 1;
+            if (publishedFiles === 1) {
+              await writeFile(join(assetsDir, "competitor.txt"), "foreign", {
+                flag: "wx",
+              });
+            }
+          },
+        },
+      ),
+      /unexpected entry|contaminated/,
+    );
+    assert.ok(publishedFiles >= 1);
+    assert.deepEqual(await readdir(assetsDir), ["competitor.txt"]);
+    assert.equal(await readFile(join(assetsDir, "competitor.txt"), "utf8"), "foreign");
+    assert.deepEqual(await readdir(workDir), ["assets"]);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
   }
 });

@@ -1,9 +1,16 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
+  copyFile,
+  link,
   lstat,
+  mkdir,
   mkdtemp,
-  rename,
+  open,
+  readdir,
   rm,
+  rmdir,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -416,6 +423,11 @@ export type SemanticBuildDependencies = {
     input: CommittedUnionRepairInput,
   ) => Promise<CommittedUnionRepairResult>;
   writeAsset: (path: string, image: Buffer) => Promise<void>;
+  createAssetsDirectory: (path: string) => Promise<void>;
+  publishAssetNoReplace: (
+    stagedPath: string,
+    finalPath: string,
+  ) => Promise<void>;
 };
 
 type SemanticStage = {
@@ -784,6 +796,167 @@ function assetPathFor(candidate: SemanticCandidate): string {
   return `assets/semantic-${sequence}-${suffix}.png`;
 }
 
+export const SEMANTIC_ASSET_OWNERSHIP_MARKER =
+  ".semantic-assets-owner.json";
+export const SEMANTIC_ASSET_COMPLETION_MARKER =
+  ".semantic-assets-complete.json";
+
+type FileSystemIdentity = {
+  dev: bigint;
+  ino: bigint;
+};
+
+type OwnedPublicationEntry = FileSystemIdentity & {
+  name: string;
+  sha256: string;
+};
+
+function errnoCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException).code;
+}
+
+function sameIdentity(
+  left: FileSystemIdentity,
+  right: FileSystemIdentity,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function readDirectoryIdentity(path: string): Promise<FileSystemIdentity> {
+  const stats = await lstat(path, { bigint: true });
+  if (!stats.isDirectory() || stats.isSymbolicLink()) {
+    throw new Error("Semantic assets target is not an owned directory");
+  }
+  return { dev: stats.dev, ino: stats.ino };
+}
+
+async function directoryHasIdentity(
+  path: string,
+  identity: FileSystemIdentity,
+): Promise<boolean> {
+  try {
+    return sameIdentity(await readDirectoryIdentity(path), identity);
+  } catch {
+    return false;
+  }
+}
+
+async function inspectPublishedFile(
+  path: string,
+  name: string,
+  expectedSha256: string,
+): Promise<OwnedPublicationEntry> {
+  const pathStats = await lstat(path, { bigint: true });
+  if (!pathStats.isFile() || pathStats.isSymbolicLink()) {
+    throw new Error(`Semantic asset publication is contaminated: ${name}`);
+  }
+  const handle = await open(path, "r");
+  try {
+    const handleStats = await handle.stat({ bigint: true });
+    const identity = { dev: handleStats.dev, ino: handleStats.ino };
+    if (!handleStats.isFile() || !sameIdentity(identity, {
+      dev: pathStats.dev,
+      ino: pathStats.ino,
+    })) {
+      throw new Error(`Semantic asset publication is contaminated: ${name}`);
+    }
+    const bytes = await handle.readFile();
+    if (sha256(bytes) !== expectedSha256) {
+      throw new Error(`Semantic asset publication hash mismatch: ${name}`);
+    }
+    return { ...identity, name, sha256: expectedSha256 };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function entryStillOwned(
+  directory: string,
+  entry: OwnedPublicationEntry,
+): Promise<boolean> {
+  try {
+    const inspected = await inspectPublishedFile(
+      join(directory, entry.name),
+      entry.name,
+      entry.sha256,
+    );
+    return sameIdentity(inspected, entry);
+  } catch {
+    return false;
+  }
+}
+
+async function verifyPublicationEntries(
+  directory: string,
+  directoryIdentity: FileSystemIdentity,
+  entries: readonly OwnedPublicationEntry[],
+): Promise<void> {
+  if (!(await directoryHasIdentity(directory, directoryIdentity))) {
+    throw new Error("Semantic assets directory ownership was lost");
+  }
+  const expectedNames = entries.map(({ name }) => name).sort(compareCodePoints);
+  const actualNames = (await readdir(directory)).sort(compareCodePoints);
+  if (!isDeepStrictEqual(actualNames, expectedNames)) {
+    throw new Error("Semantic assets directory contains an unexpected entry");
+  }
+  for (const entry of entries) {
+    if (!(await entryStillOwned(directory, entry))) {
+      throw new Error(`Semantic asset publication is contaminated: ${entry.name}`);
+    }
+  }
+  const verifiedNames = (await readdir(directory)).sort(compareCodePoints);
+  if (!isDeepStrictEqual(verifiedNames, expectedNames)) {
+    throw new Error("Semantic assets directory contains an unexpected entry");
+  }
+}
+
+async function cleanupOwnedPublication(
+  directory: string,
+  directoryIdentity: FileSystemIdentity | undefined,
+  entries: readonly OwnedPublicationEntry[],
+): Promise<void> {
+  if (
+    directoryIdentity === undefined ||
+    !(await directoryHasIdentity(directory, directoryIdentity))
+  ) {
+    return;
+  }
+  for (const entry of [...entries].reverse()) {
+    if (!(await entryStillOwned(directory, entry))) continue;
+    try {
+      await unlink(join(directory, entry.name));
+    } catch {
+      // A concurrent replacement is foreign; leave it untouched.
+    }
+  }
+  if (!(await directoryHasIdentity(directory, directoryIdentity))) return;
+  try {
+    if ((await readdir(directory)).length === 0) await rmdir(directory);
+  } catch {
+    // A foreign entry or replacement keeps the directory intentionally intact.
+  }
+}
+
+const HARD_LINK_UNSUPPORTED = new Set([
+  "EXDEV",
+  "EMLINK",
+  "ENOTSUP",
+  "EOPNOTSUPP",
+  "EPERM",
+]);
+
+export async function publishAssetNoReplace(
+  stagedPath: string,
+  finalPath: string,
+): Promise<void> {
+  try {
+    await link(stagedPath, finalPath);
+  } catch (error) {
+    if (!HARD_LINK_UNSUPPORTED.has(errnoCode(error) ?? "")) throw error;
+    await copyFile(stagedPath, finalPath, fsConstants.COPYFILE_EXCL);
+  }
+}
+
 async function assertAssetsTargetAbsent(workDir: string): Promise<void> {
   try {
     await lstat(join(workDir, "assets"));
@@ -801,8 +974,12 @@ async function publishSemanticAssets(
 ): Promise<void> {
   await assertAssetsTargetAbsent(workDir);
   const stagingDir = await mkdtemp(join(workDir, ".semantic-assets-staging-"));
+  const finalDirectory = join(workDir, "assets");
+  let directoryIdentity: FileSystemIdentity | undefined;
+  const ownedEntries: OwnedPublicationEntry[] = [];
   let published = false;
   try {
+    const stagedNames: string[] = [];
     for (const asset of assets) {
       if (!asset.assetPath.startsWith("assets/")) {
         throw new Error("Semantic asset path must be under assets");
@@ -811,13 +988,92 @@ async function publishSemanticAssets(
       if (fileName.length === 0 || fileName.includes("/") || fileName === ".") {
         throw new Error("Semantic asset path must name one staged file");
       }
-      await dependencies.writeAsset(join(stagingDir, fileName), asset.image);
+      const stagedPath = join(stagingDir, fileName);
+      await dependencies.writeAsset(stagedPath, asset.image);
+      await inspectPublishedFile(stagedPath, fileName, sha256(asset.image));
+      stagedNames.push(fileName);
     }
     await assertAssetsTargetAbsent(workDir);
-    await rename(stagingDir, join(workDir, "assets"));
+    try {
+      await dependencies.createAssetsDirectory(finalDirectory);
+    } catch (error) {
+      if (errnoCode(error) === "EEXIST") {
+        throw new Error("Semantic assets target already exists", { cause: error });
+      }
+      throw error;
+    }
+    directoryIdentity = await readDirectoryIdentity(finalDirectory);
+
+    const ownerBytes = Buffer.from(`${JSON.stringify({
+      format: "semantic-assets-owner-v1",
+      token: randomUUID(),
+    })}\n`);
+    const ownerPath = join(finalDirectory, SEMANTIC_ASSET_OWNERSHIP_MARKER);
+    await writeFile(ownerPath, ownerBytes, { flag: "wx", mode: 0o600 });
+    ownedEntries.push(
+      await inspectPublishedFile(
+        ownerPath,
+        SEMANTIC_ASSET_OWNERSHIP_MARKER,
+        sha256(ownerBytes),
+      ),
+    );
+
+    for (const [index, asset] of assets.entries()) {
+      if (!(await directoryHasIdentity(finalDirectory, directoryIdentity))) {
+        throw new Error("Semantic assets directory ownership was lost");
+      }
+      const fileName = stagedNames[index]!;
+      const finalPath = join(finalDirectory, fileName);
+      await dependencies.publishAssetNoReplace(
+        join(stagingDir, fileName),
+        finalPath,
+      );
+      ownedEntries.push(
+        await inspectPublishedFile(finalPath, fileName, sha256(asset.image)),
+      );
+    }
+    await verifyPublicationEntries(
+      finalDirectory,
+      directoryIdentity,
+      ownedEntries,
+    );
+    await rm(stagingDir, { recursive: true, force: true });
+
+    const completionBytes = Buffer.from(`${JSON.stringify({
+      format: "semantic-assets-complete-v1",
+      assets: assets.map((asset, index) => ({
+        path: `assets/${stagedNames[index]!}`,
+        sha256: sha256(asset.image),
+      })),
+    })}\n`);
+    const completionPath = join(
+      finalDirectory,
+      SEMANTIC_ASSET_COMPLETION_MARKER,
+    );
+    await writeFile(completionPath, completionBytes, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    ownedEntries.push(
+      await inspectPublishedFile(
+        completionPath,
+        SEMANTIC_ASSET_COMPLETION_MARKER,
+        sha256(completionBytes),
+      ),
+    );
+    await verifyPublicationEntries(
+      finalDirectory,
+      directoryIdentity,
+      ownedEntries,
+    );
     published = true;
   } finally {
     if (!published) {
+      await cleanupOwnedPublication(
+        finalDirectory,
+        directoryIdentity,
+        ownedEntries,
+      );
       await rm(stagingDir, { recursive: true, force: true });
     }
   }
@@ -961,6 +1217,8 @@ function candidateRelations(
 const defaultSemanticBuildDependencies: SemanticBuildDependencies = {
   repairCommittedUnion,
   writeAsset: writeFile,
+  createAssetsDirectory: async (path) => mkdir(path),
+  publishAssetNoReplace,
 };
 
 export async function buildSemanticLayers(
