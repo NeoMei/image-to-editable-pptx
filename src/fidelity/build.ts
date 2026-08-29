@@ -51,12 +51,14 @@ import {
 import {
   chooseSemanticMask,
   deriveSemanticMasks,
+  type MaskCandidate,
 } from "../image/semantic-mask.js";
 import type { SourceCanvas } from "../image/source.js";
 import { buildTightTextMask } from "../image/text-mask.js";
 import type { CompletedCandidate } from "../occlusion/contracts.js";
 import {
   SceneGraphSchema,
+  type CanvasSize,
   type SceneGraph,
   type SceneRelation,
 } from "../scene/contracts.js";
@@ -64,6 +66,7 @@ import type {
   SemanticCandidate,
   SemanticLayerPlan,
 } from "../scene/plan.js";
+import { toPixelBBox } from "../scene/geometry.js";
 import { planSemanticLayers } from "../scene/plan.js";
 import { extractTextBacking } from "./text-backing.js";
 import { inferEditableTextStyle } from "./text-style.js";
@@ -1643,6 +1646,37 @@ function candidateRelations(
     .sort((left, right) => compareCodePoints(left.id, right.id));
 }
 
+function compoundMemberCandidates(
+  candidate: SemanticCandidate,
+  graph: SceneGraph,
+  canvas: CanvasSize,
+): SemanticCandidate[] {
+  if (candidate.kind !== "compound-group") return [];
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const members: SemanticCandidate[] = [];
+  for (const nodeId of candidate.nodeIds) {
+    const node = nodeById.get(nodeId);
+    if (node === undefined) {
+      throw new Error(`Semantic candidate references an unknown scene node: ${nodeId}`);
+    }
+    if (node.id === candidate.id) continue;
+    if (node.role !== "foreground-object" && node.role !== "compound-group") continue;
+    members.push({
+      id: `${candidate.id}:${nodeId}`,
+      kind: node.role === "compound-group" ? "compound-group" : "foreground-object",
+      nodeIds: [nodeId],
+      bbox: toPixelBBox(node.bbox, canvas),
+      zOrder: node.zIndex ?? candidate.zOrder,
+      relations: graph.relations
+        .filter(({ from, to }) => from === nodeId || to === nodeId)
+        .map(({ id: relationId }) => relationId)
+        .sort(compareCodePoints),
+      carriedTextIds: [],
+    });
+  }
+  return members.sort((left, right) => compareCodePoints(left.id, right.id));
+}
+
 const defaultSemanticBuildDependencies: SemanticBuildDependencies = {
   repairCommittedUnion,
   writeAsset: writeFile,
@@ -1713,6 +1747,64 @@ export async function buildSemanticLayers(
   const protectedTextMask = await orMasks(textMasks, plan.canvas);
   const stages: SemanticStage[] = [];
   const textElementsForBacking = manifestTexts.map((text) => ({ ...text }));
+
+  const commitSourceVisibleStage = async (
+    candidate: SemanticCandidate,
+    selected: MaskCandidate,
+  ): Promise<void> => {
+    const removalMask = await buildAssetRemovalMask(
+      selected.mask,
+      selected.bbox,
+      plan.canvas,
+    );
+    const local = await validateLocalStage({
+      source,
+      removalMask,
+      image: selected.mask,
+      bbox: selected.bbox,
+      ignoredMask: protectedTextMask,
+    });
+    if (!local.accepted) {
+      decisions.push(
+        semanticDecision(candidate, {
+          decision: "kept_in_background",
+          repairMethod: "local_nearest_surface",
+          extraction: "transparent",
+          reason: local.reason ?? "recomposition_mismatch",
+          repairMetrics: local.repairMetrics,
+          recompositionMetrics: local.recomposition?.metrics,
+          bbox: selected.bbox,
+        }),
+      );
+      return;
+    }
+    const visibleMask = await localAlphaMask(selected.mask);
+    const provenance = await sourceVisibleProvenance(
+      input.source,
+      selected.bbox,
+      selected.mask,
+      visibleMask,
+    );
+    const decision = semanticDecision(candidate, {
+      decision: "accepted",
+      repairMethod: "local_nearest_surface",
+      extraction: "transparent",
+      repairMetrics: local.repairMetrics,
+      recompositionMetrics: local.recomposition?.metrics,
+      assetPath: assetPathFor(candidate),
+      bbox: selected.bbox,
+    });
+    stages.push({
+      candidate,
+      image: selected.mask,
+      bbox: selected.bbox,
+      removalMask,
+      provenance,
+      reviewRequired: false,
+      decision,
+    });
+    decisions.push(decision);
+  };
 
   for (const candidate of plan.candidates) {
     const path = assetPathFor(candidate);
@@ -1797,6 +1889,24 @@ export async function buildSemanticLayers(
           reason: "semantic_mask_unavailable",
         }),
       );
+      for (const member of compoundMemberCandidates(candidate, input.graph, plan.canvas)) {
+        const memberSelected = chooseSemanticMask(
+          await deriveSemanticMasks(input.source, member),
+          protectedTextMask,
+        );
+        if (memberSelected === undefined) {
+          decisions.push(
+            semanticDecision(member, {
+              decision: "kept_in_background",
+              repairMethod: "none",
+              extraction: "none",
+              reason: "semantic_mask_unavailable",
+            }),
+          );
+          continue;
+        }
+        await commitSourceVisibleStage(member, memberSelected);
+      }
       continue;
     }
     const completion = input.completions.get(candidate.id);
@@ -1856,58 +1966,7 @@ export async function buildSemanticLayers(
       continue;
     }
 
-    const removalMask = await buildAssetRemovalMask(
-      selected.mask,
-      selected.bbox,
-      plan.canvas,
-    );
-    const local = await validateLocalStage({
-      source,
-      removalMask,
-      image: selected.mask,
-      bbox: selected.bbox,
-      ignoredMask: protectedTextMask,
-    });
-    if (!local.accepted) {
-      decisions.push(
-        semanticDecision(candidate, {
-          decision: "kept_in_background",
-          repairMethod: "local_nearest_surface",
-          extraction: "transparent",
-          reason: local.reason ?? "recomposition_mismatch",
-          repairMetrics: local.repairMetrics,
-          recompositionMetrics: local.recomposition?.metrics,
-          bbox: selected.bbox,
-        }),
-      );
-      continue;
-    }
-    const visibleMask = await localAlphaMask(selected.mask);
-    const provenance = await sourceVisibleProvenance(
-      input.source,
-      selected.bbox,
-      selected.mask,
-      visibleMask,
-    );
-    const decision = semanticDecision(candidate, {
-      decision: "accepted",
-      repairMethod: "local_nearest_surface",
-      extraction: "transparent",
-      repairMetrics: local.repairMetrics,
-      recompositionMetrics: local.recomposition?.metrics,
-      assetPath: path,
-      bbox: selected.bbox,
-    });
-    stages.push({
-      candidate,
-      image: selected.mask,
-      bbox: selected.bbox,
-      removalMask,
-      provenance,
-      reviewRequired: false,
-      decision,
-    });
-    decisions.push(decision);
+    await commitSourceVisibleStage(candidate, selected);
   }
 
   let active = [...stages];

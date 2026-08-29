@@ -934,3 +934,69 @@ test("rejects an exact-name directory replacement during final inventory verific
     await rm(workDir, { recursive: true, force: true });
   }
 });
+
+test("falls back to per-member extraction when a compound mask overlaps protected text", async () => {
+  const source = fillCanvas();
+  const cleanBBox: BBox = { x: 40, y: 20, width: 24, height: 24 };
+  const textBBox: BBox = { x: 80, y: 20, width: 32, height: 24 };
+  const groupBBox: BBox = { x: 40, y: 20, width: 72, height: 24 };
+  const ocrBBox: BBox = { x: 86, y: 26, width: 20, height: 12 };
+  paintRect(source, cleanBBox, [52, 98, 135, 255]);
+  paintRect(source, textBBox, [52, 98, 135, 255]);
+  paintGlyphs(source, ocrBBox);
+  source.sourceBytes = await sharp(source.rgba, {
+    raw: { width: WIDTH, height: HEIGHT, channels: 4 },
+  }).png().toBuffer();
+
+  const graph: SceneGraph = {
+    graphVersion: 1,
+    canvas: { width: WIDTH, height: HEIGHT },
+    nodes: [
+      node("background", "background", { x: 0, y: 0, width: WIDTH, height: HEIGHT }, 0),
+      node("tagged", "compound-group", groupBBox, 2),
+      node("tagged-clean", "foreground-object", cleanBBox, 2),
+      node("tagged-text", "foreground-object", textBBox, 2),
+    ],
+    relations: [
+      relation("tagged-clean-group", "belongs-to", "tagged-clean", "tagged"),
+      relation("tagged-text-group", "belongs-to", "tagged-text", "tagged"),
+    ],
+  };
+  const ocr: OcrResult = { lines: [line("Shield label", ocrBBox)] };
+  const plan = planSemanticLayers(graph, ocr);
+  const groupCandidate = plan.candidates.find(({ id }) => id === "tagged");
+  assert.ok(groupCandidate);
+  assert.equal(groupCandidate.kind, "compound-group");
+
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-member-fallback-"));
+  try {
+    const result = await buildSemanticLayers({
+      source,
+      ocr,
+      graph,
+      plan,
+      completions: new Map(),
+      workDir,
+    });
+
+    const elements = new Map(result.manifest.elements.map((element) => [element.id, element]));
+    assert.equal(elements.has("tagged"), false);
+    const cleanElement = elements.get("tagged:tagged-clean");
+    assert.ok(cleanElement);
+    assert.equal(cleanElement.kind, "asset");
+    assert.equal(elements.has("tagged:tagged-text"), false);
+
+    const decisions = new Map(result.decisions.map((decision) => [decision.candidateId, decision]));
+    const groupDecision = decisions.get("tagged");
+    assert.equal(groupDecision?.decision, "kept_in_background");
+    assert.equal(groupDecision?.reason, "semantic_mask_unavailable");
+    const textMemberDecision = decisions.get("tagged:tagged-text");
+    assert.equal(textMemberDecision?.decision, "kept_in_background");
+    assert.equal(textMemberDecision?.reason, "semantic_mask_unavailable");
+    const cleanMemberDecision = decisions.get("tagged:tagged-clean");
+    assert.equal(cleanMemberDecision?.decision, "accepted");
+    assert.equal(result.recomposition.accepted, true);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
