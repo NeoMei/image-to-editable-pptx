@@ -101,11 +101,23 @@ const ACCEPTANCE_TOKENS = [
   "\u5b89\u5168\u673a\u5236",
   "slide-07",
 ];
+const PROMPT_ONLY_MODULE_PATH = resolve("src/providers/qwen-scene-prompt.ts");
+
+const UNNAMED_PROMPT_PRODUCER_SOURCE = `
+  const instructionFactories = {
+    create: (node: { label: string }, canvas: { width: number }) =>
+      node.label === "\u773c\u775b" && canvas.width === 1280
+        ? () => "slide-07 at 720"
+        : () => "generic",
+  };
+`;
 
 function findSceneArchitectureViolations(
   sourceText: string,
   modulePath = "scene-decision.ts",
 ): string[] {
+  if (resolve(modulePath) === PROMPT_ONLY_MODULE_PATH) return [];
+
   const source = ts.createSourceFile(
     modulePath,
     sourceText,
@@ -116,36 +128,7 @@ function findSceneArchitectureViolations(
   const decisionExpressions: ts.Expression[] = [];
   const violations: string[] = [];
 
-  function isPromptProducingSubtree(node: ts.Node): boolean {
-    if (
-      (ts.isFunctionDeclaration(node) ||
-        ts.isMethodDeclaration(node) ||
-        ts.isFunctionExpression(node)) &&
-      node.name !== undefined &&
-      /prompt/i.test(node.name.getText(source))
-    ) {
-      return true;
-    }
-
-    if (
-      (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) &&
-      ts.isVariableDeclaration(node.parent) &&
-      ts.isIdentifier(node.parent.name) &&
-      /prompt/i.test(node.parent.name.text)
-    ) {
-      return true;
-    }
-
-    return (
-      ts.isVariableDeclaration(node) &&
-      ts.isIdentifier(node.name) &&
-      /prompt/i.test(node.name.text)
-    );
-  }
-
   function visit(node: ts.Node): void {
-    if (isPromptProducingSubtree(node)) return;
-
     if (
       ts.isIfStatement(node) ||
       ts.isWhileStatement(node) ||
@@ -481,6 +464,7 @@ test("rejects an unvalidated compatible base before sending the image", async ()
 test("new scene decision modules contain no acceptance-label or fixed-canvas branches", async () => {
   const modulePaths = [
     resolve("src/providers/qwen-scene.ts"),
+    resolve("src/scene/refine.ts"),
     resolve("src/scene/plan.ts"),
   ].filter((path) => existsSync(path));
   assert.ok(modulePaths.length > 0, "expected a new scene decision module");
@@ -495,17 +479,32 @@ test("new scene decision modules contain no acceptance-label or fixed-canvas bra
   }
 });
 
-test("architecture guard ignores audit prose inside prompt-producing functions", () => {
-  const promptSource = `
-    function createScenePrompt(canvas: { width: number; height: number }) {
-      const auditExample = canvas.width === 1280
-        ? "\u773c\u775b slide-07 on 720"
-        : "generic audit prose";
-      return auditExample;
-    }
-  `;
+test("prompt-only module boundary excludes unnamed object-property producers", () => {
+  assert.deepEqual(
+    findSceneArchitectureViolations(
+      UNNAMED_PROMPT_PRODUCER_SOURCE,
+      PROMPT_ONLY_MODULE_PATH,
+    ),
+    [],
+  );
+});
 
-  assert.deepEqual(findSceneArchitectureViolations(promptSource), []);
+test("scanned decision modules catch the same unnamed object-property producer", () => {
+  const violations = findSceneArchitectureViolations(
+    UNNAMED_PROMPT_PRODUCER_SOURCE,
+    resolve("src/providers/qwen-scene.ts"),
+  );
+
+  assert.ok(violations.some((violation) => /audit-only label/.test(violation)));
+  assert.ok(violations.some((violation) => /\u773c\u775b/.test(violation)));
+  assert.ok(violations.some((violation) => /1280/.test(violation)));
+});
+
+test("exports prompt construction from the prompt-only module", async () => {
+  const promptModule = await import("../src/providers/qwen-scene-prompt.js");
+  const content = promptModule.createScenePrompt({ width: 1377, height: 811 });
+
+  assert.match(content, /1377 x 811/);
 });
 
 test("architecture guard catches equivalent executable decision branches", () => {
