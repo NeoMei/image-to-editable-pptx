@@ -134,3 +134,24 @@ manifest 共 18 个元素：8 个可移动资产层 + 10 个可编辑文字层�
 ## 8. 结论
 
 Task 14 除完成定义第 10 条的 WPS 交互链留证外全部完成；该链条的自动化受阻原因明确（辅助访问权限 + 前台焦点漂移），已提供精确的手动步骤。本地分支干净、无 push/tag/publish 动作。
+
+## 9. 图标白边修复轮（验收后追加）
+
+用户反馈：图标资产出现白边碎片；取舍原则确认为"呈现效果 > 拆分力度，所有文字分层是硬约束"。
+
+根因：盾牌碎片（1575px + 610px 两个独立连通分量）落在扳手资产 bbox 内。此前按 completeness 排序时完整掩码总是胜过剥离变体，卫星碎片被带入资产，渲染为悬浮白边。
+
+修复（`src/image/extract.ts`，均为颜色/几何级通用判据，无 label/坐标特判）：
+
+- `stripDetachedSatelliteFragments`：主导分量占前景 ≥60% 时，剥离与主导分量欧氏间隙 > max(4px, 资产对角线×10%) 的卫星分量；标记 removed 使新暴露边缘获得软边。
+- `zeroRgbBehindFullyTransparentPixels`：全透明像素 RGB 清零，消除渲染链白带隐患。
+- 保留守卫：面积均衡的多部件图标（如暂停键双条，share<0.6）整体跳过剥离；近距细节保留（钟表指针 12px、刻度 2-3px、眼睛虹膜 5px）。
+- 评审加固：`componentBounds` + `squaredBoundsDistance` 包围盒剪枝，全出血大图的远距卫星判定跳过 O(n×m) 逐像素对扫描（包围盒距离 ≤ 像素距离，语义严格等价）。
+- 测试兼容修复：npm 12 的 `pack --json` 输出为对象而非数组，`tests/package-scripts.test.ts` 双格式兼容。
+
+证据：
+
+- 门禁：lint:types ✓；源码测试 361/361 ✓；build ✓；编译测试 361/361 ✓（均 env -u 离线）。
+- run8-build5 重建与 build4 等价：manifest.json 与资产 PNG 逐字节一致；slide1.xml 在规范化每次构建的随机 staging 目录名后一致；pptx 条目列表与全部内嵌媒体一致；ledger 差异仅为耗时/inode/ownerToken。
+- 四个 fixture 重建（build3）与 build2 元素结构一致（canvas-4x3: 1 资产；canvas-portrait: 0（刻意空画布）；must-fallback: 0（分析被拒记录，非回归）；text-backing: 1 资产）。
+- 扳手资产剥离后为 1 个连通分量；盾牌本体（fg-4）按"呈现优先"授权仍保留在背景（无法独立拖动但呈现完整）。

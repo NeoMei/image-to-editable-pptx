@@ -128,8 +128,8 @@ test("preserves antialiased icon edges as decontaminated partial alpha", async (
 test("falls back when foreground occupies more than two percent of the crop perimeter", async () => {
   const source = await sharp({
     create: {
-      width: 24,
-      height: 24,
+      width: 20,
+      height: 20,
       channels: 3,
       background: "#f7f3e9",
     },
@@ -137,26 +137,26 @@ test("falls back when foreground occupies more than two percent of the crop peri
     .composite([
       {
         input: {
-          create: {
-            width: 12,
-            height: 12,
-            channels: 3,
-            background: "#23394d",
-          },
+        create: {
+          width: 12,
+          height: 12,
+          channels: 3,
+          background: "#23394d",
         },
-        left: 6,
-        top: 6,
+        },
+        left: 4,
+        top: 4,
       },
       {
         input: {
-          create: {
-            width: 2,
-            height: 1,
-            channels: 3,
-            background: "#23394d",
-          },
+        create: {
+          width: 2,
+          height: 1,
+          channels: 3,
+          background: "#23394d",
         },
-        left: 11,
+        },
+        left: 9,
         top: 0,
       },
     ])
@@ -175,8 +175,8 @@ test("falls back when foreground occupies more than two percent of the crop peri
     "opaque_border_ratio_above_2_percent",
   );
   assert.deepEqual(extracted.metrics, {
-    transparentRatio: 430 / 576,
-    opaqueBorderRatio: 2 / 92,
+    transparentRatio: 254 / 400,
+    opaqueBorderRatio: 2 / 76,
     foregroundPixels: 146,
   });
 });
@@ -351,4 +351,66 @@ test("falls back unchanged when a one-pixel connected perimeter is below five pe
     "transparent_pixel_ratio_below_5_percent",
   );
   assert.deepEqual(extractedPixels, sourcePixels);
+});
+
+test("strips detached fragments far from the dominant component and zeroes transparent RGB", () => {
+  const width = 40;
+  const height = 40;
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let index = 0; index < width * height; index += 1) {
+    rgba.set([247, 243, 233, 255], index * 4);
+  }
+  for (let y = 4; y < 16; y += 1) {
+    for (let x = 4; x < 16; x += 1) {
+      rgba.set([35, 57, 77, 255], (y * width + x) * 4);
+    }
+  }
+  for (let y = 6; y < 9; y += 1) {
+    for (let x = 19; x < 22; x += 1) {
+      rgba.set([35, 57, 77, 255], (y * width + x) * 4);
+    }
+  }
+  for (let y = 26; y < 31; y += 1) {
+    for (let x = 30; x < 35; x += 1) {
+      rgba.set([35, 57, 77, 255], (y * width + x) * 4);
+    }
+  }
+
+  const proposal = removeBackgroundFromRgba(rgba, width, height, 24);
+
+  assert.ok(proposal);
+  const fragmentOffset = (28 * width + 32) * 4;
+  assert.equal(proposal.rgba[fragmentOffset + 3]!, 0);
+  assert.deepEqual(
+    [...proposal.rgba.subarray(fragmentOffset, fragmentOffset + 3)],
+    [0, 0, 0],
+  );
+  assert.equal(proposal.rgba[(10 * width + 10) * 4 + 3], 255);
+  assert.equal(proposal.rgba[(7 * width + 20) * 4 + 3], 255);
+  const backgroundOffset = (1 * width + 1) * 4;
+  assert.equal(proposal.rgba[backgroundOffset + 3]!, 0);
+  assert.equal(proposal.rgba[backgroundOffset]!, 0);
+});
+
+test("keeps balanced multi-part icons when no dominant component exists", () => {
+  const width = 40;
+  const height = 40;
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let index = 0; index < width * height; index += 1) {
+    rgba.set([247, 243, 233, 255], index * 4);
+  }
+  for (let y = 8; y < 32; y += 1) {
+    for (let x = 10; x < 16; x += 1) {
+      rgba.set([35, 57, 77, 255], (y * width + x) * 4);
+    }
+    for (let x = 25; x < 31; x += 1) {
+      rgba.set([35, 57, 77, 255], (y * width + x) * 4);
+    }
+  }
+
+  const proposal = removeBackgroundFromRgba(rgba, width, height, 24);
+
+  assert.ok(proposal);
+  assert.equal(proposal.rgba[(20 * width + 12) * 4 + 3], 255);
+  assert.equal(proposal.rgba[(20 * width + 27) * 4 + 3], 255);
 });

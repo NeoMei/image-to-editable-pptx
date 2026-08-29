@@ -53,10 +53,14 @@ test("npm pack dry-run ships the complete runtime without tests, fixtures, or lo
     { cwd: process.cwd(), maxBuffer: 4 * 1024 * 1024 },
   );
   assert.equal(stderr, "");
-  const report = JSON.parse(stdout) as Array<{
-    files: Array<{ path: string }>;
-  }>;
-  const files = report[0]?.files.map(({ path }) => path).sort() ?? [];
+  const report: unknown = JSON.parse(stdout);
+  const reportEntries = Array.isArray(report)
+    ? report
+    : Object.values(report ?? {});
+  const firstEntry = reportEntries[0] as
+    | { files?: Array<{ path: string }> }
+    | undefined;
+  const files = firstEntry?.files?.map(({ path }) => path).sort() ?? [];
   for (const required of [
     "package.json",
     "src/cli.ts",

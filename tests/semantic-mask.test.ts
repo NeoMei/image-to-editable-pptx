@@ -170,7 +170,28 @@ test("offers a dominant connected-component proposal when a loose bbox includes 
   assert.ok(alpha[30 * canvas.width + 30]! > 0);
   assert.equal(alpha[29 * canvas.width + 45], 0);
   assert.equal(chosen.metrics.connectedComponents, 1);
-  assert.ok(chosen.metrics.completeness > 0.9 && chosen.metrics.completeness < 1);
+  assert.equal(chosen.metrics.completeness, 1);
+});
+
+test("keeps near integral details while stripping far fragments in semantic masks", async () => {
+  const canvas = solidCanvas(72, 56);
+  paintRect(canvas, { x: 12, y: 16, width: 12, height: 12 }, [35, 57, 77, 255]);
+  paintRect(canvas, { x: 27, y: 18, width: 3, height: 3 }, [35, 57, 77, 255]);
+  paintRect(canvas, { x: 40, y: 30, width: 4, height: 4 }, [35, 57, 77, 255]);
+  const chosen = chooseSemanticMask(
+    await deriveSemanticMasks(
+      canvas,
+      semanticCandidate("icon", { x: 12, y: 16, width: 32, height: 18 }),
+    ),
+    await emptyTextMask(72, 56),
+  );
+
+  assert.ok(chosen);
+  const alpha = await canvasAlpha(chosen, canvas);
+  assert.ok(alpha[22 * canvas.width + 18]! > 0);
+  assert.ok(alpha[19 * canvas.width + 28]! > 0);
+  assert.equal(alpha[32 * canvas.width + 42], 0);
+  assert.equal(chosen.metrics.connectedComponents, 2);
 });
 
 test("retains a connector inside an explicitly planned compound", async () => {
