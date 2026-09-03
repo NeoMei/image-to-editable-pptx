@@ -46,7 +46,11 @@ test("acceptance script uses only the fidelity-first OCR and Vision path", async
   );
 });
 
-test("acceptance script preflights both credentials before invoking npm", async () => {
+test("acceptance script preflights both credentials before invoking npm", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("the acceptance helper is a POSIX shell script");
+    return;
+  }
   const directory = await mkdtemp(join(tmpdir(), "ppt-accept-script-"));
   const npmMarker = join(directory, "npm-was-called");
   const fakeNpm = join(directory, "npm");

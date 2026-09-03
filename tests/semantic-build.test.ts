@@ -977,7 +977,11 @@ test("rejects an asset replacement between handle hashing and the final validati
   }
 });
 
-test("rejects an exact-name directory replacement during final inventory verification", async () => {
+test("rejects an exact-name directory replacement during final inventory verification", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows prevents renaming the directory while its verification handle is open");
+    return;
+  }
   const fixture = await semanticFixture();
   const plan = planSemanticLayers(fixture.graph, fixture.ocr);
   const workDir = await mkdtemp(join(tmpdir(), "semantic-assets-reader-directory-race-"));

@@ -54,7 +54,9 @@ test("recursively redacts regional and completion metadata in private JSON files
     for (const path of paths) {
       const text = await readFile(path, "utf8");
       assert.doesNotMatch(text, new RegExp(canaries.join("|"), "i"));
-      assert.equal((await stat(path)).mode & 0o777, 0o600);
+      if (process.platform !== "win32") {
+        assert.equal((await stat(path)).mode & 0o777, 0o600);
+      }
       assert.match(text, /SUCCEEDED/);
     }
   } finally {
@@ -216,7 +218,9 @@ test("redacts secret-like strings and signed URLs nested under harmless keys", a
       /opaque-recording-canary|recording-canary-987|signed-canary|X-OSS-Signature|Expires=99/i,
     );
     assert.match(text, /SUCCEEDED/);
-    assert.equal((await stat(recordingPath)).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(recordingPath)).mode & 0o777, 0o600);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -333,7 +337,9 @@ test("round-trips a sanitized fixture through a supplied Zod schema", async () =
       requestId: "request-123",
       output: { text: "hello" },
     });
-    assert.equal(mode, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal(mode, 0o600);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

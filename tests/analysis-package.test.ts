@@ -204,8 +204,10 @@ test("round-trips a complete self-contained v2 package with private JSON files",
       parsed.source.sha256,
     );
     assert.equal(parsed.completions[0]?.reviewRequired, true);
-    for (const name of ["analysis-ledger.json", "ocr.json", "scene-graph.json"]) {
-      assert.equal((await stat(join(fixture.directory, name))).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      for (const name of ["analysis-ledger.json", "ocr.json", "scene-graph.json"]) {
+        assert.equal((await stat(join(fixture.directory, name))).mode & 0o777, 0o600);
+      }
     }
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });

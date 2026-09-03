@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -47,9 +48,20 @@ test("uses the patched Sharp line for untrusted slide images", async () => {
 });
 
 test("npm pack dry-run ships the complete runtime without tests, fixtures, or local state", async () => {
+  const npmExecPath = process.env.npm_execpath;
+  const fallbackNpmExecPath = process.platform === "win32"
+    ? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+    : undefined;
+  const nodeDrivenNpm = npmExecPath ?? fallbackNpmExecPath;
   const { stdout, stderr } = await execFileAsync(
-    process.platform === "win32" ? "npm.cmd" : "npm",
-    ["pack", "--dry-run", "--json", "--ignore-scripts"],
+    nodeDrivenNpm ? process.execPath : "npm",
+    [
+      ...(nodeDrivenNpm ? [nodeDrivenNpm] : []),
+      "pack",
+      "--dry-run",
+      "--json",
+      "--ignore-scripts",
+    ],
     { cwd: process.cwd(), maxBuffer: 4 * 1024 * 1024 },
   );
   assert.equal(stderr, "");

@@ -550,7 +550,7 @@ test("integrated live run consumes and preserves its verified v2 staging package
     });
 
     assert.equal(fetchCalls, 2);
-    assert.equal(result.pptxPath.endsWith("/output/slide-editable.pptx"), true);
+    assert.equal(result.pptxPath.endsWith(join("output", "slide-editable.pptx")), true);
     const packageLedger = await readAnalysisPackage(outDir);
     assert.equal(packageLedger.analysisVersion, 2);
     await Promise.all([
@@ -1121,7 +1121,9 @@ test("builds offline from verified v2 RGBA and restores its Chinese QA glyph", a
     for (const artifact of referencedArtifacts) {
       const copiedPath = join(outDir, artifact.path);
       assert.equal(sha256(await readFile(copiedPath)), artifact.sha256);
-      assert.equal((await stat(copiedPath)).mode & 0o777, 0o600);
+      if (process.platform !== "win32") {
+        assert.equal((await stat(copiedPath)).mode & 0o777, 0o600);
+      }
     }
     await assert.rejects(
       access(join(outDir, "unreferenced-provider-response.json")),

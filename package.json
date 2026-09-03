@@ -1,6 +1,6 @@
 {
   "name": "image-to-editable-pptx",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Reconstruct PNG and JPEG slide images as high-fidelity PPTX files with editable text and safe semantic layers.",
   "author": "NeoMei",
   "license": "MIT",
@@ -35,6 +35,8 @@
     "test": "node --import tsx --test \"tests/*.test.ts\"",
     "test:compiled": "node --experimental-detect-module --test \"dist/tests/*.test.js\"",
     "lint:types": "tsc -p tsconfig.json --noEmit",
+    "audit:dependencies": "node scripts/audit-dependencies.mjs",
+    "verify": "npm test && npm run lint:types && npm run build && npm run test:compiled && npm run audit:dependencies && git diff --check",
     "cli": "tsx src/cli.ts"
   },
   "dependencies": {

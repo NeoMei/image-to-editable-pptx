@@ -112,7 +112,11 @@ npm test
 npm run lint:types
 npm run build
 npm run test:compiled
+npm run audit:dependencies
 npm pack --dry-run
 ```
 
 测试使用本地 fixture 和可注入 provider，不应访问网络。
+依赖审计仅临时接受 PptxGenJS 4.0.1 未使用的 `image-size` 声明所带来的两个
+无可安装修复版本的公告；门禁绑定精确版本、扫描发布代码确认不可达，并于
+2026-10-03 到期复审。任何新增公告或依赖变化都会失败。
