@@ -32,8 +32,13 @@ async function main() {
     fail("dependency audit must run through npm so npm_execpath is authenticated");
     return;
   }
+  const auditEnvironment = { ...process.env };
+  for (const key of Object.keys(auditEnvironment)) {
+    if (key.toLowerCase() === "npm_config_allow_scripts") delete auditEnvironment[key];
+  }
   const audit = spawnSync(process.execPath, [npmExecPath, "audit", "--json"], {
     cwd: process.cwd(),
+    env: auditEnvironment,
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
   });
