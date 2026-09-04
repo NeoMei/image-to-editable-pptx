@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -45,6 +46,37 @@ test("uses the patched Sharp line for untrusted slide images", async () => {
   };
 
   assert.equal(packageJson.dependencies.sharp, "^0.35.3");
+});
+
+test("dependency audit does not leak npm-run allowScripts config into nested npm", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "image-editable-audit-env-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const fakeNpm = join(root, "fake-npm.mjs");
+  await writeFile(fakeNpm, `
+const leaked = Object.keys(process.env).some(
+  (key) => key.toLowerCase() === "npm_config_allow_scripts",
+);
+if (leaked) {
+  process.stderr.write("allowScripts config leaked\\n");
+  process.exit(1);
+}
+`, { mode: 0o600 });
+
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    ["scripts/audit-dependencies.mjs"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        npm_execpath: fakeNpm,
+        npm_config_allow_scripts: "opencode-ai",
+      },
+    },
+  );
+
+  assert.equal(stdout, "Dependency audit passed with no known vulnerabilities.\n");
+  assert.equal(stderr, "");
 });
 
 test("npm pack dry-run ships the complete runtime without tests, fixtures, or local state", async () => {

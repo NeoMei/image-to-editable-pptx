@@ -1,6 +1,6 @@
 {
   "name": "image-to-editable-pptx",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Reconstruct PNG and JPEG slide images as high-fidelity PPTX files with editable text and safe semantic layers.",
   "author": {
     "name": "NeoMei",
