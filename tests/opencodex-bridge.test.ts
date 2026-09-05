@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { chmod, copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import sharp from "sharp";
 
 import { discoverOpenCodexBridge as discoverBridge } from "../src/providers/opencodex-bridge.js";
 import { createHostExecutors } from "../src/providers/provider-adapters.js";
 import { runCli } from "../src/cli.js";
+import { SerialOperationRouter } from "../src/providers/routing.js";
 
 const discoverOpenCodexBridge: typeof discoverBridge = (env, options) => discoverBridge(env, {
   imageRouting: async () => ({}), ...options,
@@ -25,6 +29,30 @@ const input = async () => ({
   image: await sharp({ create: { width: 32, height: 32, channels: 3, background: "white" } }).png().toBuffer(),
 });
 const discover = () => Promise.resolve(JSON.stringify({ baseUrl: endpoint }));
+
+test("local discovery allows a slow successful CLI to expose connected hosts", {
+  skip: process.platform === "win32" ? "POSIX executable fixture" : false,
+}, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "image-ppt-slow-ocx-"));
+  try {
+    const executable = path.join(directory, "ocx");
+    await copyFile(path.resolve("tests/fixtures/slow-opencodex.mjs"), executable);
+    await chmod(executable, 0o700);
+    const bridge = await discoverOpenCodexBridge({
+      PATH: [directory, path.dirname(process.execPath)].join(path.delimiter),
+    }, {
+      fetch: async (url) => {
+        assert.equal(String(url), `${endpoint}/models`);
+        return Response.json({ data: models });
+      },
+    });
+    assert.ok(bridge, "slow successful endpoint discovery must preserve host availability");
+    assert.equal(bridge.capabilities.openai.ocr, true);
+    assert.equal(bridge.capabilities.gemini.scene, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 const completionInput = async () => {
   const request = await input();
@@ -96,6 +124,67 @@ for (const [name, payload, expected] of [
     const result = await bridge!.invoke("openai", await input());
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.failure.status, expected);
+  });
+}
+
+for (const operation of ["ocr", "scene"] as const) {
+  test(`explicit OpenCodex upstream reset advances ${operation} routing to the next available provider`, async () => {
+    const scene = JSON.stringify({
+      nodes: [{ id: "background", role: "background", bbox: [0, 0, 1000, 1000], confidence: 1, zIndex: 0, label: "canvas", extractionHints: [] }],
+      relations: [],
+    });
+    const payloadText = operation === "ocr" ? '{"lines":[]}' : scene;
+    const failure = { type: "upstream_error", code: "upstream_reset", message: "private-sentinel" };
+    const bridge = await discoverOpenCodexBridge({}, { discover, fetch: async (url, init) => {
+      if (String(url).endsWith("/models")) return Response.json({ data: models });
+      const body = JSON.parse(String(init?.body));
+      if (body.model === "google-antigravity/gemini-3.1-pro") return Response.json(response("gemini-3.1-pro", payloadText));
+      assert.equal(body.model, "openai/gpt-5.6-sol");
+      return new Response([
+        `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: response("", payloadText).output[0] })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: failure, last_error: failure } })}\n\n`,
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+    } });
+    const executors = createHostExecutors(bridge!);
+    const request = { ...await input(), operation };
+    const router = new SerialOperationRouter();
+    const result = await router.route<unknown>(operation, {
+      "host-openai": () => executors.openai[operation]!(request),
+      "host-gemini": () => executors.gemini[operation]!(request),
+    });
+    assert.equal(result.outcome, "success");
+    assert.equal(result.selectedCandidate, "host-gemini");
+    assert.deepEqual(result.attempts.map(({ candidate, status }) => ({ candidate, status })), [
+      { candidate: "host-openai", status: "retryable_exhausted" },
+      { candidate: "api-openai", status: "unavailable" },
+      { candidate: "host-gemini", status: "success" },
+    ]);
+    if (result.outcome === "success" && operation === "ocr") assert.deepEqual(result.value, { lines: [] });
+    assert.doesNotMatch(JSON.stringify(router.report), /private-sentinel/);
+  });
+}
+
+for (const [name, data, expected] of [
+  ["unknown upstream error", { type: "response.failed", response: { status: "failed", error: { type: "upstream_error", code: "unknown" } } }, "invalid_output"],
+  ["translation buffer overflow", { type: "response.failed", response: { status: "failed", error: { type: "upstream_error", code: "translation_buffer_limit" } } }, "invalid_output"],
+  ["reset without upstream type", { type: "response.failed", response: { status: "failed", error: { code: "upstream_reset" } } }, "invalid_output"],
+  ["filtered reset", { type: "response.failed", response: { status: "failed", error: { type: "upstream_error", code: "upstream_reset" }, incomplete_details: { reason: "content_filter" } } }, "policy_refused"],
+  ["completed item without terminal envelope", { type: "response.output_item.done", output_index: 0, item: response("", '{"lines":[]}').output[0] }, "invalid_output"],
+  ["malformed JSON", '{"type":"response.failed"', "invalid_output"],
+] as const) {
+  test(`OpenCodex ${name} remains fatal without fallback`, async () => {
+    const bridge = await discoverOpenCodexBridge({}, { discover, fetch: async (url) => String(url).endsWith("/models")
+      ? Response.json({ data: models })
+      : new Response(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`, { headers: { "content-type": "text/event-stream" } }) });
+    const request = await input();
+    const router = new SerialOperationRouter();
+    const result = await router.route("ocr", {
+      "host-openai": () => createHostExecutors(bridge!).openai.ocr!(request),
+      "api-openai": async () => { assert.fail("fatal stream must not advance"); },
+    });
+    assert.equal(result.outcome, "fatal");
+    assert.equal(result.attempts[0]?.status, expected);
+    assert.equal(result.attempts.length, 1);
   });
 }
 
@@ -245,3 +334,32 @@ test("analysis joins final text across separate messages before semantic validat
   assert.ok(result.ok);
   assert.deepEqual(result.value, { lines: [] });
 });
+
+for (const provider of ["openai", "gemini"] as const) {
+  for (const [name, details, expected] of [
+    ["error", { error: { code: "server_error" } }, "invalid_output"],
+    ["incomplete details", { incomplete_details: { reason: "max_output_tokens" } }, "invalid_output"],
+    ["filtered error", { error: { code: "content_filter" } }, "policy_refused"],
+    ["filtered incomplete details", { incomplete_details: { reason: "content_filter" } }, "policy_refused"],
+    ["null fields", { error: null, incomplete_details: null }, "success"],
+  ] as const) {
+    test(`${provider} host completed envelope with ${name} preserves terminal classification`, async () => {
+      const completed = { ...response("host-model", '{"lines":[]}'), ...details };
+      const bridge = await discoverOpenCodexBridge({}, { discover, fetch: async (url) => {
+        if (String(url).endsWith("/models")) return Response.json({ data: models });
+        return provider === "gemini" ? Response.json(completed) : new Response([
+          `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: completed.output[0] })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.completed", response: { ...completed, output: [] } })}\n\n`,
+        ].join(""), { headers: { "content-type": "text/event-stream" } });
+      } });
+      const result = await createHostExecutors(bridge!)[provider].ocr!(await input());
+      if (expected === "success") {
+        assert.ok(result.ok);
+        assert.deepEqual(result.value, { lines: [] });
+      } else {
+        assert.equal(result.ok, false);
+        if (!result.ok) assert.equal(result.failure.status, expected);
+      }
+    });
+  }
+}

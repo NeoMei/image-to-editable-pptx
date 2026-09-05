@@ -18,6 +18,7 @@ const MAX_SURFACE_RESIDUAL_P95 = 18;
 const MAX_RESIDUAL_GLYPH_RATIO = 0.02;
 const MIN_REMOVED_GLYPH_DELTA = 24;
 const MAX_SEAM_CONTRAST_P95 = 8;
+const MAX_GLYPH_BLEND_RESIDUAL = 8;
 
 export type TextBackingResult = {
   accepted: boolean;
@@ -93,6 +94,24 @@ function bboxOverlapsBacking(
   return false;
 }
 
+function bboxHasContinuousSurface(
+  bbox: BBox,
+  surface: Uint8Array,
+  canvas: SourceCanvas,
+): boolean {
+  const left = Math.floor(bbox.x);
+  const top = Math.floor(bbox.y);
+  const right = Math.ceil(bbox.x + bbox.width);
+  const bottom = Math.ceil(bbox.y + bbox.height);
+  if (left < 0 || top < 0 || right > canvas.width || bottom > canvas.height) return false;
+  for (let y = top; y < bottom; y += 1) {
+    for (let x = left; x < right; x += 1) {
+      if (surface[y * canvas.width + x]! < SURFACE_FOREGROUND_ALPHA) return false;
+    }
+  }
+  return true;
+}
+
 function rejected(
   textNodeIds: string[],
   reason: RejectionReason,
@@ -163,6 +182,59 @@ async function projectMask(
   };
 }
 
+async function enclosedSurfaceMask(
+  local: Decoded,
+  bbox: BBox,
+  canvas: SourceCanvas,
+): Promise<{ encoded: Buffer; alpha: Uint8Array }> {
+  // Background-colored glyphs can become holes during generic extraction.
+  // Flood from the crop edge to distinguish those enclosed holes from the
+  // exterior contour. This is detection support only; publication restores
+  // alpha only for pixels subsequently identified and repaired as carried text.
+  const { width, height } = local;
+  const exterior = new Uint8Array(width * height);
+  const queue = new Int32Array(width * height);
+  let head = 0;
+  let tail = 0;
+  const visit = (x: number, y: number): void => {
+    const index = y * width + x;
+    if (exterior[index] !== 0 || local.data[index * 4 + 3] === 255) return;
+    exterior[index] = 1;
+    queue[tail++] = index;
+  };
+  for (let x = 0; x < width; x += 1) {
+    visit(x, 0);
+    visit(x, height - 1);
+  }
+  for (let y = 0; y < height; y += 1) {
+    visit(0, y);
+    visit(width - 1, y);
+  }
+  while (head < tail) {
+    const index = queue[head++]!;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const nextX = x + dx;
+        const nextY = y + dy;
+        if (nextX >= 0 && nextX < width && nextY >= 0 && nextY < height) {
+          visit(nextX, nextY);
+        }
+      }
+    }
+  }
+  const alpha = new Uint8Array(width * height);
+  for (let index = 0; index < alpha.length; index += 1) {
+    alpha[index] = exterior[index] === 0 ? 255 : local.data[index * 4 + 3]!;
+  }
+  const projected = placeAlphaMask(alpha, width, height, bbox, canvas);
+  return {
+    encoded: await encodeGreyscale(projected, canvas.width, canvas.height),
+    alpha: projected,
+  };
+}
+
 async function emptyMask(canvas: SourceCanvas): Promise<Buffer> {
   return encodeGreyscale(
     new Uint8Array(canvas.width * canvas.height),
@@ -213,6 +285,35 @@ function maxChannelDeltaBetween(
       Math.abs(left[index * 4 + channel]! - right[index * 4 + channel]!),
     ),
   );
+}
+
+function matchesGlyphBlend(
+  before: Buffer,
+  repaired: Buffer,
+  index: number,
+  glyph: readonly [number, number, number],
+): boolean {
+  // A recovered hole must agree with the observed ink and repaired surface,
+  // including antialiasing between them. OCR box membership alone cannot
+  // attribute a differently colored cutout, even when it touches a glyph.
+  const offset = index * 4;
+  let dot = 0;
+  let squaredLength = 0;
+  for (let channel = 0; channel < 3; channel += 1) {
+    const direction = glyph[channel]! - repaired[offset + channel]!;
+    dot += (before[offset + channel]! - repaired[offset + channel]!) * direction;
+    squaredLength += direction * direction;
+  }
+  if (squaredLength === 0) return false;
+  const coverage = Math.max(0, Math.min(1, dot / squaredLength));
+  for (let channel = 0; channel < 3; channel += 1) {
+    const surface = repaired[offset + channel]!;
+    const expected = surface + coverage * (glyph[channel]! - surface);
+    if (Math.abs(before[offset + channel]! - expected) > MAX_GLYPH_BLEND_RESIDUAL) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function solveLinearSystem(matrix: number[][], values: number[]): number[] | undefined {
@@ -379,6 +480,7 @@ function buildCandidateAsset(
   candidateBBox: BBox,
   repaired: Buffer,
   repairMask: Uint8Array,
+  backing: Uint8Array,
   canvas: SourceCanvas,
 ): { rgba: Buffer; width: number; height: number } {
   const width = Math.ceil(candidateBBox.width);
@@ -409,6 +511,7 @@ function buildCandidateAsset(
       output[outputOffset] = repaired[canvasOffset]!;
       output[outputOffset + 1] = repaired[canvasOffset + 1]!;
       output[outputOffset + 2] = repaired[canvasOffset + 2]!;
+      output[outputOffset + 3] = backing[canvasIndex]!;
     }
   }
   return { rgba: output, width, height };
@@ -443,12 +546,14 @@ export async function extractTextBacking(
     return rejected(textNodeIds, "backing_mask_invalid");
   }
   const projected = await projectMask(chosen, canvas);
+  const support = await enclosedSurfaceMask(projected.local, chosen.bbox, canvas);
   const carriedIds = new Set(candidate.carriedTextIds);
   if (
+    association.carried.some((text) => !bboxHasContinuousSurface(text.bbox, support.alpha, canvas)) ||
     texts.some(
       (text) =>
         !carriedIds.has(text.id) &&
-        bboxOverlapsBacking(text.bbox, projected.alpha, canvas),
+        bboxOverlapsBacking(text.bbox, support.alpha, canvas),
     )
   ) {
     return rejected(textNodeIds, "backing_mask_invalid");
@@ -461,30 +566,38 @@ export async function extractTextBacking(
 
   const repairMasks: Buffer[] = [];
   const coreMasks: Buffer[] = [];
+  const glyphColors: Array<readonly [number, number, number]> = [];
   try {
     for (const text of association.carried) {
       const [repairMask, coreMask] = await Promise.all([
         buildTightTextMask(source, text, {
           dilationPx: 1,
-          surfaceMask: projected.encoded,
+          surfaceMask: support.encoded,
         }),
         buildTightTextMask(source, text, {
           dilationPx: 0,
-          surfaceMask: projected.encoded,
+          surfaceMask: support.encoded,
         }),
       ]);
       repairMasks.push(repairMask.mask);
       coreMasks.push(coreMask.mask);
+      glyphColors.push(coreMask.glyphRgb);
     }
   } catch {
     return rejected(textNodeIds, "surface_unstable");
   }
   const repairUnion = await unionMasks(repairMasks, canvas.width, canvas.height);
   const coreUnion = await unionMasks(coreMasks, canvas.width, canvas.height);
+  const restoredAlpha = new Uint8Array(projected.alpha.length);
   for (let index = 0; index < repairUnion.pixels.length; index += 1) {
+    if (repairUnion.pixels[index]! >= MASK_FOREGROUND_ALPHA) {
+      if (support.alpha[index]! > projected.alpha[index]!) restoredAlpha[index] = 1;
+      projected.alpha[index] = support.alpha[index]!;
+    }
     if (projected.alpha[index]! < SURFACE_FOREGROUND_ALPHA) repairUnion.pixels[index] = 0;
     if (projected.alpha[index]! < SURFACE_FOREGROUND_ALPHA) coreUnion.pixels[index] = 0;
   }
+  projected.encoded = await encodeGreyscale(projected.alpha, canvas.width, canvas.height);
   repairUnion.encoded = await encodeGreyscale(
     repairUnion.pixels,
     canvas.width,
@@ -528,6 +641,18 @@ export async function extractTextBacking(
     canvas.width,
     canvas.height,
   );
+  for (const [textIndex, mask] of coreMasks.entries()) {
+    const core = await decodeGreyscale(mask);
+    for (let index = 0; index < restoredAlpha.length; index += 1) {
+      if (
+        restoredAlpha[index] !== 0 &&
+        core.data[index * core.channels]! >= MASK_FOREGROUND_ALPHA &&
+        !matchesGlyphBlend(canvas.rgba, repairedDecoded.data, index, glyphColors[textIndex]!)
+      ) {
+        return rejected(textNodeIds, "glyph_residue", metrics);
+      }
+    }
+  }
   if (metrics.residualGlyphRatio > MAX_RESIDUAL_GLYPH_RATIO) {
     return rejected(textNodeIds, "glyph_residue", metrics);
   }
@@ -551,6 +676,7 @@ export async function extractTextBacking(
     candidate.bbox,
     repairedDecoded.data,
     repairUnion.pixels,
+    projected.alpha,
     canvas,
   );
   const asset = await sharp(candidateAsset.rgba, {

@@ -486,6 +486,7 @@ export async function completeOccludedCandidate(
 
   let crop: Raster;
   let visible: Uint8Array;
+  let protectedVisibleMask = input.visibleMask;
   let evidence: HiddenEvidence;
   try {
     crop = await decodeRgba(input.crop);
@@ -499,6 +500,18 @@ export async function completeOccludedCandidate(
       for (let index = 0; index < occluder.length; index += 1) {
         if (decoded[index] !== 0) occluder[index] = 255;
       }
+    }
+    // Foreground extraction can include the front object in the rear crop.
+    // Only accepted occluders may remove those pixels from the visible support.
+    let hasOverlap = false;
+    for (let index = 0; index < visible.length; index += 1) {
+      if (occluder[index] !== 0 && visible[index] !== 0) {
+        visible[index] = 0;
+        hasOverlap = true;
+      }
+    }
+    if (hasOverlap) {
+      protectedVisibleMask = await alphaMaskPng(visible, crop.width, crop.height);
     }
     const derived = deriveHiddenEvidence(
       visible,
@@ -532,7 +545,7 @@ export async function completeOccludedCandidate(
     const providerPromise = provider.complete({
       crop: input.crop,
       hiddenMask,
-      protectedVisibleMask: input.visibleMask,
+      protectedVisibleMask,
       semanticContext: [...input.semanticContext],
     });
     const providerResult: unknown = provider.ownsTimeout === true
@@ -611,13 +624,13 @@ export async function completeOccludedCandidate(
 
   return {
     image,
-    visibleMask: input.visibleMask,
+    visibleMask: protectedVisibleMask,
     generatedMask,
     reviewRequired: true,
     provenance: {
       kind: "composite",
       sourceCropSha256: sha256(input.crop),
-      visibleMaskSha256: sha256(input.visibleMask),
+      visibleMaskSha256: sha256(protectedVisibleMask),
       generatedMaskSha256: sha256(generatedMask),
       assetSha256: sha256(image),
       modelId: completion.modelId,

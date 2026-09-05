@@ -157,6 +157,9 @@ export async function exportPptx(
           valign: "middle",
           rotate: element.rotation,
           fit: "none",
+          // OCR already supplies line boundaries. Office must not introduce
+          // extra lines because its substituted font has different advances.
+          wrap: false,
           margin: 0,
           isTextBox: true,
         });

@@ -290,6 +290,42 @@ const rejectedRepairMetrics = {
   filledPixelDistanceP95: 0,
 };
 
+test("builds a completion whose disjoint masks store support in alpha", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const candidate = plan.candidates.find(({ id }) => id === "good-rear")!;
+  const completion = await completionFor(
+    fixture.source, candidate, GOOD_REAR, GOOD_FRONT, [43, 109, 168, 255],
+  );
+  for (const key of ["visibleMask", "generatedMask"] as const) {
+    const { data, info } = await sharp(completion[key]).greyscale().raw()
+      .toBuffer({ resolveWithObject: true });
+    const rgba = Buffer.alloc(info.width * info.height * 4, 255);
+    for (let index = 0; index < data.length; index += 1) rgba[index * 4 + 3] = data[index]!;
+    completion[key] = await sharp(rgba, {
+      raw: { width: info.width, height: info.height, channels: 4 },
+    }).png().toBuffer();
+  }
+  assert.equal(completion.provenance.kind, "composite");
+  if (completion.provenance.kind !== "composite") assert.fail("expected composite");
+  completion.provenance.visibleMaskSha256 = sha256(completion.visibleMask);
+  completion.provenance.generatedMaskSha256 = sha256(completion.generatedMask);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-alpha-completion-"));
+  try {
+    const result = await buildSemanticLayers({
+      ...fixture, plan, completions: new Map([[candidate.id, completion]]), workDir,
+    });
+    const asset = result.manifest.elements.find(({ id }) => id === candidate.id);
+    assert.equal(asset?.kind, "asset");
+    if (asset?.kind !== "asset") assert.fail("expected accepted completion asset");
+    assert.equal(asset.reviewRequired, true);
+    assert.deepEqual(asset.provenance, completion.provenance);
+    assert.equal(result.recomposition.accepted, true);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
 test("atomically builds graph-ordered semantic layers and rolls back one exposed completion", async () => {
   const fixture = await semanticFixture();
   const plan = planSemanticLayers(fixture.graph, fixture.ocr);

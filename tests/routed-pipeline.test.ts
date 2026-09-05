@@ -37,6 +37,7 @@ test("API-only OpenAI analysis publishes effective models and actual routing att
           relations: [],
         });
     return new Response(JSON.stringify({
+      status: "completed",
       model: calls === 1 ? "gpt-4.1-ocr-effective" : "gpt-4.1-scene-effective",
       output: [{ type: "message", content: [{ type: "output_text", text }] }],
     }), { status: 200 });

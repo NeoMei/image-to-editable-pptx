@@ -3,7 +3,7 @@
 > High-fidelity semantic reconstruction for image-based slides
 > 高保真地把图片式幻灯片重构为可编辑 PPTX
 
-Image to Editable PPTX 先通过宿主已注册的 OpenAI/Gemini 工具或可选的 OpenAI、Gemini、阿里云百炼 API 生成 OCR 与通用语义场景图，再在本地把可靠的文字、独立图标、复合前景和文字底板重构成可编辑层。重组或局部验证不达标的候选不会被强行拆出，而是保留在背景中，优先保住视觉保真度。
+Image to Editable PPTX 先通过本地 OpenCodex 已登录账号、宿主已注册的 OpenAI/Gemini 工具，或可选的 OpenAI、Gemini、阿里云百炼 API 生成 OCR 与通用语义场景图，再在本地把可靠的文字、独立图标、复合前景和文字底板重构成可编辑层。重组或局部验证不达标的候选不会被强行拆出，而是保留在背景中，优先保住视觉保真度。
 
 这不是 Canva Magic Layers 的调用器，也不会把位图导入冒充可编辑。只有实际写入 PPTX 的文字对象和 PNG 资产才算可编辑层。
 

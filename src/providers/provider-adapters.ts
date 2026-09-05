@@ -110,7 +110,9 @@ export function containsOpenAiPolicyRefusal(payload: unknown): boolean {
     if (
       record.type === "refusal" ||
       record.code === "moderation_blocked" ||
-      record.reason === "moderation_blocked"
+      record.reason === "moderation_blocked" ||
+      record.code === "content_filter" ||
+      record.reason === "content_filter"
     ) return true;
     pending.push(...Object.values(record));
   }
@@ -288,7 +290,11 @@ async function padMask(
   canvas: CanvasSize,
   outside: number,
 ): Promise<Buffer> {
-  const decoded = await sharp(mask).greyscale().raw().toBuffer({ resolveWithObject: true });
+  const metadata = await sharp(mask).metadata();
+  const pixels = metadata.hasAlpha
+    ? sharp(mask).extractChannel("alpha")
+    : sharp(mask).greyscale();
+  const decoded = await pixels.raw().toBuffer({ resolveWithObject: true });
   if (decoded.info.width !== crop.width || decoded.info.height !== crop.height) {
     throw new Error("Completion mask geometry does not match the crop");
   }
@@ -422,7 +428,12 @@ export function createOpenAiExecutors(options: ApiAdapterOptions): ProviderOpera
         : { onTransportAttempt: options.onTransportAttempt }),
     });
     if (!result.ok) return result;
-    if (result.value.payload === undefined) return failure("invalid_output");
+    const envelope = object(result.value.payload);
+    if (
+      envelope?.status !== "completed" ||
+      envelope.error != null ||
+      envelope.incomplete_details != null
+    ) return failure("invalid_output");
     const text = openAiText(result.value.payload);
     if (text === undefined) return failure("invalid_output");
     try {

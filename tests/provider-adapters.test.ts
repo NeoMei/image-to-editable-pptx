@@ -8,8 +8,9 @@ import {
   createGeminiExecutors,
   createHostExecutors,
   createOpenAiExecutors,
+  prepareCompletion,
 } from "../src/providers/provider-adapters.js";
-import { ProviderFailure } from "../src/providers/routing.js";
+import { ProviderFailure, SerialOperationRouter } from "../src/providers/routing.js";
 
 const canvas = { width: 64, height: 32 } as const;
 
@@ -44,6 +45,7 @@ test("OpenAI OCR uses the fixed Responses endpoint and validates pixel geometry"
   const fetcher: typeof fetch = async (input, init) => {
     requests.push({ url: String(input), init: init! });
     return new Response(JSON.stringify({
+      status: "completed",
       model: "gpt-4.1-2026-08-01",
       output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({
         lines: [{
@@ -92,6 +94,7 @@ test("OpenAI explicit refusal is fatal and is never retried", async () => {
 
 test("OpenAI invalid OCR coordinates are fatal invalid output", async () => {
   const fetcher: typeof fetch = async () => new Response(JSON.stringify({
+    status: "completed",
     model: "gpt-4.1",
     output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({
       lines: [{
@@ -108,6 +111,81 @@ test("OpenAI invalid OCR coordinates are fatal invalid output", async () => {
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.failure.status, "invalid_output");
 });
+
+for (const operation of ["ocr", "scene"] as const) {
+  for (const [name, envelope, expected] of [
+    ["failed", { status: "failed", error: { code: "server_error" } }, "invalid_output"],
+    ["filtered incomplete", { status: "incomplete", incomplete_details: { reason: "content_filter" } }, "policy_refused"],
+    ["filtered failure", { status: "failed", error: { code: "content_filter" } }, "policy_refused"],
+    ["token-limited incomplete", { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }, "invalid_output"],
+    ["in progress", { status: "in_progress" }, "invalid_output"],
+    ["cancelled", { status: "cancelled" }, "invalid_output"],
+    ["missing status", {}, "invalid_output"],
+    ["completed with error", { status: "completed", error: { code: "server_error" } }, "invalid_output"],
+    ["completed with incomplete details", { status: "completed", incomplete_details: { reason: "max_output_tokens" } }, "invalid_output"],
+  ] as const) {
+    test(`OpenAI ${operation} rejects ${name} despite valid payload and stops routing`, async () => {
+      let calls = 0;
+      const executors = createOpenAiExecutors({
+        apiKey: "key", analysisModel: "gpt-4.1", imageModel: "gpt-image-2",
+        requestTimeoutMs: 1000, maxAttempts: 2,
+        fetch: async () => {
+          calls++;
+          return Response.json({
+            ...envelope, model: "gpt-4.1",
+            output: [{ type: "message", status: "completed", content: [{
+              type: "output_text", text: operation === "ocr" ? '{"lines":[]}' : sceneText,
+            }] }],
+          });
+        },
+      });
+      const request = { image: await png(), canvas, prompt: "scene" };
+      const router = new SerialOperationRouter();
+      const result = await router.route<unknown>(operation, {
+        "api-openai": () => executors[operation]!(request),
+        "host-gemini": async () => { assert.fail("fatal envelope must not advance to Gemini"); },
+      });
+      assert.equal(result.outcome, "fatal");
+      assert.equal(result.attempts.at(-1)?.status, expected);
+      assert.equal(router.report.stopped, true);
+      assert.equal(calls, 1);
+    });
+  }
+
+  test(`OpenAI ${operation} accepts a completed envelope with null error fields`, async () => {
+    const executors = createOpenAiExecutors({
+      apiKey: "key", analysisModel: "gpt-4.1", imageModel: "gpt-image-2",
+      requestTimeoutMs: 1000, maxAttempts: 1,
+      fetch: async () => Response.json({
+        status: "completed", error: null, incomplete_details: null, model: "gpt-4.1",
+        output: [{ type: "message", status: "completed", content: [{
+          type: "output_text", text: operation === "ocr" ? '{"lines":[]}' : sceneText,
+        }] }],
+      }),
+    });
+    const result = await executors[operation]!({ image: await png(), canvas, prompt: "scene" });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.validated, true);
+  });
+
+  for (const [name, body] of [
+    ["truncated envelope", '{"status":"completed","output":'],
+    ["malformed output JSON", JSON.stringify({ status: "completed", output: [{
+      type: "message", content: [{ type: "output_text", text: '{"lines":' }],
+    }] })],
+  ] as const) {
+    test(`OpenAI ${operation} keeps ${name} fatal`, async () => {
+      const executors = createOpenAiExecutors({
+        apiKey: "key", analysisModel: "gpt-4.1", imageModel: "gpt-image-2",
+        requestTimeoutMs: 1000, maxAttempts: 2,
+        fetch: async () => new Response(body, { headers: { "content-type": "application/json" } }),
+      });
+      const result = await executors[operation]!({ image: await png(), canvas, prompt: "scene" });
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.failure.status, "invalid_output");
+    });
+  }
+}
 
 test("Gemini scene uses fixed generateContent endpoint and accepts inlineData output aliases", async () => {
   let requestUrl = "";
@@ -153,6 +231,32 @@ test("Gemini image completion excludes thought images and rejects incompatible g
 
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.failure.status, "invalid_output");
+});
+
+test("completion padding reads alpha support without treating transparent white as protected", async () => {
+  const crop = { width: 2, height: 2 };
+  const mask = await sharp(Buffer.from([
+    255, 255, 255, 0, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 0,
+  ]), { raw: { ...crop, channels: 4 } }).png().toBuffer();
+  const prepared = await prepareCompletion({
+    image: await png(2, 2), canvas: crop, prompt: "complete",
+    hiddenMask: mask, protectedMask: mask,
+  });
+  const protectedPixels = await sharp(prepared.protectedMask).greyscale().raw().toBuffer();
+  const hiddenPixels = await sharp(prepared.hiddenMask).extractChannel("alpha").raw().toBuffer();
+  const first = prepared.crop.top * prepared.canvas.width + prepared.crop.left;
+  const second = first + prepared.canvas.width;
+  assert.deepEqual([
+    protectedPixels[first], protectedPixels[first + 1],
+    protectedPixels[second], protectedPixels[second + 1],
+  ], [0, 255, 255, 0]);
+  assert.deepEqual([
+    hiddenPixels[first], hiddenPixels[first + 1],
+    hiddenPixels[second], hiddenPixels[second + 1],
+  ], [255, 0, 0, 255]);
+  assert.equal(protectedPixels[0], 0);
+  assert.equal(hiddenPixels[0], 255);
 });
 
 test("OpenAI completion pads to valid geometry, sends transparent hidden mask, and removes only local padding", async () => {
@@ -362,6 +466,7 @@ test("429 retries are bounded and each HTTP attempt is observable", async () => 
       calls += 1;
       if (calls === 1) return new Response("rate limited", { status: 429 });
       return new Response(JSON.stringify({
+        status: "completed",
         model: "gpt-4.1",
         output: [{ type: "message", content: [{ type: "output_text", text: "{\"lines\":[]}" }] }],
       }), { status: 200 });

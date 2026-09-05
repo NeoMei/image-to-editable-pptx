@@ -125,6 +125,57 @@ async function alphaOf(image: Buffer): Promise<Buffer> {
   return alpha;
 }
 
+test("subtracts accepted occluders from a contaminated foreground mask", async () => {
+  const { input, completedCrop } = await fixture();
+  const points: Array<readonly [number, number]> = [[1, 2], [2, 2], [6, 2], [7, 2]];
+  for (let y = 0; y < HEIGHT; y += 1) {
+    for (const x of [3, 4, 5]) points.push([x, y]);
+  }
+  let calls = 0;
+  let protectedMask: Buffer | undefined;
+  const result = await completeOccludedCandidate(
+    { ...input, visibleMask: await maskPng(points) },
+    {
+      async complete(request) {
+        calls += 1;
+        protectedMask = request.protectedVisibleMask;
+        return providerReturning(completedCrop).complete(request);
+      },
+    },
+  );
+  assert.equal(calls, 1);
+  assert.ok(result);
+  assert.deepEqual(result.visibleMask, protectedMask);
+  const visible = await alphaOf(result.visibleMask);
+  for (let y = 0; y < HEIGHT; y += 1) {
+    for (const x of [3, 4, 5]) assert.equal(visible[y * WIDTH + x], 0);
+  }
+  for (const x of [1, 2, 6, 7]) assert.equal(visible[2 * WIDTH + x], 255);
+  assert.equal(result.provenance.kind, "composite");
+  if (result.provenance.kind !== "composite") assert.fail("expected composite provenance");
+  assert.equal(result.provenance.visibleMaskSha256,
+    createHash("sha256").update(result.visibleMask).digest("hex"));
+  assert.equal(result.reviewRequired, true);
+});
+
+test("overlapping occluder pixels alone cannot supply opposing visible contacts", async () => {
+  const { input, completedCrop } = await fixture();
+  const points: Array<readonly [number, number]> = [[1, 2], [2, 2]];
+  for (let y = 0; y < HEIGHT; y += 1) {
+    for (const x of [3, 4, 5]) points.push([x, y]);
+  }
+  let calls = 0;
+  const result = await completeOccludedCandidate(
+    { ...input, visibleMask: await maskPng(points) },
+    { async complete(request) {
+      calls += 1;
+      return providerReturning(completedCrop).complete(request);
+    } },
+  );
+  assert.equal(calls, 0);
+  assert.equal(result, undefined);
+});
+
 test("does not call a provider without an accepted occludes relation", async () => {
   const { input, completedCrop } = await fixture();
   let calls = 0;

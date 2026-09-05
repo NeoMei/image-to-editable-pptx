@@ -5,6 +5,22 @@ import { inferEditableTextStyle } from "../src/fidelity/text-style.js";
 
 const bbox = { x: 0, y: 0, width: 100, height: 40 };
 
+test("tracking retains the width safety budget for a height-limited Latin title", () => {
+  const style = inferEditableTextStyle(
+    "MODEL ROUTING",
+    { x: 73, y: 64, width: 405, height: 37 },
+    {
+      glyphBounds: { x: 73, y: 64, width: 402, height: 36 },
+      inBoxForegroundCoverage: 0.3,
+      estimatedStrokeWidthPx: 4,
+    },
+  );
+  // The title's approximate 7.79em natural advance must not spend the
+  // entire measured span after tracking: real font advances vary.
+  assert.equal(style.fontSizePx, 33.84);
+  assert.ok(style.fontSizePx * 7.79 + style.charSpacingPx * 12 <= 386);
+});
+
 function metrics(overrides: Partial<Parameters<typeof inferEditableTextStyle>[2]> = {}) {
   return {
     glyphBounds: { x: 4, y: 5, width: 80, height: 20 },

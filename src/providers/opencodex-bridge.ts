@@ -65,7 +65,11 @@ function parseResponse(text: string, streaming: boolean): Record<string, unknown
   if (!streaming) {
     const result = object(JSON.parse(text));
     if (refused(result)) throw new ProviderFailure("policy_refused");
-    if (result?.status !== "completed") throw new ProviderFailure("invalid_output");
+    if (
+      result?.status !== "completed" ||
+      result.error != null ||
+      result.incomplete_details != null
+    ) throw new ProviderFailure("invalid_output");
     return result;
   }
   let completed: Record<string, unknown> | undefined;
@@ -78,13 +82,18 @@ function parseResponse(text: string, streaming: boolean): Record<string, unknown
     if (["error", "response.failed"].includes(String(event?.type))) {
       const error = object(event?.error) ?? object(object(event?.response)?.error);
       const code = String(error?.code ?? event?.code);
-      throw new ProviderFailure(/rate_limit|server_error|overloaded/.test(code) ? "retryable_exhausted" : "invalid_output");
+      const upstreamReset = error?.type === "upstream_error" && error.code === "upstream_reset";
+      throw new ProviderFailure(upstreamReset || /rate_limit|server_error|overloaded/.test(code) ? "retryable_exhausted" : "invalid_output");
     }
     if (event?.type === "response.incomplete") throw new ProviderFailure("invalid_output");
     if (event?.type === "response.output_item.done" && Number.isInteger(event.output_index)) items.set(event.output_index as number, event.item);
     if (event?.type === "response.completed") completed = object(event.response);
   }
-  if (completed?.status !== "completed") throw new ProviderFailure("invalid_output");
+  if (
+    completed?.status !== "completed" ||
+    completed.error != null ||
+    completed.incomplete_details != null
+  ) throw new ProviderFailure("invalid_output");
   if (!Array.isArray(completed.output) || completed.output.length === 0) {
     completed.output = [...items.entries()].sort(([a], [b]) => a - b).map(([, item]) => item);
   }
@@ -114,7 +123,7 @@ export async function discoverOpenCodexBridge(
   try {
     const discovered = await (options.discover ?? (async () => {
       const result = await execute("ocx", ["access", "endpoints", "--json"], {
-        env: { ...env }, timeout: 15_000, maxBuffer: 1024 * 1024, encoding: "utf8",
+        env: { ...env }, timeout: 45_000, maxBuffer: 1024 * 1024, encoding: "utf8",
       });
       return result.stdout;
     }))();
