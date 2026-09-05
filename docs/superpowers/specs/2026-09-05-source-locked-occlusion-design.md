@@ -5,7 +5,7 @@
 The user approved the direction on 2026-09-05: remove occluder content from the
 editable model input, request the rear object explicitly, and locally compose
 validated hidden pixels onto immutable source-visible pixels. This written
-design awaits review before implementation planning. It does not claim working
+design was confirmed by the user before implementation planning. It does not claim working
 implementation, editor acceptance, or release readiness.
 
 ## Evidence and problem
