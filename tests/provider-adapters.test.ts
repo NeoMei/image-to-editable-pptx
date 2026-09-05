@@ -13,6 +13,18 @@ import { ProviderFailure } from "../src/providers/routing.js";
 
 const canvas = { width: 64, height: 32 } as const;
 
+const alibabaConfig = {
+  apiKey: "alibaba-key",
+  workspaceId: "workspace-123",
+  dashscopeApiBase: "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1",
+  dashscopeCompatibleBase: "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  ocrModel: "qwen3.5-ocr",
+  visionModel: "qwen3-vl-plus",
+  editModel: "wanx2.1-imageedit",
+  requestTimeoutMs: 1000,
+  pollIntervalMs: 1,
+} as const;
+
 async function png(width: number = canvas.width, height: number = canvas.height): Promise<Buffer> {
   return sharp({
     create: { width, height, channels: 4, background: "#336699" },
@@ -199,6 +211,93 @@ test("Gemini completion rejects ambiguous multiple final images", async () => {
   if (!result.ok) assert.equal(result.failure.status, "invalid_output");
 });
 
+test("Gemini documented content-filter finish reasons are fatal across OCR, scene, and completion", async () => {
+  const cases = [
+    { operation: "ocr", finishReason: "SPII" },
+    { operation: "scene", finishReason: "RECITATION" },
+    { operation: "completion", finishReason: "IMAGE_PROHIBITED_CONTENT" },
+    { operation: "completion", finishReason: "IMAGE_RECITATION" },
+    { operation: "scene", finishReason: "ESCALATION" },
+  ] as const;
+
+  for (const { operation, finishReason } of cases) {
+    let calls = 0;
+    const executors = createGeminiExecutors({
+      apiKey: "key", analysisModel: "gemini-2.5-flash",
+      imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
+      maxAttempts: 2,
+      fetch: async () => {
+        calls += 1;
+        return Response.json({ candidates: [{ finishReason }] });
+      },
+    });
+    const image = await png();
+    const result = operation === "ocr"
+      ? await executors.ocr!({ image, canvas })
+      : operation === "scene"
+        ? await executors.scene!({ image, canvas, prompt: "scene" })
+        : await executors.completion!({
+            image, canvas, prompt: "complete",
+            hiddenMask: image, protectedMask: image,
+          });
+
+    assert.equal(result.ok, false, `${finishReason} must fail`);
+    if (!result.ok) {
+      assert.equal(result.failure.status, "policy_refused", finishReason);
+    }
+    assert.equal(calls, 1, `${finishReason} must not retry`);
+  }
+});
+
+test("Gemini prompt-level blocking is fatal and is never retried", async () => {
+  let calls = 0;
+  const result = await createGeminiExecutors({
+    apiKey: "key", analysisModel: "gemini-2.5-flash",
+    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
+    maxAttempts: 2,
+    fetch: async () => {
+      calls += 1;
+      return Response.json({ promptFeedback: { blockReason: "SAFETY" } });
+    },
+  }).ocr!({ image: await png(), canvas });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.failure.status, "policy_refused");
+  assert.equal(calls, 1);
+});
+
+test("Gemini non-policy finish reasons remain invalid output rather than refusals", async () => {
+  const cases = [
+    { operation: "ocr", finishReason: "LANGUAGE" },
+    { operation: "scene", finishReason: "OTHER" },
+    { operation: "completion", finishReason: "NO_IMAGE" },
+    { operation: "completion", finishReason: "IMAGE_OTHER" },
+  ] as const;
+
+  for (const { operation, finishReason } of cases) {
+    const executors = createGeminiExecutors({
+      apiKey: "key", analysisModel: "gemini-2.5-flash",
+      imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
+      maxAttempts: 1,
+      fetch: async () => Response.json({ candidates: [{ finishReason }] }),
+    });
+    const image = await png();
+    const result = operation === "ocr"
+      ? await executors.ocr!({ image, canvas })
+      : operation === "scene"
+        ? await executors.scene!({ image, canvas, prompt: "scene" })
+        : await executors.completion!({
+            image, canvas, prompt: "complete",
+            hiddenMask: image, protectedMask: image,
+          });
+
+    assert.equal(result.ok, false, `${finishReason} must fail`);
+    if (!result.ok) {
+      assert.equal(result.failure.status, "invalid_output", finishReason);
+    }
+  }
+});
+
 test("host output is semantically validated before becoming router success", async () => {
   const image = await png();
   const executors = createHostExecutors({
@@ -276,17 +375,7 @@ test("Alibaba observer I/O failure is local failure and cannot fall through", as
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({ output: { choices: [] } });
   try {
-    const executors = createAlibabaExecutors({
-      apiKey: "alibaba-key",
-      workspaceId: "workspace-123",
-      dashscopeApiBase: "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1",
-      dashscopeCompatibleBase: "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-      ocrModel: "qwen3.5-ocr",
-      visionModel: "qwen3-vl-plus",
-      editModel: "wanx2.1-imageedit",
-      requestTimeoutMs: 1000,
-      pollIntervalMs: 1,
-    }, {
+    const executors = createAlibabaExecutors(alibabaConfig, {
       ocr: {
         async recordRawResponse() { throw new Error("filesystem unavailable"); },
         async recordRawHttpResponse() { throw new Error("filesystem unavailable"); },
@@ -296,6 +385,65 @@ test("Alibaba observer I/O failure is local failure and cannot fall through", as
     const result = await executors.ocr!({ image: await png(), canvas });
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.failure.status, "local_failure");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Alibaba scene classifies OpenAI-compatible SDK HTTP failures by structured status", async () => {
+  const cases = [
+    { status: 401, code: "http_401", expected: "auth_unavailable" },
+    { status: 403, code: "http_403", expected: "auth_unavailable" },
+    { status: 404, code: "model_not_found", expected: "unavailable" },
+    { status: 400, code: "model_not_found", expected: "unavailable" },
+    { status: 408, code: "http_408", expected: "retryable_exhausted" },
+    { status: 409, code: "http_409", expected: "retryable_exhausted" },
+    { status: 429, code: "http_429", expected: "retryable_exhausted" },
+    { status: 500, code: "http_500", expected: "retryable_exhausted" },
+    { status: 503, code: "http_503", expected: "retryable_exhausted" },
+  ] as const;
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const entry of cases) {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls += 1;
+        return Response.json({
+          error: {
+            message: `status fixture ${entry.status}`,
+            type: "invalid_request_error",
+            code: entry.code,
+          },
+        }, { status: entry.status });
+      };
+      const result = await createAlibabaExecutors(alibabaConfig).scene!({
+        image: await png(), canvas, prompt: "scene",
+      });
+
+      assert.equal(result.ok, false, `HTTP ${entry.status} must fail`);
+      if (!result.ok) assert.equal(result.failure.status, entry.expected, `HTTP ${entry.status}`);
+      assert.equal(calls, 1, `HTTP ${entry.status} uses the configured zero-retry SDK bound`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Alibaba scene classifies SDK transport failures as retryable exhausted", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    throw new TypeError("fetch failed fixture");
+  };
+  try {
+    const result = await createAlibabaExecutors(alibabaConfig).scene!({
+      image: await png(), canvas, prompt: "scene",
+    });
+
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.status, "retryable_exhausted");
+    assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
   }

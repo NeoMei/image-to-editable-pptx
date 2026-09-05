@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { APIConnectionError, APIError } from "openai";
 import sharp from "sharp";
 
 import type { AppConfig, RoutedProviderConfig } from "../config.js";
@@ -60,6 +61,17 @@ export type ApiAdapterOptions = RoutedProviderConfig & Readonly<{
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_IMAGE_EDITS_URL = "https://api.openai.com/v1/images/edits";
 const GEMINI_API_ORIGIN = "https://generativelanguage.googleapis.com";
+const GEMINI_POLICY_FINISH_REASONS = new Set([
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+  "IMAGE_RECITATION",
+  "ESCALATION",
+]);
 
 function failure(
   status: ConstructorParameters<typeof ProviderFailure>[0],
@@ -106,12 +118,6 @@ function containsOpenAiPolicyRefusal(payload: unknown): boolean {
 }
 
 function containsGeminiPolicyRefusal(payload: unknown): boolean {
-  const blocked = new Set([
-    "SAFETY",
-    "BLOCKLIST",
-    "PROHIBITED_CONTENT",
-    "IMAGE_SAFETY",
-  ]);
   const pending: unknown[] = [payload];
   while (pending.length > 0) {
     const current = pending.pop();
@@ -122,7 +128,7 @@ function containsGeminiPolicyRefusal(payload: unknown): boolean {
     const record = object(current);
     if (record === undefined) continue;
     if (
-      (typeof record.finishReason === "string" && blocked.has(record.finishReason)) ||
+      (typeof record.finishReason === "string" && GEMINI_POLICY_FINISH_REASONS.has(record.finishReason)) ||
       (typeof record.blockReason === "string" && record.blockReason !== "BLOCK_REASON_UNSPECIFIED")
     ) return true;
     pending.push(...Object.values(record));
@@ -592,16 +598,17 @@ function createHostProviderExecutors(
       return failure("invalid_output");
     }
   };
+  const capabilities = bridge.capabilities[provider];
   return {
-    ocr: (input) => invoke({ operation: "ocr", prompt: `${OCR_PROMPT}\nCanvas: ${input.canvas.width} x ${input.canvas.height}.`, image: input.image, canvas: input.canvas }, (result) => {
+    ...(capabilities.ocr ? { ocr: (input: AnalysisAdapterInput) => invoke({ operation: "ocr", prompt: `${OCR_PROMPT}\nCanvas: ${input.canvas.width} x ${input.canvas.height}.`, image: input.image, canvas: input.canvas }, (result) => {
       if (result.output.kind !== "text") throw new Error("Expected host OCR text");
       return parseValidatedOcrText(result.output.text, input.canvas);
-    }),
-    scene: (input) => invoke({ operation: "scene", prompt: input.prompt, image: input.image, canvas: input.canvas }, (result) => {
+    }) } : {}),
+    ...(capabilities.scene ? { scene: (input: AnalysisAdapterInput & { prompt: string }) => invoke({ operation: "scene", prompt: input.prompt, image: input.image, canvas: input.canvas }, (result) => {
       if (result.output.kind !== "text") throw new Error("Expected host scene text");
       return parseQwenSceneContent(result.output.text, input.canvas);
-    }),
-    completion: (input) => invoke({ operation: "completion", prompt: input.prompt, image: input.image, canvas: input.canvas, hiddenMask: input.hiddenMask, protectedMask: input.protectedMask }, async (result) => {
+    }) } : {}),
+    ...(capabilities.completion ? { completion: (input: CompletionAdapterInput) => invoke({ operation: "completion", prompt: input.prompt, image: input.image, canvas: input.canvas, hiddenMask: input.hiddenMask, protectedMask: input.protectedMask }, async (result) => {
       if (result.output.kind !== "image") throw new Error("Expected host completion image");
       const metadata = await sharp(result.output.image).metadata();
       if (metadata.width !== input.canvas.width || metadata.height !== input.canvas.height) {
@@ -614,7 +621,7 @@ function createHostProviderExecutors(
         taskId: createHash("sha256").update(image).digest("hex"),
         sanitizedMetadata: { channel: "host" },
       };
-    }),
+    }) } : {}),
   };
 }
 
@@ -627,10 +634,35 @@ export function createHostExecutors(bridge: FileHostBridge): Readonly<Record<Hos
 
 function classifyAlibaba(error: unknown): ProviderFailure {
   if (error instanceof ProviderFailure) return error;
+  if (error instanceof APIConnectionError) {
+    return new ProviderFailure("retryable_exhausted");
+  }
+  const sdkCode = error instanceof APIError
+    ? error.code
+    : object(error)?.code;
+  if (
+    typeof sdkCode === "string" &&
+    sdkCode.replace(/[_-]/g, "").toLowerCase() === "modelnotfound"
+  ) {
+    return new ProviderFailure("unavailable");
+  }
+  if (error instanceof APIError && typeof error.status === "number") {
+    const classification = classifyHttp(error.status);
+    return new ProviderFailure(
+      classification === "retry" ? "retryable_exhausted" : classification,
+    );
+  }
+  const status = object(error)?.status;
+  if (typeof status === "number" && Number.isInteger(status)) {
+    const classification = classifyHttp(status);
+    return new ProviderFailure(
+      classification === "retry" ? "retryable_exhausted" : classification,
+    );
+  }
   const message = error instanceof Error ? error.message : "";
-  if (/status (?:401|403)\b/i.test(message)) return new ProviderFailure("auth_unavailable");
-  if (/status 404\b|model.*not found/i.test(message)) return new ProviderFailure("unavailable");
-  if (/status (?:408|409|429|5\d\d)\b|timed out|timeout/i.test(message)) {
+  if (/(?:^|status\s+)(?:401|403)\b/i.test(message)) return new ProviderFailure("auth_unavailable");
+  if (/(?:^|status\s+)404\b|model.*not found/i.test(message)) return new ProviderFailure("unavailable");
+  if (/(?:^|status\s+)(?:408|409|429|5\d\d)\b|timed out|timeout|fetch failed|poll failed/i.test(message)) {
     return new ProviderFailure("retryable_exhausted");
   }
   return new ProviderFailure("invalid_output");

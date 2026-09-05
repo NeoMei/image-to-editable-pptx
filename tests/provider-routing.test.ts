@@ -125,3 +125,46 @@ test("routing session reaches Alibaba only after both host and API families adva
   assert.equal(result.candidate, "api-alibaba");
   assert.deepEqual(calls, ["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]);
 });
+
+test("partial host capabilities count transport only for declared operations", async () => {
+  const calls: string[] = [];
+  const hostBridge = {
+    capabilities: {
+      openai: { ocr: false, scene: true, completion: false },
+      gemini: { ocr: true, scene: false, completion: false },
+    },
+    invoke: async (provider: "openai" | "gemini", request: { operation: string }) => {
+      calls.push(`${provider}:${request.operation}`);
+      return {
+        ok: true as const,
+        model: "host-gemini-ocr",
+        output: { kind: "text" as const, text: "{\"lines\":[]}" },
+      };
+    },
+  };
+  const session = new ProviderRoutingSession({
+    routingConfig: {
+      requestTimeoutMs: 1000,
+      maxAttempts: 1,
+      maxRegionAnalysis: 0,
+      maxOcclusionCompletions: 0,
+    },
+    hostBridge,
+  });
+  const image = await sharp({
+    create: { width: 8, height: 8, channels: 4, background: "white" },
+  }).png().toBuffer();
+
+  const result = await session.ocr(image, { width: 8, height: 8 });
+
+  assert.equal(result.candidate, "host-gemini");
+  assert.deepEqual(calls, ["gemini:ocr"]);
+  assert.deepEqual(session.transportAttempts, [
+    { operation: "ocr", candidate: "host-gemini", count: 1 },
+  ]);
+  assert.deepEqual(session.report.operations[0]?.attempts, [
+    { candidate: "host-openai", status: "unavailable", disposition: "missing_candidate" },
+    { candidate: "api-openai", status: "unavailable", disposition: "missing_candidate" },
+    { candidate: "host-gemini", status: "success", model: "host-gemini-ocr" },
+  ]);
+});
