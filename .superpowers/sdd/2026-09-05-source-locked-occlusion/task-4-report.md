@@ -9,8 +9,9 @@ DONE
 - Added the strict version-1 `CompletionDiagnosticsSchema` and the fixed
   `completion-diagnostics.json` filename. Entries retain only a canonical
   zero-based plan index, bounded status/reason enums, and safe finite metrics.
-  Accepted entries require metrics and forbid reasons; skipped/rejected entries
-  require reasons and allow metrics. Unknown keys are rejected.
+  Persisted accepted entries may omit metrics and forbid reasons; the internal
+  accepted outcome still requires metrics. Skipped/rejected entries require
+  reasons and allow metrics. Unknown keys are rejected.
 - Added an exclusive private sidecar writer using `O_EXCL`, `O_NOFOLLOW`, mode
   `0600`, file sync, and no replace-capable rename. Existing regular targets,
   symbolic links, and concurrent claims are refused without altering the

@@ -122,3 +122,86 @@ private source and returned image are intentionally not reproduced here.
 These automated checks do not establish natural live-provider acceptance or
 final editor acceptance. WPS/PowerPoint object movement, undo, explicit
 save/discard, and reopen remain separate required evidence.
+
+## Task 5: pre-review offline preparation snapshot at `565dc75`
+
+The controller's final `npm run verify` exited 0 with 522 source tests and 522
+compiled tests plus passing strict types, build, dependency audit, and whitespace
+checks. Task 5 did not duplicate the full run. Its remaining focused calibration
+suite passed 12 of 12 tests, including the independent labeled comparisons and
+exact boundaries. The frozen constants at HEAD are unchanged from threshold
+freeze commit `94ef0e3`: mask support 16, opaque interior alpha 240, sample
+radius 3, minimum samples 8, maximum source p95 deviation 6, minimum palette
+separation 36, maximum candidate distance 12, and maximum seam delta 12.
+
+`npm pack --dry-run --json` exited 0 for `image-to-editable-pptx@0.3.0` with 54
+entries, 147,937 packed bytes, 621,902 unpacked bytes, SHA-1
+`21aa3177b66ca9e8f7145b441efb956db8e34665`, and integrity
+`sha512-y6dM5NEYR5rZCOe50WzJG2Xc/T8djTYxx8SzS5PZyrR6oeh4U8He9MV+UngsuYM41m123B5sAuR36l1Yylhc2g==`.
+The package listing excludes the private replay crops and returns, `.codex-tmp`,
+tests, credentials, and the ignored implementation reports.
+
+At that checkpoint this was offline gate evidence only. Whole-branch review was still running, so
+the final saved bad-return replay and all live calls were deliberately withheld.
+Read-only discovery says host OpenAI and host Gemini expose OCR, scene, and
+completion capabilities; that is not request proof. API OpenAI and API Gemini
+are unconfigured, and API Alibaba is configured but remains unproven for the new
+source-locked completion input. No credentials or routing configuration were
+introduced. Natural selection, generated-layer acceptance, offline rebuild,
+three-preview inspection, exact-artifact WPS acceptance, and release readiness
+therefore remain blocked pending the explicit post-review live gate.
+
+## Task 5: post-review live acceptance at `1b0baaf`
+
+The final whole-branch review found four bounded provider-adapter issues. They
+were fixed and a focused re-review found no open findings. A fresh controller
+`npm run verify` then passed 531 source tests, 531 compiled tests, strict types,
+build, dependency audit, and whitespace checks. Task 5's focused appearance
+suite passed 12 of 12 tests, and the frozen constants remain unchanged from
+`94ef0e3`. The final package dry-run contains 54 entries (148,182 packed bytes,
+623,067 unpacked bytes), SHA-1
+`efe1e920a5f59c91f268aeea5176e3d2476b514b`, and no private diagnostic paths.
+
+The final offline replay of the immutable earlier provider return made one
+local provider callback and zero network calls. It rejected
+`residual_occluder`, with 28,492 residual pixels, zero generated pixels, 101,901
+outside-mask changes, and 63,857 visible changes. The crop and return SHA-256
+values remain respectively
+`a7b3c4e9cb078c0850b780bba50ffbbd8cdaa2af3601a5d4faa98a7a76374ede`
+and `b02743b0623e971aebabb5535904b54bed6c19109f4ff20429f08990d51c7ee9`.
+
+The one natural default-path run used the source fixture, two regional-analysis
+slots and one completion slot. Host OpenAI succeeded once for OCR and once for
+the base scene, then returned terminal `invalid_output` for the first regional
+scene request. The run preserved its stopped routing report, made zero
+completion requests, and created no normal output directory. This default path
+did not pass.
+
+A separately labeled zero-region isolation run made one real host OpenAI
+completion request to `gpt-image-2`. Transport and 362-by-360 geometry passed,
+but local quality rejected `ambiguous_appearance` with zero generated pixels;
+the rear object remained in the background and no completion artifact was
+published. This diagnostic is not represented as the default path passing.
+
+One-shot direct checks reused the identical source-locked hole/protected input.
+Host Gemini returned a valid 362-by-360 image from
+`gemini-3.1-flash-image`, proving transport of the new input contract, but local
+quality rejected `ambiguous_appearance` and published no artifact. The existing
+Alibaba API executor returned `invalid_output` on its single call, so that route
+remains unproven. API OpenAI and API Gemini remain unconfigured; no credentials
+or configuration were added.
+
+Independent inspection of the isolation run's three previews found only the
+orange front-bar asset; the blue rear object remained in the background and no
+generated rear-object completion existed. Its ordinary no-completion PPTX has
+SHA-256 `bec9ba18b47499aa725f83eef9c541b318630d88f10f402887fb06dcda6c84c2`,
+but it is not eligible for generated-object WPS acceptance. No WPS claim was
+made and no substitute artifact was used.
+
+The release gate is **BLOCKED**: the natural default path failed at regional
+analysis, no available provider produced an accepted generated layer, offline
+rebuild and WPS acceptance for that generated layer are therefore unavailable,
+and API route coverage is incomplete. Read-only release checks also show
+`origin` main/HEAD still at `29d203a`, no remote fallback branch or `v0.3.0`
+tag, and npm `latest` still at `0.2.2`. No merge, push, tag, publication, or
+cache installation was attempted.

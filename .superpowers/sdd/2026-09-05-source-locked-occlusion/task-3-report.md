@@ -118,3 +118,56 @@ Exit status was 0 with no output.
 ## Concerns
 
 None. The semantic fixture adds one narrow background pixel column beside the rear/front contact to supply the frozen minimum independent background evidence; quality thresholds were not changed or bypassed.
+
+## Regression fix after Task 4 integration
+
+Task 4's concurrent full-source verification exposed a timing-sensitive test-only
+failure in `rejects bad hidden content after one provider request`. The provider
+stub called `sourceLockedOcclusionFixture()` inside the production-owned 100 ms
+timeout. That helper generates and PNG-encodes every fixture variant, so under
+full-suite load the test took 190.83 ms and the completion correctly returned
+`{ status: "skipped", reason: "provider_failure" }` before quality validation.
+
+The fixture's `retainedFront` PNG is now prepared before calling
+`evaluateOccludedCandidate()`. The timed provider callback only returns that
+prepared response. Production timeout behavior, the dedicated timeout test, and
+the `residual_occluder` quality assertion remain unchanged.
+
+Failure evidence from Task 4's pre-fix full suite:
+
+```text
+✖ rejects bad hidden content after one provider request (190.83ms)
+actual: 'skipped'
+expected: 'rejected'
+tests 522
+pass 521
+fail 1
+```
+
+Focused verification after the fix:
+
+```text
+node --import tsx --test --test-name-pattern='rejects bad hidden content after one provider request' tests/occlusion-complete.test.ts
+tests 1
+pass 1
+fail 0
+```
+
+Fresh full source and type verification after the fix:
+
+```text
+npm run lint:types
+> tsc -p tsconfig.json --noEmit
+
+npm test
+tests 522
+pass 522
+fail 0
+cancelled 0
+skipped 0
+todo 0
+```
+
+The exact-path regression commit contains only
+`tests/occlusion-complete.test.ts`; this appended report is retained as local
+review evidence outside that commit per the controller's scope.
