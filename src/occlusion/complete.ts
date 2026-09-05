@@ -7,13 +7,21 @@ import { sanitizeProviderMetadata } from "../recording.js";
 import { RoutingTerminalError } from "../providers/routing.js";
 import type {
   CompletedCandidate,
+  CompletionOutcome,
   OcclusionCompletionInput,
   OcclusionCompletionProvider,
 } from "./contracts.js";
+import { assertValidCompletionOutcome } from "./diagnostics.js";
+import {
+  assessHiddenCandidate,
+  qualifyAppearance,
+} from "./quality.js";
 import { clearHiddenPixels } from "./request.js";
 
 export type {
   CompletedCandidate,
+  CompletionOutcome,
+  CompletionReason,
   OcclusionCompletionInput,
   OcclusionCompletionProvider,
 } from "./contracts.js";
@@ -367,16 +375,6 @@ function deriveHiddenEvidence(
   return { mask, components: acceptedComponents };
 }
 
-function changedPixel(left: Buffer, right: Buffer, index: number): boolean {
-  const offset = index * 4;
-  return (
-    left[offset] !== right[offset] ||
-    left[offset + 1] !== right[offset + 1] ||
-    left[offset + 2] !== right[offset + 2] ||
-    left[offset + 3] !== right[offset + 3]
-  );
-}
-
 function touchesContact(
   generatedComponent: ReadonlySet<number>,
   contact: number,
@@ -479,24 +477,98 @@ export async function completeOccludedCandidate(
   input: OcclusionCompletionInput,
   provider: OcclusionCompletionProvider,
 ): Promise<CompletedCandidate | undefined> {
+  const outcome = await evaluateOccludedCandidate(input, provider);
+  return outcome.status === "accepted" ? outcome.artifact : undefined;
+}
+
+function checkedOutcome(outcome: CompletionOutcome): CompletionOutcome {
+  assertValidCompletionOutcome(outcome);
+  return outcome;
+}
+
+function contactsFromEvidence(evidence: HiddenEvidence): number[] {
+  const contacts = new Set<number>();
+  for (const component of evidence.components) {
+    for (const pair of component.pairs) {
+      contacts.add(pair.first);
+      contacts.add(pair.second);
+    }
+  }
+  return [...contacts];
+}
+
+function finalInvariantsHold(input: {
+  original: Raster;
+  returned: Raster;
+  visible: Uint8Array;
+  generated: Uint8Array;
+  hidden: Uint8Array;
+  composite: Buffer;
+}): boolean {
+  const { original, returned, visible, generated, hidden, composite } = input;
+  const pixelCount = original.width * original.height;
+  if (
+    !Number.isSafeInteger(pixelCount) ||
+    original.rgba.length !== pixelCount * 4 ||
+    returned.width !== original.width ||
+    returned.height !== original.height ||
+    returned.rgba.length !== original.rgba.length ||
+    visible.length !== pixelCount ||
+    generated.length !== pixelCount ||
+    hidden.length !== pixelCount ||
+    composite.length !== original.rgba.length
+  ) return false;
+
+  for (let index = 0; index < pixelCount; index += 1) {
+    const offset = index * 4;
+    const isVisible = visible[index]! >= MASK_FOREGROUND_ALPHA;
+    const isGenerated = generated[index]! >= MASK_FOREGROUND_ALPHA;
+    if (isVisible && isGenerated) return false;
+    if (isGenerated && hidden[index]! < MASK_FOREGROUND_ALPHA) return false;
+    if (
+      isVisible &&
+      !composite.subarray(offset, offset + 4)
+        .equals(original.rgba.subarray(offset, offset + 4))
+    ) return false;
+    if (!isVisible && !isGenerated && composite[offset + 3] !== 0) return false;
+  }
+  return oneContinuousContour(
+    visible,
+    generated,
+    original.width,
+    original.height,
+  );
+}
+
+export async function evaluateOccludedCandidate(
+  input: OcclusionCompletionInput,
+  provider: OcclusionCompletionProvider,
+): Promise<CompletionOutcome> {
   const occlusion = input.candidate.occlusion;
   if (occlusion === undefined || occlusion.occluderIds.length === 0) {
-    return undefined;
+    return checkedOutcome({ status: "skipped", reason: "geometry" });
   }
-  if (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0) return undefined;
+  if (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0) {
+    return checkedOutcome({ status: "skipped", reason: "disabled" });
+  }
 
   let crop: Raster;
   let visible: Uint8Array;
+  let occluder: Uint8Array;
   let protectedVisibleMask = input.visibleMask;
   let evidence: HiddenEvidence;
   try {
     crop = await decodeRgba(input.crop);
-    if (!isCandidateCrop(input, crop.width, crop.height)) return undefined;
+    if (!isCandidateCrop(input, crop.width, crop.height)) {
+      return checkedOutcome({ status: "rejected", reason: "geometry" });
+    }
     visible = await decodeMask(input.visibleMask, crop.width, crop.height);
-    const occluder = new Uint8Array(visible.length);
+    occluder = new Uint8Array(visible.length);
     for (const occluderId of occlusion.occluderIds) {
       const mask = input.occluderMasks.get(occluderId);
-      if (mask === undefined) return undefined;
+      if (mask === undefined) {
+        return checkedOutcome({ status: "rejected", reason: "geometry" });
+      }
       const decoded = await decodeMask(mask, crop.width, crop.height);
       for (let index = 0; index < occluder.length; index += 1) {
         if (decoded[index] !== 0) occluder[index] = 255;
@@ -521,14 +593,29 @@ export async function completeOccludedCandidate(
       crop.height,
       contactAlignmentTolerance(input),
     );
-    if (derived === undefined) return undefined;
+    if (derived === undefined) {
+      return checkedOutcome({ status: "rejected", reason: "contour_mismatch" });
+    }
     evidence = derived;
   } catch (error) {
     if (error instanceof RoutingTerminalError) throw error;
-    return undefined;
+    return checkedOutcome({ status: "rejected", reason: "geometry" });
   }
 
-  if (!input.budget.tryAcquire()) return undefined;
+  const appearance = qualifyAppearance({
+    source: crop,
+    visible,
+    hidden: evidence.mask,
+    occluder,
+    contacts: contactsFromEvidence(evidence),
+  });
+  if (!appearance.ok) {
+    return checkedOutcome({ status: "rejected", reason: appearance.reason });
+  }
+
+  if (!input.budget.tryAcquire()) {
+    return checkedOutcome({ status: "skipped", reason: "disabled" });
+  }
   const hiddenMask = await grayscaleMaskPng(
     evidence.mask,
     crop.width,
@@ -571,7 +658,7 @@ export async function completeOccludedCandidate(
       providerResult.taskId.trim().length === 0 ||
       !("sanitizedMetadata" in providerResult)
     ) {
-      return undefined;
+      return checkedOutcome({ status: "rejected", reason: "invalid_metadata" });
     }
     completion = {
       image: providerResult.image,
@@ -579,48 +666,78 @@ export async function completeOccludedCandidate(
       taskId: providerResult.taskId,
       sanitizedMetadata: providerResult.sanitizedMetadata,
     };
+  } catch (error) {
+    if (error instanceof RoutingTerminalError) throw error;
+    return checkedOutcome({ status: "skipped", reason: "provider_failure" });
+  }
+  try {
     sanitizedMetadata = z.json().parse(
       sanitizeProviderMetadata(completion.sanitizedMetadata),
     );
-  } catch (error) {
-    if (error instanceof RoutingTerminalError) throw error;
-    return undefined;
+  } catch {
+    return checkedOutcome({ status: "rejected", reason: "invalid_metadata" });
   }
 
   let providerImage: Raster;
   try {
     providerImage = await decodeRgba(completion.image);
   } catch {
-    return undefined;
+    return checkedOutcome({ status: "rejected", reason: "geometry" });
   }
   if (providerImage.width !== crop.width || providerImage.height !== crop.height) {
-    return undefined;
+    return checkedOutcome({ status: "rejected", reason: "geometry" });
   }
 
-  const generated = new Uint8Array(visible.length);
-  for (let index = 0; index < visible.length; index += 1) {
-    const changed = changedPixel(crop.rgba, providerImage.rgba, index);
-    if (changed && visible[index] !== 0) return undefined;
-    if (changed && evidence.mask[index] === 0) return undefined;
-    if (changed && providerImage.rgba[index * 4 + 3]! >= MASK_FOREGROUND_ALPHA) {
-      generated[index] = 255;
-    }
+  const assessed = assessHiddenCandidate({
+    source: crop,
+    returned: providerImage,
+    visible,
+    hidden: evidence.mask,
+    occluder,
+    contacts: contactsFromEvidence(evidence),
+    profile: appearance.profile,
+  });
+  if (!assessed.ok) {
+    return checkedOutcome({
+      status: "rejected",
+      reason: assessed.reason,
+      metrics: assessed.metrics,
+    });
   }
+  const { generated, metrics } = assessed;
   if (
     !bridgesRequiredContacts(generated, evidence, crop.width, crop.height) ||
     !oneContinuousContour(visible, generated, crop.width, crop.height)
   ) {
-    return undefined;
+    return checkedOutcome({
+      status: "rejected",
+      reason: "contour_mismatch",
+      metrics,
+    });
   }
 
   const composite = Buffer.alloc(crop.rgba.length);
   for (let index = 0; index < visible.length; index += 1) {
     const offset = index * 4;
-    if (visible[index] !== 0) {
+    if (visible[index]! >= 16) {
       crop.rgba.copy(composite, offset, offset, offset + 4);
-    } else if (generated[index] !== 0) {
+    } else if (generated[index]! >= 16) {
       providerImage.rgba.copy(composite, offset, offset, offset + 4);
     }
+  }
+  if (!finalInvariantsHold({
+    original: crop,
+    returned: providerImage,
+    visible,
+    generated,
+    hidden: evidence.mask,
+    composite,
+  })) {
+    return checkedOutcome({
+      status: "rejected",
+      reason: "invariant_failure",
+      metrics,
+    });
   }
   const image = await sharp(composite, {
     raw: { width: crop.width, height: crop.height, channels: 4 },
@@ -629,20 +746,24 @@ export async function completeOccludedCandidate(
     .toBuffer();
   const generatedMask = await alphaMaskPng(generated, crop.width, crop.height);
 
-  return {
-    image,
-    visibleMask: protectedVisibleMask,
-    generatedMask,
-    reviewRequired: true,
-    provenance: {
-      kind: "composite",
-      sourceCropSha256: sha256(input.crop),
-      visibleMaskSha256: sha256(protectedVisibleMask),
-      generatedMaskSha256: sha256(generatedMask),
-      assetSha256: sha256(image),
-      modelId: completion.modelId,
-      taskIdSha256: sha256(completion.taskId),
-      sanitizedProviderMetadata: sanitizedMetadata,
+  return checkedOutcome({
+    status: "accepted",
+    metrics,
+    artifact: {
+      image,
+      visibleMask: protectedVisibleMask,
+      generatedMask,
+      reviewRequired: true,
+      provenance: {
+        kind: "composite",
+        sourceCropSha256: sha256(input.crop),
+        visibleMaskSha256: sha256(protectedVisibleMask),
+        generatedMaskSha256: sha256(generatedMask),
+        assetSha256: sha256(image),
+        modelId: completion.modelId,
+        taskIdSha256: sha256(completion.taskId),
+        sanitizedProviderMetadata: sanitizedMetadata,
+      },
     },
-  };
+  });
 }
