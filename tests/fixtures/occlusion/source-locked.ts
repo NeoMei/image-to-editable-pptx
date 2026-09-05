@@ -32,6 +32,7 @@ function png(rgba: Buffer): Promise<Buffer> {
 export async function sourceLockedOcclusionFixture() {
   const originalRgba = Buffer.alloc(WIDTH * HEIGHT * 4);
   const rearMask = new Uint8Array(WIDTH * HEIGHT);
+  const visibleMask = new Uint8Array(WIDTH * HEIGHT);
   const frontMask = new Uint8Array(WIDTH * HEIGHT);
   const hiddenMask = new Uint8Array(WIDTH * HEIGHT);
 
@@ -51,11 +52,17 @@ export async function sourceLockedOcclusionFixture() {
       hiddenMask[y * WIDTH + x] = 255;
     }
   }
+  for (let index = 0; index < rearMask.length; index += 1) {
+    if (rearMask[index] !== 0 && frontMask[index] === 0) visibleMask[index] = 255;
+  }
 
   const clearedRgba = Buffer.from(originalRgba);
   const validRgba = Buffer.from(originalRgba);
   const shiftedRearRgba = Buffer.from(originalRgba);
   const greenRearRgba = Buffer.from(originalRgba);
+  const backgroundOnlyRgba = Buffer.from(originalRgba);
+  const shadedFrontRgba = Buffer.from(originalRgba);
+  const disconnectedIslandRgba = Buffer.from(originalRgba);
   const seamRgba = Buffer.from(originalRgba);
   for (let y = 2; y <= 21; y += 1) {
     for (let x = 14; x <= 17; x += 1) {
@@ -63,12 +70,21 @@ export async function sourceLockedOcclusionFixture() {
       const isRearIntersection = y >= 4 && y <= 19;
       paint(validRgba, x, y, isRearIntersection ? BLUE : CREAM);
       paint(greenRearRgba, x, y, isRearIntersection ? GREEN : CREAM);
+      paint(backgroundOnlyRgba, x, y, CREAM);
+      paint(shadedFrontRgba, x, y, [222, 98, 28, 255]);
       const isShiftedRear = y >= 8 && y <= 21;
       paint(shiftedRearRgba, x, y, isShiftedRear ? BLUE : CREAM);
       paint(seamRgba, x, y, isRearIntersection ? BLUE : CREAM);
     }
   }
   for (let x = 14; x <= 17; x += 1) paint(seamRgba, x, 4, BLACK);
+  disconnectedIslandRgba.set(validRgba);
+  paint(disconnectedIslandRgba, 15, 2, BLUE);
+
+  const contacts = [
+    ...Array.from({ length: 16 }, (_, offset) => (offset + 4) * WIDTH + 13),
+    ...Array.from({ length: 16 }, (_, offset) => (offset + 4) * WIDTH + 18),
+  ];
 
   const geometry = {
     canvas: { width: WIDTH, height: HEIGHT },
@@ -79,7 +95,17 @@ export async function sourceLockedOcclusionFixture() {
 
   return {
     geometry,
-    masks: { rear: rearMask, front: frontMask, hidden: hiddenMask },
+    labels: {
+      accepted: "uniform rear continuation",
+      retainedFront: "unchanged front occluder",
+      backgroundOnly: "background-only hidden return",
+      wrongColor: "separable non-source color",
+      shifted: "rear-colored support shifted off contacts",
+      seam: "unclassifiable one-pixel contact seam",
+      disconnected: "rear-colored disconnected island",
+    },
+    contacts,
+    masks: { rear: rearMask, visible: visibleMask, front: frontMask, hidden: hiddenMask },
     rasters: {
       original: originalRgba,
       cleared: clearedRgba,
@@ -87,6 +113,9 @@ export async function sourceLockedOcclusionFixture() {
       retainedFront: Buffer.from(originalRgba),
       shiftedRear: shiftedRearRgba,
       greenRear: greenRearRgba,
+      backgroundOnly: backgroundOnlyRgba,
+      shadedFront: shadedFrontRgba,
+      disconnectedIsland: disconnectedIslandRgba,
       seam: seamRgba,
     },
     pngs: {
@@ -96,6 +125,9 @@ export async function sourceLockedOcclusionFixture() {
       retainedFront: await png(originalRgba),
       shiftedRear: await png(shiftedRearRgba),
       greenRear: await png(greenRearRgba),
+      backgroundOnly: await png(backgroundOnlyRgba),
+      shadedFront: await png(shadedFrontRgba),
+      disconnectedIsland: await png(disconnectedIslandRgba),
       seam: await png(seamRgba),
     },
   };
