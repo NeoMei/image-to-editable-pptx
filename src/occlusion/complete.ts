@@ -10,6 +10,7 @@ import type {
   OcclusionCompletionInput,
   OcclusionCompletionProvider,
 } from "./contracts.js";
+import { clearHiddenPixels } from "./request.js";
 
 export type {
   CompletedCandidate,
@@ -533,6 +534,12 @@ export async function completeOccludedCandidate(
     crop.width,
     crop.height,
   );
+  const clearedCrop = await sharp(
+    clearHiddenPixels(crop, evidence.mask),
+    { raw: { width: crop.width, height: crop.height, channels: 4 } },
+  )
+    .png()
+    .toBuffer();
 
   let completion: {
     image: Buffer;
@@ -543,7 +550,7 @@ export async function completeOccludedCandidate(
   let sanitizedMetadata: z.infer<ReturnType<typeof z.json>>;
   try {
     const providerPromise = provider.complete({
-      crop: input.crop,
+      crop: clearedCrop,
       hiddenMask,
       protectedVisibleMask,
       semanticContext: [...input.semanticContext],

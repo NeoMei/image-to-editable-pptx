@@ -170,11 +170,7 @@ export class ProviderRoutingSession {
           executors.completion?.({
             image: request.crop,
             canvas: { width: metadata.width!, height: metadata.height! },
-            prompt: [
-              "Complete only the missing rear contour inside the hidden-region mask.",
-              "Preserve every visible pixel outside the mask exactly and add no text or unrelated objects.",
-              ...request.semanticContext,
-            ].join("\n"),
+            prompt: request.semanticContext.join("\n"),
             hiddenMask: request.hiddenMask,
             protectedMask: request.protectedVisibleMask,
           }),

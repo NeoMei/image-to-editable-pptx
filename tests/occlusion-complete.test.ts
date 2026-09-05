@@ -365,6 +365,7 @@ test("rejects aligned contact pixels disconnected from a continuing visible cont
 
 test("sends only the padded candidate crop and crop-sized masks", async () => {
   const { input, completedCrop } = await fixture();
+  const sourceSnapshot = Buffer.from(input.crop);
   let calls = 0;
   let capturedRequest:
     | Parameters<OcclusionCompletionProvider["complete"]>[0]
@@ -384,7 +385,8 @@ test("sends only the padded candidate crop and crop-sized masks", async () => {
   assert.ok(result);
   assert.equal(calls, 1);
   assert.ok(capturedRequest);
-  assert.deepEqual(capturedRequest.crop, input.crop);
+  assert.notDeepEqual(capturedRequest.crop, input.crop);
+  assert.deepEqual(input.crop, sourceSnapshot);
   assert.deepEqual(capturedRequest.protectedVisibleMask, input.visibleMask);
   assert.deepEqual(capturedRequest.semanticContext, input.semanticContext);
   for (const buffer of [
@@ -413,6 +415,15 @@ test("sends only the padded candidate crop and crop-sized masks", async () => {
     hidden[0],
     0,
     "unrelated occluder geometry must not leak into the mask",
+  );
+  const cleared = await sharp(capturedRequest.crop).ensureAlpha().raw().toBuffer();
+  assert.deepEqual(
+    [...cleared.subarray(pixelOffset(4, 2), pixelOffset(4, 2) + 4)],
+    [0, 0, 0, 0],
+  );
+  assert.deepEqual(
+    [...cleared.subarray(pixelOffset(1, 2), pixelOffset(1, 2) + 4)],
+    [200, 80, 40, 255],
   );
 });
 

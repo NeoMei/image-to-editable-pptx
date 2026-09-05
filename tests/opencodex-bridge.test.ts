@@ -9,6 +9,7 @@ import { discoverOpenCodexBridge as discoverBridge } from "../src/providers/open
 import { createHostExecutors } from "../src/providers/provider-adapters.js";
 import { runCli } from "../src/cli.js";
 import { SerialOperationRouter } from "../src/providers/routing.js";
+import { sourceLockedOcclusionFixture } from "./fixtures/occlusion/source-locked.js";
 
 const discoverOpenCodexBridge: typeof discoverBridge = (env, options) => discoverBridge(env, {
   imageRouting: async () => ({}), ...options,
@@ -55,10 +56,27 @@ test("local discovery allows a slow successful CLI to expose connected hosts", {
 });
 
 const completionInput = async () => {
-  const request = await input();
-  const mask = async (background: string) => sharp({ create: { ...request.canvas, channels: 3, background } }).png().toBuffer();
-  return { ...request, operation: "completion" as const, hiddenMask: await mask("white"), protectedMask: await mask("black") };
+  const fixture = await sourceLockedOcclusionFixture();
+  const mask = (pixels: Uint8Array) => sharp(pixels, {
+    raw: { ...fixture.geometry.canvas, channels: 1 },
+  }).png().toBuffer();
+  return {
+    operation: "completion" as const,
+    prompt: "Complete the rear object.",
+    canvas: fixture.geometry.canvas,
+    image: fixture.pngs.cleared,
+    hiddenMask: await mask(fixture.masks.hidden),
+    protectedMask: await mask(
+      Uint8Array.from(fixture.masks.hidden, (value) => value === 0 ? 255 : 0),
+    ),
+  };
 };
+
+async function pixel(image: Buffer, x: number, y: number): Promise<number[]> {
+  const decoded = await sharp(image).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const offset = (y * decoded.info.width + x) * decoded.info.channels;
+  return [...decoded.data.subarray(offset, offset + 4)];
+}
 
 test("discovers both signed-in host candidates without official API keys and uses streaming Codex Responses", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -224,6 +242,7 @@ test("oversized OpenAI host image output is fatal, not a reason to try another p
 });
 
 test("OpenAI host completion sends a source/mask edit to loopback and unpads its result", async () => {
+  let submittedImage: Buffer | undefined;
   const bridge = await discoverOpenCodexBridge({}, { discover, fetch: async (url, init) => {
     if (String(url).endsWith("/models")) return Response.json({ data: models });
     assert.equal(String(url), `${endpoint}/images/edits`);
@@ -233,13 +252,22 @@ test("OpenAI host completion sends a source/mask edit to loopback and unpads its
     assert.equal(body.model, "gpt-image-2");
     assert.equal(body.images.length, 3);
     assert.match(body.prompt, /alpha/);
-    const image = Buffer.from(body.images[0].image_url.split(",")[1], "base64");
-    return Response.json({ data: [{ b64_json: image.toString("base64") }] });
+    submittedImage = Buffer.from(body.images[0].image_url.split(",")[1], "base64");
+    const submittedMask = Buffer.from(body.images[1].image_url.split(",")[1], "base64");
+    assert.deepEqual(await pixel(submittedImage, 456 + 14, 340 + 4), [0, 0, 0, 0]);
+    assert.deepEqual(await pixel(submittedImage, 456 + 4, 340 + 4), [40, 100, 160, 255]);
+    assert.deepEqual(await pixel(submittedMask, 456 + 14, 340 + 4), [255, 255, 255, 0]);
+    assert.deepEqual(await pixel(submittedMask, 456 + 4, 340 + 4), [255, 255, 255, 255]);
+    return Response.json({ data: [{ b64_json: submittedImage.toString("base64") }] });
   } });
   const result = await bridge!.invoke("openai", await completionInput());
   assert.ok(result.ok);
   assert.equal(result.output.kind, "image");
-  if (result.output.kind === "image") assert.equal((await sharp(result.output.image).metadata()).width, 32);
+  if (result.output.kind === "image") {
+    assert.equal((await sharp(result.output.image).metadata()).width, 32);
+    assert.deepEqual(await pixel(result.output.image, 14, 4), [0, 0, 0, 0]);
+    assert.deepEqual(await pixel(result.output.image, 4, 4), [40, 100, 160, 255]);
+  }
 });
 
 test("Gemini completion carries all three images and retrieves only the opaque loopback artifact", async () => {
@@ -253,6 +281,11 @@ test("Gemini completion carries all three images and retrieves only the opaque l
       assert.equal(body.model, "google-antigravity/gemini-3.1-flash-image");
       assert.equal(body.input[0].content.length, 4);
       padded = Buffer.from(body.input[0].content[1].image_url.split(",")[1], "base64");
+      const submittedMask = Buffer.from(body.input[0].content[2].image_url.split(",")[1], "base64");
+      assert.deepEqual(await pixel(padded, 456 + 14, 340 + 4), [0, 0, 0, 0]);
+      assert.deepEqual(await pixel(padded, 456 + 4, 340 + 4), [40, 100, 160, 255]);
+      assert.deepEqual(await pixel(submittedMask, 456 + 14, 340 + 4), [255, 255, 255, 0]);
+      assert.deepEqual(await pixel(submittedMask, 456 + 4, 340 + 4), [255, 255, 255, 255]);
       return Response.json(response("gemini-3.1-flash-image", "![image](/v1/opencodex/artifacts/img-result.png)"));
     }
     assert.equal(String(url), `${endpoint}/opencodex/artifacts/img-result.png`);
@@ -261,7 +294,11 @@ test("Gemini completion carries all three images and retrieves only the opaque l
   } });
   const result = await bridge!.invoke("gemini", await completionInput());
   assert.ok(result.ok);
-  if (result.output.kind === "image") assert.equal((await sharp(result.output.image).metadata()).width, 32);
+  if (result.output.kind === "image") {
+    assert.equal((await sharp(result.output.image).metadata()).width, 32);
+    assert.deepEqual(await pixel(result.output.image, 14, 4), [0, 0, 0, 0]);
+    assert.deepEqual(await pixel(result.output.image, 4, 4), [40, 100, 160, 255]);
+  }
   assert.equal(calls, 3);
 });
 

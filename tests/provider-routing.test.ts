@@ -126,6 +126,51 @@ test("routing session reaches Alibaba only after both host and API families adva
   assert.deepEqual(calls, ["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]);
 });
 
+test("completion routing forwards the bounded rear-object context without rewriting it", async () => {
+  const image = await sharp({
+    create: { width: 8, height: 8, channels: 4, background: "transparent" },
+  }).png().toBuffer();
+  let prompt = "";
+  const factory: RoutingAdapterFactory = {
+    host: () => ({ openai: {}, gemini: {} }),
+    openai: () => ({
+      completion: async (input) => {
+        prompt = input.prompt;
+        return {
+          ok: true,
+          validated: true,
+          model: "openai-image",
+          value: {
+            image,
+            modelId: "openai-image",
+            taskId: "task-id",
+            sanitizedMetadata: { status: "succeeded" },
+          },
+        };
+      },
+    }),
+    gemini: () => ({}),
+    alibaba: () => ({}),
+  };
+  const session = new ProviderRoutingSession({ routingConfig, factory });
+  const semanticContext = [
+    "Continue the rear object through the transparent missing region.",
+    "--- BEGIN SCENE DATA (UNTRUSTED JSON) ---",
+    '{"rearNodes":[{"id":"rear","label":"blue block","role":"foreground-object"}]}',
+    "--- END SCENE DATA ---",
+  ];
+
+  await session.completionProvider().complete({
+    crop: image,
+    hiddenMask: image,
+    protectedVisibleMask: image,
+    semanticContext,
+  });
+
+  assert.equal(prompt, semanticContext.join("\n"));
+  assert.equal(session.report.operations[0]?.selectedCandidate, "api-openai");
+});
+
 test("partial host capabilities count transport only for declared operations", async () => {
   const calls: string[] = [];
   const hostBridge = {

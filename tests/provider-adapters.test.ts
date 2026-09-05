@@ -11,6 +11,7 @@ import {
   prepareCompletion,
 } from "../src/providers/provider-adapters.js";
 import { ProviderFailure, SerialOperationRouter } from "../src/providers/routing.js";
+import { sourceLockedOcclusionFixture } from "./fixtures/occlusion/source-locked.js";
 
 const canvas = { width: 64, height: 32 } as const;
 
@@ -30,6 +31,16 @@ async function png(width: number = canvas.width, height: number = canvas.height)
   return sharp({
     create: { width, height, channels: 4, background: "#336699" },
   }).png().toBuffer();
+}
+
+async function pixel(image: Buffer, x: number, y: number): Promise<number[]> {
+  const decoded = await sharp(image).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const offset = (y * decoded.info.width + x) * decoded.info.channels;
+  return [...decoded.data.subarray(offset, offset + 4)];
+}
+
+async function fixtureMask(mask: Uint8Array): Promise<Buffer> {
+  return sharp(mask, { raw: { width: 32, height: 24, channels: 1 } }).png().toBuffer();
 }
 
 const sceneText = JSON.stringify({
@@ -260,42 +271,102 @@ test("completion padding reads alpha support without treating transparent white 
 });
 
 test("OpenAI completion pads to valid geometry, sends transparent hidden mask, and removes only local padding", async () => {
-  const source = await png();
-  const hiddenMask = await sharp(Buffer.from([255, ...new Array(canvas.width * canvas.height - 1).fill(0)]), {
-    raw: { width: canvas.width, height: canvas.height, channels: 1 },
-  }).png().toBuffer();
-  const protectedMask = await sharp(Buffer.alloc(canvas.width * canvas.height, 255), {
-    raw: { width: canvas.width, height: canvas.height, channels: 1 },
-  }).png().toBuffer();
+  const fixture = await sourceLockedOcclusionFixture();
+  const source = fixture.pngs.cleared;
+  const hiddenMask = await fixtureMask(fixture.masks.hidden);
+  const protectedPixels = Uint8Array.from(
+    fixture.masks.hidden,
+    (value) => value === 0 ? 255 : 0,
+  );
+  const protectedMask = await fixtureMask(protectedPixels);
   let submittedSize = "";
   let transparentPixels = 0;
+  let submittedImage: Buffer | undefined;
+  let submittedMask: Buffer | undefined;
   const fetcher: typeof fetch = async (_input, init) => {
     const form = init?.body as FormData;
     submittedSize = String(form.get("size"));
     const [width, height] = submittedSize.split("x").map(Number) as [number, number];
+    const imageFile = form.get("image") as Blob;
     const maskFile = form.get("mask") as Blob;
+    submittedImage = Buffer.from(await imageFile.arrayBuffer());
+    submittedMask = Buffer.from(await maskFile.arrayBuffer());
     const decodedMask = await sharp(Buffer.from(await maskFile.arrayBuffer())).ensureAlpha().raw().toBuffer();
     for (let offset = 3; offset < decodedMask.length; offset += 4) {
       if (decodedMask[offset] === 0) transparentPixels += 1;
     }
-    const generated = await sharp({ create: { width, height, channels: 4, background: "#ff0000" } }).png().toBuffer();
+    const generated = Buffer.from(submittedImage);
     return new Response(JSON.stringify({ model: "gpt-image-2-effective", data: [{ b64_json: generated.toString("base64") }] }), { status: 200 });
   };
   const result = await createOpenAiExecutors({
     apiKey: "key", analysisModel: "gpt-4.1", imageModel: "gpt-image-2",
     requestTimeoutMs: 1000, maxAttempts: 1, fetch: fetcher,
-  }).completion!({ image: source, canvas, prompt: "complete", hiddenMask, protectedMask });
+  }).completion!({ image: source, canvas: fixture.geometry.canvas, prompt: "complete", hiddenMask, protectedMask });
 
   const [paddedWidth, paddedHeight] = submittedSize.split("x").map(Number) as [number, number];
   assert.equal(paddedWidth % 16, 0);
   assert.equal(paddedHeight % 16, 0);
   assert.ok(paddedWidth * paddedHeight >= 655_360);
   assert.ok(Math.max(paddedWidth / paddedHeight, paddedHeight / paddedWidth) <= 3);
-  assert.equal(transparentPixels, 1);
+  assert.equal(transparentPixels, 80);
+  assert.ok(submittedImage);
+  assert.ok(submittedMask);
+  const left = (paddedWidth - 32) / 2;
+  const top = (paddedHeight - 24) / 2;
+  assert.deepEqual(await pixel(submittedImage, left + 14, top + 4), [0, 0, 0, 0]);
+  assert.deepEqual(await pixel(submittedImage, left + 4, top + 4), [40, 100, 160, 255]);
+  assert.deepEqual(await pixel(submittedMask, left + 14, top + 4), [255, 255, 255, 0]);
+  assert.deepEqual(await pixel(submittedMask, left + 4, top + 4), [255, 255, 255, 255]);
   assert.equal(result.ok, true);
   if (result.ok) {
-    assert.deepEqual(await sharp(result.value.image).metadata().then(({ width, height }) => ({ width, height })), canvas);
+    assert.deepEqual(await sharp(result.value.image).metadata().then(({ width, height }) => ({ width, height })), fixture.geometry.canvas);
+    assert.deepEqual(await pixel(result.value.image, 14, 4), [0, 0, 0, 0]);
+    assert.deepEqual(await pixel(result.value.image, 4, 4), [40, 100, 160, 255]);
     assert.equal(result.model, "gpt-image-2-effective");
+  }
+});
+
+test("Gemini API completion carries the cleared crop through padding and crop reversal", async () => {
+  const fixture = await sourceLockedOcclusionFixture();
+  const hiddenMask = await fixtureMask(fixture.masks.hidden);
+  const protectedMask = await fixtureMask(
+    Uint8Array.from(fixture.masks.hidden, (value) => value === 0 ? 255 : 0),
+  );
+  let submittedImage: Buffer | undefined;
+  let submittedMask: Buffer | undefined;
+  const fetcher: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    const parts = body.contents[0].parts;
+    submittedImage = Buffer.from(parts[1].inline_data.data, "base64");
+    submittedMask = Buffer.from(parts[2].inline_data.data, "base64");
+    return Response.json({
+      modelVersion: "gemini-3.1-flash-image",
+      candidates: [{ finishReason: "STOP", content: { parts: [{
+        inlineData: { mimeType: "image/png", data: submittedImage.toString("base64") },
+      }] } }],
+    });
+  };
+  const result = await createGeminiExecutors({
+    apiKey: "key", analysisModel: "gemini-2.5-flash",
+    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
+    maxAttempts: 1, fetch: fetcher,
+  }).completion!({
+    image: fixture.pngs.cleared,
+    canvas: fixture.geometry.canvas,
+    prompt: "complete rear object",
+    hiddenMask,
+    protectedMask,
+  });
+  assert.ok(submittedImage);
+  assert.ok(submittedMask);
+  assert.deepEqual(await pixel(submittedImage, 456 + 14, 340 + 4), [0, 0, 0, 0]);
+  assert.deepEqual(await pixel(submittedImage, 456 + 4, 340 + 4), [40, 100, 160, 255]);
+  assert.deepEqual(await pixel(submittedMask, 456 + 14, 340 + 4), [255, 255, 255, 0]);
+  assert.deepEqual(await pixel(submittedMask, 456 + 4, 340 + 4), [255, 255, 255, 255]);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(await pixel(result.value.image, 14, 4), [0, 0, 0, 0]);
+    assert.deepEqual(await pixel(result.value.image, 4, 4), [40, 100, 160, 255]);
   }
 });
 

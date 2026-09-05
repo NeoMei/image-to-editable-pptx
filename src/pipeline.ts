@@ -79,6 +79,7 @@ import {
 } from "./occlusion/complete.js";
 import type { CompletedCandidate } from "./occlusion/contracts.js";
 import type { OcclusionCompletionProvider } from "./occlusion/contracts.js";
+import { completionContext } from "./occlusion/request.js";
 import { analyzeScene, refineSceneRegions } from "./providers/qwen-scene.js";
 import { createScenePrompt } from "./providers/qwen-scene-prompt.js";
 import {
@@ -701,10 +702,7 @@ async function completeEligibleCandidates(input: {
         crop: sourceCrop,
         visibleMask: visible.mask,
         occluderMasks,
-        semanticContext: [
-          `candidate-kind:${candidate.kind}`,
-          `relation-count:${candidate.relations.length}`,
-        ],
+        semanticContext: completionContext(input.scene, candidate),
         budget,
         timeoutMs:
           input.requestTimeoutMs ?? input.config?.requestTimeoutMs ?? 120_000,
