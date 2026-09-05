@@ -50,7 +50,7 @@ const CompletionDiagnosticSchema = z.union([
   z.object({
     sequence: BoundedCountSchema,
     status: z.literal("accepted"),
-    metrics: QualityMetricsSchema,
+    metrics: QualityMetricsSchema.optional(),
   }).strict(),
   z.object({
     sequence: BoundedCountSchema,

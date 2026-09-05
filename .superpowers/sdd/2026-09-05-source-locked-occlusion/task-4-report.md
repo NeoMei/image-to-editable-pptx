@@ -157,3 +157,61 @@ The earlier provider-return offline replay at `9ffdf74` is provisional evidence.
 It reported `residual_occluder`, 28,492 residual pixels, zero generated pixels,
 and zero network calls. The final private replay remains required after the
 whole-branch review. No raw private replay images are recorded in public docs.
+
+## Review fix round 1: optional accepted metrics
+
+The review found that the persisted sidecar contract in the Task 4 brief declares
+`metrics?: QualityMetrics` for every status, while the initial persisted
+`CompletionDiagnosticSchema` required metrics for accepted entries. The schema
+now accepts an accepted diagnostic without metrics. The separate internal
+`CompletionOutcomeDiagnosticSchema` still requires metrics for a real accepted
+completion outcome, and production mapping continues to persist those available
+metrics.
+
+### RED
+
+Command:
+
+```text
+node --import tsx --test --test-name-pattern='keeps completion diagnostics bounded' tests/analysis-package.test.ts
+```
+
+Relevant output before the fix:
+
+```text
+ZodError: Invalid input: expected object, received undefined
+tests 1
+pass 0
+fail 1
+```
+
+The expected failure was the accepted sidecar entry without `metrics` being
+rejected by the persisted schema.
+
+### GREEN
+
+Commands:
+
+```text
+node --import tsx --test --test-name-pattern='keeps completion diagnostics bounded' tests/analysis-package.test.ts
+node --import tsx --test tests/analysis-package.test.ts
+npm run lint:types
+```
+
+Relevant output:
+
+```text
+focused tests 1; pass 1; fail 0
+analysis-package tests 10; pass 10; fail 0
+tsc -p tsconfig.json --noEmit
+```
+
+Files changed in this review fix:
+
+- `src/occlusion/diagnostics.ts`
+- `tests/analysis-package.test.ts`
+- `.superpowers/sdd/2026-09-05-source-locked-occlusion/task-4-report.md`
+
+Self-review confirmed that only the persisted accepted diagnostic changed to
+optional metrics; skipped/rejected reasons, unknown-key rejection, metric bounds,
+and the internal accepted-outcome requirement are unchanged.

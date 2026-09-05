@@ -234,6 +234,7 @@ test("keeps completion diagnostics bounded and structurally separate from the v2
     version: 1,
     candidates: [
       { sequence: 0, status: "accepted", metrics },
+      { sequence: 1, status: "accepted" },
       {
         sequence: 2,
         status: "rejected",
@@ -244,6 +245,10 @@ test("keeps completion diagnostics bounded and structurally separate from the v2
     ],
   });
   assert.equal(valid.version, 1);
+  assert.deepEqual(valid.candidates[1], {
+    sequence: 1,
+    status: "accepted",
+  });
   for (const invalid of [
     { version: 1, candidates: [{ sequence: 0, status: "accepted", reason: "geometry", metrics }] },
     { version: 1, candidates: [{ sequence: 0, status: "rejected", metrics }] },
