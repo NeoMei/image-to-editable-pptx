@@ -369,6 +369,14 @@ async function normalizeGeneratedImage(
   if (metadata.width === undefined || metadata.height === undefined) {
     throw new Error("Generated image has no geometry");
   }
+  const decodedMimeType = metadata.format === "png"
+    ? "image/png"
+    : metadata.format === "jpeg"
+      ? "image/jpeg"
+      : undefined;
+  if (decodedMimeType !== mimeType) {
+    throw new Error("Generated image MIME type does not match its bytes");
+  }
   let normalized = image;
   if (metadata.width !== prepared.canvas.width || metadata.height !== prepared.canvas.height) {
     const sourceRatio = metadata.width / metadata.height;
@@ -548,11 +556,18 @@ export function createGeminiExecutors(options: ApiAdapterOptions): ProviderOpera
         if (typeof mimeType !== "string") throw new Error("Image MIME missing");
         const image = await normalizeGeneratedImage(Buffer.from(encoded, "base64"), mimeType, prepared);
         const model = effectiveGeminiModel(response.value, options.imageModel);
+        const candidates = object(response.value)?.candidates;
+        const finishReason = Array.isArray(candidates)
+          ? object(candidates[0])?.finishReason
+          : undefined;
         return success(model, {
           image,
           modelId: model,
           taskId: createHash("sha256").update(encoded).digest("hex"),
-          sanitizedMetadata: { finishReason: object(object(response.value)?.candidates)?.finishReason ?? "STOP" },
+          sanitizedMetadata: {
+            finishReason:
+              typeof finishReason === "string" ? finishReason : "STOP",
+          },
         });
       } catch {
         return failure("invalid_output");
@@ -611,6 +626,7 @@ export function createHostExecutors(bridge: FileHostBridge): Readonly<Record<Hos
 }
 
 function classifyAlibaba(error: unknown): ProviderFailure {
+  if (error instanceof ProviderFailure) return error;
   const message = error instanceof Error ? error.message : "";
   if (/status (?:401|403)\b/i.test(message)) return new ProviderFailure("auth_unavailable");
   if (/status 404\b|model.*not found/i.test(message)) return new ProviderFailure("unavailable");
@@ -628,13 +644,23 @@ export function createAlibabaExecutors(
   }> = {},
   onTransportAttempt?: () => void,
 ): ProviderOperationExecutors {
+  const localObserverCall = <T extends unknown[]>(
+    callback: ((...args: T) => Promise<void>) | undefined,
+  ) => async (...args: T): Promise<void> => {
+    if (callback === undefined) return;
+    try {
+      await callback(...args);
+    } catch (cause) {
+      throw new ProviderFailure("local_failure", "local_failure", { cause });
+    }
+  };
   const withAttempt = (observer?: ProviderResponseObserver): ProviderResponseObserver | undefined =>
     observer === undefined && onTransportAttempt === undefined
       ? undefined
       : {
-          recordRawResponse: observer?.recordRawResponse ?? (async () => undefined),
-          recordRawHttpResponse: observer?.recordRawHttpResponse ?? (async () => undefined),
-          recordParseError: observer?.recordParseError ?? (async () => undefined),
+          recordRawResponse: localObserverCall(observer?.recordRawResponse),
+          recordRawHttpResponse: localObserverCall(observer?.recordRawHttpResponse),
+          recordParseError: localObserverCall(observer?.recordParseError),
           ...(onTransportAttempt === undefined
             ? {}
             : { recordTransportAttempt: onTransportAttempt }),

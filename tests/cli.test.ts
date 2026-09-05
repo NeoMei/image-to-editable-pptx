@@ -250,6 +250,7 @@ test("usage advertises PNG and JPEG inputs and the v2 offline boundary", () => {
       assert.match(error.message, /\.jpe?g/);
       assert.match(error.message, /build --analysis <dir> --out <dir>/);
       assert.match(error.message, /build-v1/);
+      assert.match(error.message, /run .*--host-bridge/s);
       return true;
     },
   );

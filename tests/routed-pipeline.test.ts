@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,7 +7,19 @@ import test from "node:test";
 import sharp from "sharp";
 
 import { readAnalysisPackage } from "../src/analysis/package.js";
-import { analyzeSlide } from "../src/pipeline.js";
+import {
+  analyzeSlide,
+  buildSlide,
+} from "../src/pipeline.js";
+import type { FileHostBridge } from "../src/providers/host-bridge.js";
+
+const backgroundScene = JSON.stringify({
+  nodes: [{
+    id: "background", role: "background", bbox: [0, 0, 1000, 1000],
+    confidence: 1, zIndex: 0, label: "canvas", extractionHints: [],
+  }],
+  relations: [],
+});
 
 test("API-only OpenAI analysis publishes effective models and actual routing attempts", async () => {
   const directory = await mkdtemp(join(tmpdir(), "routed-pipeline-"));
@@ -94,6 +106,71 @@ test("fatal routed analysis retains a safe routing report without provider secre
     assert.doesNotMatch(report, /SECRET_API_KEY|SECRET_PROVIDER_DETAIL/);
   } finally {
     globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("host-only analysis builds offline with no API credentials", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "host-only-pipeline-"));
+  const imagePath = join(directory, "slide.png");
+  const analysisDir = join(directory, "analysis");
+  const outputDir = join(directory, "output");
+  await sharp({ create: { width: 64, height: 64, channels: 4, background: "white" } }).png().toFile(imagePath);
+  const bridge: FileHostBridge = {
+    capabilities: {
+      openai: { ocr: true, scene: true, completion: false },
+      gemini: { ocr: false, scene: false, completion: false },
+    },
+    async invoke(_provider, request) {
+      return {
+        ok: true,
+        model: request.operation === "ocr" ? "host-ocr-model" : "host-scene-model",
+        output: {
+          kind: "text",
+          text: request.operation === "ocr" ? "{\"lines\":[]}" : backgroundScene,
+        },
+      };
+    },
+  };
+  try {
+    await analyzeSlide({
+      imagePath,
+      outDir: analysisDir,
+      routingConfig: {
+        requestTimeoutMs: 100,
+        maxAttempts: 1,
+        maxRegionAnalysis: 0,
+        maxOcclusionCompletions: 0,
+      },
+      hostBridge: bridge,
+    });
+    const ledger = await readAnalysisPackage(analysisDir);
+    assert.equal(ledger.analysisVersion, 2);
+    if (ledger.analysisVersion !== 2) return;
+    assert.deepEqual(ledger.models, {
+      ocr: "host-ocr-model",
+      fullVision: "host-scene-model",
+      regionalVision: "host-scene-model",
+    });
+    assert.deepEqual(
+      ledger.routing?.operations.map(({ selectedCandidate }) => selectedCandidate),
+      ["host-openai", "host-openai"],
+    );
+
+    const originalFetch = globalThis.fetch;
+    let networkCalls = 0;
+    globalThis.fetch = async () => {
+      networkCalls += 1;
+      throw new Error("offline build attempted network access");
+    };
+    try {
+      const built = await buildSlide({ analysisDir, outDir: outputDir });
+      assert.equal(networkCalls, 0);
+      await access(built.pptxPath);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });

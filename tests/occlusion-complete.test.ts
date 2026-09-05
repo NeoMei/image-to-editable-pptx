@@ -10,6 +10,7 @@ import {
   type OcclusionCompletionInput,
   type OcclusionCompletionProvider,
 } from "../src/occlusion/complete.js";
+import { createCountedCompletionProvider } from "../src/pipeline.js";
 import { RoutingTerminalError } from "../src/providers/routing.js";
 
 const WIDTH = 9;
@@ -422,6 +423,36 @@ test("provider failures and timeouts leave the original candidate in the backgro
     ),
     undefined,
   );
+});
+
+test("counted routed completion retains timeout ownership through candidate completion", async () => {
+  const { input, completedCrop } = await fixture();
+  let requests = 0;
+  const provider = createCountedCompletionProvider({
+    ownsTimeout: true,
+    async complete() {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return providerReturning(completedCrop).complete({
+        crop: input.crop,
+        hiddenMask: input.visibleMask,
+        protectedVisibleMask: input.visibleMask,
+        semanticContext: [],
+      });
+    },
+  }, () => { requests += 1; });
+
+  const startedAt = performance.now();
+  const result = await completeOccludedCandidate(
+    { ...input, timeoutMs: 5 },
+    provider,
+  );
+
+  assert.ok(performance.now() - startedAt >= 15);
+  assert.ok(result);
+  assert.equal(result.provenance.kind, "composite");
+  if (result.provenance.kind !== "composite") return;
+  assert.equal(result.provenance.modelId, "provider-model");
+  assert.equal(requests, 1);
 });
 
 test("fatal routed completion escapes the optional quality fallback", async () => {

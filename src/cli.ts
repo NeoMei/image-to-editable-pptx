@@ -23,7 +23,8 @@ Usage:
   npm run cli -- build-v1 <slide.png|slide.jpg|slide.jpeg> --analysis <dir> --out <dir>
     [--required-text-count <n>]
   npm run cli -- run <slide.png|slide.jpg|slide.jpeg> --out <dir>
-    [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>]
+    [--host-bridge <private-dir>] [--max-region-analysis <0..8>]
+    [--max-occlusion-completions <0..4>]
     [--required-text-count <n>] [--record]
 
 build consumes a self-contained analysis package v2 without network access.

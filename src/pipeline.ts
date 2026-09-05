@@ -78,6 +78,7 @@ import {
   OcclusionCompletionBudget,
 } from "./occlusion/complete.js";
 import type { CompletedCandidate } from "./occlusion/contracts.js";
+import type { OcclusionCompletionProvider } from "./occlusion/contracts.js";
 import { analyzeScene, refineSceneRegions } from "./providers/qwen-scene.js";
 import { createScenePrompt } from "./providers/qwen-scene-prompt.js";
 import {
@@ -609,6 +610,19 @@ async function chmodPrivate(path: string): Promise<void> {
   await chmod(path, 0o600);
 }
 
+export function createCountedCompletionProvider(
+  provider: OcclusionCompletionProvider,
+  count: () => void,
+): OcclusionCompletionProvider {
+  return {
+    ...(provider.ownsTimeout === true ? { ownsTimeout: true as const } : {}),
+    async complete(request) {
+      count();
+      return provider.complete(request);
+    },
+  };
+}
+
 async function completeEligibleCandidates(input: {
   outDir: string;
   source: SourceCanvas;
@@ -650,12 +664,10 @@ async function completeEligibleCandidates(input: {
     throw new Error("Completion provider configuration is unavailable");
   }
   let requests = 0;
-  const countedProvider = {
-    async complete(request: Parameters<typeof provider.complete>[0]) {
-      requests += 1;
-      return provider.complete(request);
-    },
-  };
+  const countedProvider = createCountedCompletionProvider(
+    provider,
+    () => { requests += 1; },
+  );
   const artifacts: CompletionArtifact[] = [];
   for (const candidate of plan.candidates) {
     if (candidate.occlusion === undefined) continue;

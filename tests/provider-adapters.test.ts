@@ -4,6 +4,7 @@ import test from "node:test";
 import sharp from "sharp";
 
 import {
+  createAlibabaExecutors,
   createGeminiExecutors,
   createHostExecutors,
   createOpenAiExecutors,
@@ -269,4 +270,73 @@ test("429 retries are bounded and each HTTP attempt is observable", async () => 
   }).ocr!({ image: await png(), canvas });
   assert.equal(result.ok, true);
   assert.deepEqual(attempts, [1, 2]);
+});
+
+test("Alibaba observer I/O failure is local failure and cannot fall through", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ output: { choices: [] } });
+  try {
+    const executors = createAlibabaExecutors({
+      apiKey: "alibaba-key",
+      workspaceId: "workspace-123",
+      dashscopeApiBase: "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1",
+      dashscopeCompatibleBase: "https://workspace-123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      ocrModel: "qwen3.5-ocr",
+      visionModel: "qwen3-vl-plus",
+      editModel: "wanx2.1-imageedit",
+      requestTimeoutMs: 1000,
+      pollIntervalMs: 1,
+    }, {
+      ocr: {
+        async recordRawResponse() { throw new Error("filesystem unavailable"); },
+        async recordRawHttpResponse() { throw new Error("filesystem unavailable"); },
+        async recordParseError() { throw new Error("filesystem unavailable"); },
+      },
+    });
+    const result = await executors.ocr!({ image: await png(), canvas });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.failure.status, "local_failure");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("generated image MIME must match the bytes that were decoded", async () => {
+  const jpeg = await sharp({
+    create: { width: 1152, height: 576, channels: 3, background: "red" },
+  }).jpeg().toBuffer();
+  const result = await createGeminiExecutors({
+    apiKey: "key", analysisModel: "gemini-2.5-flash", imageModel: "gemini-3.1-flash-image",
+    requestTimeoutMs: 1000, maxAttempts: 1,
+    fetch: async () => Response.json({
+      candidates: [{ finishReason: "STOP", content: { parts: [{
+        inlineData: { mimeType: "image/png", data: jpeg.toString("base64") },
+      }] } }],
+    }),
+  }).completion!({
+    image: await png(), canvas, prompt: "complete",
+    hiddenMask: await png(), protectedMask: await png(),
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.failure.status, "invalid_output");
+});
+
+test("Gemini completion records the selected candidate finish reason", async () => {
+  const generated = await png(1152, 576);
+  const result = await createGeminiExecutors({
+    apiKey: "key", analysisModel: "gemini-2.5-flash", imageModel: "gemini-3.1-flash-image",
+    requestTimeoutMs: 1000, maxAttempts: 1,
+    fetch: async () => Response.json({
+      candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{
+        inlineData: { mimeType: "image/png", data: generated.toString("base64") },
+      }] } }],
+    }),
+  }).completion!({
+    image: await png(), canvas, prompt: "complete",
+    hiddenMask: await png(), protectedMask: await png(),
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(result.value.sanitizedMetadata, { finishReason: "MAX_TOKENS" });
+  }
 });
