@@ -21,6 +21,8 @@
   "files": [
     "src/",
     "scripts/measure-text-span.ts",
+    "docs/host-routing.md",
+    "docs/examples/host-capabilities.json",
     "skills/",
     ".codex-plugin/",
     ".agents/plugins/marketplace.json",

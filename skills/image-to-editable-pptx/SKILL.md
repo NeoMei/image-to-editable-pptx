@@ -1,6 +1,6 @@
 ---
 name: image-to-editable-pptx
-description: Convert a PNG or JPEG slide image into a high-fidelity PPTX with editable text and safely extracted semantic PNG layers. Use when the user wants to edit an image-based slide while preserving uncertain content in the background.
+description: Use when a user wants to convert or edit a PNG or JPEG slide image as a high-fidelity PPTX while preserving uncertain content safely in the background.
 ---
 
 # Image to Editable PPTX
@@ -31,16 +31,37 @@ The slide layout preserves the accepted canvas aspect ratio; it is not limited t
 
 ## Credential boundary
 
-New `analyze` and `run` operations need `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID` in the process environment. Never echo, record, commit, paste into a command, or copy these values into a response. The CLI intentionally has no API-key, workspace, Authorization, provider-secret, or base-URL flags.
+New `analyze` and `run` operations need at least one real host capability or one complete API credential set. Host OpenAI/Gemini tools are exposed through `--host-bridge`; API candidates use `OPENAI_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), or both `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID`. Missing keys skip that candidate. Never echo, record, commit, paste into a command, copy into bridge files, or copy these values into a response. The CLI intentionally has no API-key, workspace, Authorization, provider-secret, or base-URL flags.
 
-Explain before live analysis that the slide is sent once for OCR and once for full-page scene analysis. The generic analyzer may also send at most 8 selected crops for regional refinement and at most 4 eligible masked crops for occlusion completion. Both optional stages are bounded and can be disabled independently with zero; there is no unlimited mode.
+For API routes, the current defaults are `gpt-4.1` / `gpt-image-2`, `gemini-2.5-flash` / `gemini-3.1-flash-image`, and `qwen3.5-ocr` / `qwen3-vl-plus` / `wanx2.1-imageedit`. OpenAI and Gemini defaults may be overridden with `OPENAI_ANALYSIS_MODEL`, `OPENAI_IMAGE_MODEL`, `GEMINI_ANALYSIS_MODEL`, and `GEMINI_IMAGE_MODEL`. A host success must use the effective model identifier returned by actual registered-tool metadata, never an API default or inferred catalog label.
+
+Explain before live analysis that the pipeline makes one logical OCR request and one logical full-page scene request. Fallback candidates and bounded API retries may transmit the same slide more than once; actual host invocations and API attempts are recorded separately in `routing.transportAttempts`. The generic analyzer may also make at most 8 logical requests for selected regional crops and at most 4 for eligible masked occlusion-completion crops. Both optional stages are bounded and can be disabled independently with zero; there is no unlimited mode.
+
+## Use registered host tools when available
+
+Before requiring provider keys, inspect the tools actually registered in the current host. A model catalog entry, ordinary agent reasoning, or an image-editing tool is not an OCR/scene JSON capability. Declare only the exact `openai` or `gemini` operations a registered tool can perform with the request's local PNGs and prompt. Omit absent operations and never invent model output.
+
+Read [`docs/host-routing.md`](../../docs/host-routing.md) completely before creating or servicing a bridge. It is the normative shipped reference for the capability manifest, request and response schemas, coordinate systems, failure codes, privacy boundary, atomic publication, routing semantics, and child-monitor loop.
+
+The host agent itself performs this loop because only it can invoke the registered tools in its session. There is intentionally no standalone shell bridge-servicer command for host tools.
+
+The concrete loop is:
+
+1. Create a private existing directory with mode `0700` outside the plugin cache and output directories. Write `capabilities.json` with mode `0600` from live tool discovery. The packaged copyable OCR/scene example is `docs/examples/host-capabilities.json`.
+2. Start `analyze` or `run` with `--host-bridge <private-dir>` as a running child. Do not wait for child completion before servicing requests.
+3. Poll `requests/request-*/request.json` and the child status. Maintain a set of served `requestId` UUIDs. After the atomically published request appears, validate it and read only its named local PNG inputs.
+4. Invoke the declared registered tool for `provider` and `operation`. OCR returns pixel-coordinate JSON text; scene returns normalized-thousandths JSON text; completion returns one local image matching the request canvas. Use the effective model label from tool metadata. If the tool cannot produce the contract, return a classified failure, not fabricated content.
+5. Write the exact version-1 response to a mode-`0600` temporary file in that request directory, then rename it to `response.json`. Never download arbitrary URLs or expose the slide through a public directory.
+6. Continue for new unserved request IDs until the child exits. On servicing failure, terminate the child and retain only explicitly owned diagnostic data.
+
+The fixed route for each of `ocr`, `scene`, and `completion` is `host-openai`, `api-openai`, `host-gemini`, `api-gemini`, `api-alibaba`. Routing is serial with one independent forward-only sticky cursor per operation. Only `unavailable`, `auth_unavailable`, and `retryable_exhausted` advance; `policy_refused`, `invalid_input`, `invalid_output`, and `local_failure` stop the run. A host raw result becomes router success only after the operation adapter validates its content and geometry.
 
 ## Run the converter
 
 For a new self-contained manifest v2 analysis package:
 
 ```bash
-npm run cli -- analyze <source.png> --out <analysis-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
+npm run cli -- analyze <source.png> --out <analysis-dir> [--host-bridge <private-dir>] [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
 ```
 
 Build from that verified package offline. This command must not receive the source image, analysis/network limit flags, `--record`, or credentials:
@@ -52,7 +73,7 @@ npm run cli -- build --analysis <analysis-dir> --out <output-dir> [--required-te
 For a combined network analysis and local build:
 
 ```bash
-npm run cli -- run <source.jpg> --out <output-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--required-text-count <n>] [--record]
+npm run cli -- run <source.jpg> --out <output-dir> [--host-bridge <private-dir>] [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--required-text-count <n>] [--record]
 ```
 
 Defaults are 8 regional analyses and 4 occlusion completions. `0` disables the corresponding stage. Use `--required-text-count` only when the expected OCR text count is independently known.
@@ -64,6 +85,8 @@ npm run cli -- build-v1 <source.jpeg> --analysis <legacy-analysis-dir> --out <ou
 ```
 
 Do not use `build-v1` for manifest v2, and do not suggest that v2 needs the image again. `analyze` and `run` retain `--image <path>` only as a compatibility alias for old scripts; prefer the positional image form above.
+
+In `analysis-ledger.json`, `requests` are logical pipeline operations, `routing.operations` shows candidate decisions for each logical operation, and `routing.transportAttempts` counts actual host invocations and individual API retry attempts. Missing candidates add an attempt disposition but no transport. Report these measures separately.
 
 ## Review the result
 

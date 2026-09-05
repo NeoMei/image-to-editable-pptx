@@ -3,7 +3,7 @@
 > High-fidelity semantic reconstruction for image-based slides
 > 高保真地把图片式幻灯片重构为可编辑 PPTX
 
-Image to Editable PPTX 先由阿里云百炼 OCR 和视觉模型生成通用语义场景图，再在本地把可靠的文字、独立图标、复合前景和文字底板重构成可编辑层。重组或局部验证不达标的候选不会被强行拆出，而是保留在背景中，优先保住视觉保真度。
+Image to Editable PPTX 先通过宿主已注册的 OpenAI/Gemini 工具或可选的 OpenAI、Gemini、阿里云百炼 API 生成 OCR 与通用语义场景图，再在本地把可靠的文字、独立图标、复合前景和文字底板重构成可编辑层。重组或局部验证不达标的候选不会被强行拆出，而是保留在背景中，优先保住视觉保真度。
 
 这不是 Canva Magic Layers 的调用器，也不会把位图导入冒充可编辑。只有实际写入 PPTX 的文字对象和 PNG 资产才算可编辑层。
 
@@ -49,28 +49,40 @@ opencode debug skill
 
 如果目标链接已存在，不要盲目覆盖；先确认它是否指向本仓库。更新时在克隆目录执行 `git pull --ff-only` 和 `npm ci --include=dev`。
 
-## 百炼凭证
+## 模型路由与可选凭证
 
-只有 `analyze` 和 `run` 会发起网络请求，两者需要进程环境中的：
+`analyze` 和 `run` 对 `ocr` / `scene` / `completion` 各自按以下固定顺序串行选择：
+
+`host-openai` → `api-openai` → `host-gemini` → `api-gemini` → `api-alibaba`。
+
+宿主候选只在当前 Agent 实际发现了能完成该 operation 的已注册工具时通过 `--host-bridge <private-dir>` 声明；模型目录、普通推理能力或仅能编辑图片的工具不是 OCR/场景 JSON 能力证明。没有实际工具时必须省略，不能猜测或伪造模型结果。完整的可复制 capability manifest、request/response 示例、原子响应轮询流程与 schema 见 [Host routing and file bridge protocol](docs/host-routing.md)。
+
+API 凭证都是可选的，缺少时跳过该 API 候选：
 
 ```bash
-export DASHSCOPE_API_KEY='<your-api-key>'
-export DASHSCOPE_WORKSPACE_ID='<your-workspace-id>'
+export OPENAI_API_KEY='<your-openai-key>'
+export GEMINI_API_KEY='<your-gemini-key>' # 也可使用 GOOGLE_API_KEY
+export DASHSCOPE_API_KEY='<your-dashscope-key>'
+export DASHSCOPE_WORKSPACE_ID='<your-dashscope-workspace-id>'
 ```
 
-凭证只能通过环境变量提供。CLI 不接受 API Key、workspace ID、Authorization 或 provider base URL 参数；不要把凭证写入命令、仓库、截图或录制文件。
+可用 `OPENAI_ANALYSIS_MODEL` / `OPENAI_IMAGE_MODEL` 和 `GEMINI_ANALYSIS_MODEL` / `GEMINI_IMAGE_MODEL` 覆盖 API 默认模型；当前默认分别为 `gpt-4.1` / `gpt-image-2`、`gemini-2.5-flash` / `gemini-3.1-flash-image`，百炼为 `qwen3.5-ocr` / `qwen3-vl-plus` / `wanx2.1-imageedit`。宿主路由的有效模型名必须来自实际工具元数据，不使用这些 API 默认值代填。
+
+只有 `unavailable`、`auth_unavailable`、`retryable_exhausted` 会推进到下一候选；`policy_refused`、`invalid_input`、`invalid_output`、`local_failure` 是致命边界，会停止整个运行。每个 operation 都有独立的只向前 sticky 游标，成功后下一次从该候选开始，不会在同一运行中回退到更早候选。
+
+凭证只能通过环境变量提供。CLI 不接受 API Key、workspace ID、Authorization 或 provider base URL 参数；不要把凭证写入命令、bridge 文件、仓库、截图或录制文件。
 
 ## CLI：网络分析与离线构建
 
 ```bash
-# 生成 self-contained analysis package v2；会调用百炼
-npm run cli -- analyze <source.png> --out <analysis-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
+# 生成 self-contained analysis package v2；宿主工具需追加 --host-bridge
+npm run cli -- analyze <source.png> --out <analysis-dir> [--host-bridge <private-dir>] [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
 
 # 只读 analysis package v2 完成分层、修复、QA 和 PPTX 导出；不读取源图，不读取凭证，不访问网络
 npm run cli -- build --analysis <analysis-dir> --out <output-dir> [--required-text-count <n>]
 
 # 一次完成 analyze + build
-npm run cli -- run <source.jpg> --out <output-dir> [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--required-text-count <n>] [--record]
+npm run cli -- run <source.jpg> --out <output-dir> [--host-bridge <private-dir>] [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--required-text-count <n>] [--record]
 
 # 仅用于旧 analysis package v1；v1 不自带源像素，因此必须再提供原图
 npm run cli -- build-v1 <source.jpeg> --analysis <legacy-analysis-dir> --out <output-dir> [--required-text-count <n>]
@@ -82,7 +94,9 @@ npm run cli -- build-v1 <source.jpeg> --analysis <legacy-analysis-dir> --out <ou
 
 `analyze` 在新目录中写入经 schema 验证和 SHA-256 绑定的自包含分析包，包括 `source.rgba`、`ocr.json`、`scene-graph.json`、局部精修/遮挡补全资产及 `analysis-ledger.json`。源图的标准 RGBA 像素已包含在包内，所以 v2 `build` 只需 analysis 目录。路径、哈希、尺寸或资产库存不一致时，离线构建会失败而不是使用未验证文件。
 
-`analyze` 默认发起 1 次 OCR 和 1 次整页视觉分析，然后最多进行 8 次局部视觉精修和 4 次遮挡补全。请先确认源图内容符合组织的数据合规要求。
+`analyze` 默认发起 1 次逻辑 OCR 请求和 1 次逻辑整页视觉分析，然后最多进行 8 次逻辑局部视觉精修和 4 次逻辑遮挡补全。候选 fallback 与有界 API 重试可能使同一源图/裁剪被传输多次；请先确认源图内容符合所有可能候选 provider 的数据合规要求。
+
+`analysis-ledger.json.requests` 记录逻辑请求数，`routing.operations` 记录每次逻辑请求考虑的候选，`routing.transportAttempts` 才记录实际宿主调用与 API 重试；三者数量可以不同。
 
 ## 输出与 QA 复核
 
@@ -117,6 +131,7 @@ npm pack --dry-run
 ```
 
 测试使用本地 fixture 和可注入 provider，不应访问网络。
+子进程 bridge E2E 使用测试专用 host emulator，真实启动 CLI、写入 v2 分析包并生成 PPTX/三张 QA 图，同时确定性禁止网络。它证明文件协议集成，不是真实 OpenAI/Gemini 验收，也不证明 completion、文字可编辑或 PowerPoint/WPS 验收。
 依赖审计仅临时接受 PptxGenJS 4.0.1 未使用的 `image-size` 声明所带来的两个
 无可安装修复版本的公告；门禁绑定精确版本、扫描发布代码确认不可达，并于
 2026-10-03 到期复审。任何新增公告或依赖变化都会失败。
