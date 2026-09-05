@@ -72,6 +72,8 @@ const GEMINI_POLICY_FINISH_REASONS = new Set([
   "IMAGE_RECITATION",
   "ESCALATION",
 ]);
+const GEMINI_ANALYSIS_SUCCESS_FINISH_REASONS = new Set(["STOP"]);
+const GEMINI_COMPLETION_SUCCESS_FINISH_REASONS = new Set(["STOP", "MAX_TOKENS"]);
 
 function failure(
   status: ConstructorParameters<typeof ProviderFailure>[0],
@@ -469,7 +471,9 @@ export function createOpenAiExecutors(options: ApiAdapterOptions): ProviderOpera
       if (!result.ok) return result;
       const root = object(result.value.payload);
       const data = root?.data;
-      const encoded = Array.isArray(data) ? object(data[0])?.b64_json : undefined;
+      const encoded = Array.isArray(data) && data.length === 1
+        ? object(data[0])?.b64_json
+        : undefined;
       if (typeof encoded !== "string") return failure("invalid_output");
       try {
         if (encoded.length > Math.ceil(MAX_GENERATED_IMAGE_BYTES * 4 / 3) + 4) throw new Error("Image payload too large");
@@ -499,6 +503,14 @@ function geminiParts(payload: unknown): Record<string, unknown>[] {
   return Array.isArray(parts)
     ? parts.map(object).filter((part): part is Record<string, unknown> => part !== undefined)
     : [];
+}
+
+function geminiFinishReasonIs(payload: unknown, allowed: ReadonlySet<string>): boolean {
+  const candidates = object(payload)?.candidates;
+  const finishReason = Array.isArray(candidates)
+    ? object(candidates[0])?.finishReason
+    : undefined;
+  return typeof finishReason === "string" && allowed.has(finishReason);
 }
 
 function effectiveGeminiModel(payload: unknown, configured: string): string {
@@ -535,8 +547,14 @@ export function createGeminiExecutors(options: ApiAdapterOptions): ProviderOpera
       generationConfig: { responseMimeType: "application/json" },
     });
     if (!response.ok) return response;
-    const text = geminiParts(response.value).find((part) => typeof part.text === "string")?.text;
-    if (typeof text !== "string") return failure("invalid_output");
+    if (!geminiFinishReasonIs(response.value, GEMINI_ANALYSIS_SUCCESS_FINISH_REASONS)) {
+      return failure("invalid_output");
+    }
+    const textParts = geminiParts(response.value).flatMap((part) =>
+      part.thought !== true && typeof part.text === "string" ? [part.text] : []
+    );
+    if (textParts.length === 0) return failure("invalid_output");
+    const text = textParts.join("");
     try {
       return success(effectiveGeminiModel(response.value, options.analysisModel), parse(text));
     } catch {
@@ -559,6 +577,13 @@ export function createGeminiExecutors(options: ApiAdapterOptions): ProviderOpera
         generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
       });
       if (!response.ok) return response;
+      const candidates = object(response.value)?.candidates;
+      if (!Array.isArray(candidates) || candidates.length !== 1) {
+        return failure("invalid_output");
+      }
+      if (!geminiFinishReasonIs(response.value, GEMINI_COMPLETION_SUCCESS_FINISH_REASONS)) {
+        return failure("invalid_output");
+      }
       const imageParts = geminiParts(response.value).filter((part) => {
         if (part.thought === true) return false;
         return object(part.inlineData) !== undefined || object(part.inline_data) !== undefined;
@@ -574,10 +599,7 @@ export function createGeminiExecutors(options: ApiAdapterOptions): ProviderOpera
         if (typeof mimeType !== "string") throw new Error("Image MIME missing");
         const image = await normalizeGeneratedImage(Buffer.from(encoded, "base64"), mimeType, prepared);
         const model = effectiveGeminiModel(response.value, options.imageModel);
-        const candidates = object(response.value)?.candidates;
-        const finishReason = Array.isArray(candidates)
-          ? object(candidates[0])?.finishReason
-          : undefined;
+        const finishReason = object(candidates[0])?.finishReason;
         return success(model, {
           image,
           modelId: model,
@@ -622,7 +644,13 @@ function createHostProviderExecutors(
     }) } : {}),
     ...(capabilities.completion ? { completion: (input: CompletionAdapterInput) => invoke({ operation: "completion", prompt: input.prompt, image: input.image, canvas: input.canvas, hiddenMask: input.hiddenMask, protectedMask: input.protectedMask }, async (result) => {
       if (result.output.kind !== "image") throw new Error("Expected host completion image");
-      const metadata = await sharp(result.output.image).metadata();
+      const metadata = await sharp(result.output.image, { animated: true }).metadata();
+      if (
+        (metadata.format !== "png" && metadata.format !== "jpeg") ||
+        (metadata.pages ?? 1) !== 1
+      ) {
+        throw new Error("Host completion must be a single-frame PNG or JPEG");
+      }
       if (metadata.width !== input.canvas.width || metadata.height !== input.canvas.height) {
         throw new Error("Host completion geometry mismatch");
       }

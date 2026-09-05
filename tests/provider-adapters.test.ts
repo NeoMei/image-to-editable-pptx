@@ -221,6 +221,48 @@ test("Gemini scene uses fixed generateContent endpoint and accepts inlineData ou
   assert.equal((headers as Record<string, string>)["x-goog-api-key"], "gemini-test-key");
 });
 
+test("Gemini OCR ignores thought text and parses the final answer", async () => {
+  const finalText = JSON.stringify({
+    lines: [{
+      text: "actual",
+      bbox: { x: 2, y: 3, width: 10, height: 8 },
+      quad: [{ x: 2, y: 3 }, { x: 12, y: 3 }, { x: 12, y: 11 }, { x: 2, y: 11 }],
+    }],
+  });
+  const result = await createGeminiExecutors({
+    apiKey: "key", analysisModel: "gemini-2.5-flash",
+    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
+    maxAttempts: 1,
+    fetch: async () => Response.json({
+      candidates: [{ finishReason: "STOP", content: { parts: [
+        { thought: true, text: '{"lines":[]}' },
+        { text: finalText },
+      ] } }],
+    }),
+  }).ocr!({ image: await png(), canvas });
+
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.value.lines[0]?.text, "actual");
+});
+
+test("Gemini scene joins split final text parts in order", async () => {
+  const splitAt = Math.floor(sceneText.length / 2);
+  const result = await createGeminiExecutors({
+    apiKey: "key", analysisModel: "gemini-2.5-flash",
+    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
+    maxAttempts: 1,
+    fetch: async () => Response.json({
+      candidates: [{ finishReason: "STOP", content: { parts: [
+        { text: sceneText.slice(0, splitAt) },
+        { text: sceneText.slice(splitAt) },
+      ] } }],
+    }),
+  }).scene!({ image: await png(), canvas, prompt: "scene" });
+
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.value.nodes[0]?.id, "background");
+});
+
 test("Gemini image completion excludes thought images and rejects incompatible geometry", async () => {
   const thought = await png(64, 32);
   const incompatible = await png(32, 64);
@@ -386,6 +428,67 @@ test("Gemini completion rejects ambiguous multiple final images", async () => {
   if (!result.ok) assert.equal(result.failure.status, "invalid_output");
 });
 
+test("OpenAI completion rejects multiple results and stops routing", async () => {
+  const generated = await png(1152, 576);
+  let fallbackCalls = 0;
+  const executors = createOpenAiExecutors({
+    apiKey: "key", analysisModel: "gpt-4.1", imageModel: "gpt-image-2",
+    requestTimeoutMs: 1000, maxAttempts: 1,
+    fetch: async () => Response.json({ data: [
+      { b64_json: generated.toString("base64") },
+      { b64_json: generated.toString("base64") },
+    ] }),
+  });
+  const image = await png();
+  const router = new SerialOperationRouter();
+  const result = await router.route("completion", {
+    "api-openai": () => executors.completion!({
+      image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
+    }),
+    "host-gemini": async () => {
+      fallbackCalls += 1;
+      assert.fail("ambiguous OpenAI results must stop routing");
+    },
+  });
+
+  assert.equal(result.outcome, "fatal");
+  assert.equal(result.attempts.at(-1)?.status, "invalid_output");
+  assert.equal(router.report.stopped, true);
+  assert.equal(fallbackCalls, 0);
+});
+
+test("Gemini completion rejects multiple candidates and stops routing", async () => {
+  const generated = await png(1152, 576);
+  const candidate = {
+    finishReason: "STOP",
+    content: { parts: [{
+      inlineData: { mimeType: "image/png", data: generated.toString("base64") },
+    }] },
+  };
+  let fallbackCalls = 0;
+  const executors = createGeminiExecutors({
+    apiKey: "key", analysisModel: "gemini-2.5-flash", imageModel: "gemini-3.1-flash-image",
+    requestTimeoutMs: 1000, maxAttempts: 1,
+    fetch: async () => Response.json({ candidates: [candidate, candidate] }),
+  });
+  const image = await png();
+  const router = new SerialOperationRouter();
+  const result = await router.route("completion", {
+    "api-gemini": () => executors.completion!({
+      image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
+    }),
+    "api-alibaba": async () => {
+      fallbackCalls += 1;
+      assert.fail("ambiguous Gemini candidates must stop routing");
+    },
+  });
+
+  assert.equal(result.outcome, "fatal");
+  assert.equal(result.attempts.at(-1)?.status, "invalid_output");
+  assert.equal(router.report.stopped, true);
+  assert.equal(fallbackCalls, 0);
+});
+
 test("Gemini documented content-filter finish reasons are fatal across OCR, scene, and completion", async () => {
   const cases = [
     { operation: "ocr", finishReason: "SPII" },
@@ -450,26 +553,48 @@ test("Gemini non-policy finish reasons remain invalid output rather than refusal
   ] as const;
 
   for (const { operation, finishReason } of cases) {
+    let calls = 0;
+    let fallbackCalls = 0;
+    const generated = await png(1152, 576);
     const executors = createGeminiExecutors({
       apiKey: "key", analysisModel: "gemini-2.5-flash",
       imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
       maxAttempts: 1,
-      fetch: async () => Response.json({ candidates: [{ finishReason }] }),
+      fetch: async () => {
+        calls += 1;
+        return Response.json({
+          candidates: [{
+            finishReason,
+            content: { parts: operation === "completion"
+              ? [{ inlineData: { mimeType: "image/png", data: generated.toString("base64") } }]
+              : [{ text: operation === "ocr" ? '{"lines":[]}' : sceneText }],
+            },
+          }],
+        });
+      },
     });
     const image = await png();
-    const result = operation === "ocr"
-      ? await executors.ocr!({ image, canvas })
-      : operation === "scene"
-        ? await executors.scene!({ image, canvas, prompt: "scene" })
-        : await executors.completion!({
-            image, canvas, prompt: "complete",
-            hiddenMask: image, protectedMask: image,
-          });
+    const router = new SerialOperationRouter();
+    const result = await router.route<unknown>(operation, {
+      "api-gemini": () => operation === "ocr"
+        ? executors.ocr!({ image, canvas })
+        : operation === "scene"
+          ? executors.scene!({ image, canvas, prompt: "scene" })
+          : executors.completion!({
+              image, canvas, prompt: "complete",
+              hiddenMask: image, protectedMask: image,
+            }),
+      "api-alibaba": async () => {
+        fallbackCalls += 1;
+        assert.fail("invalid Gemini finish state must stop routing");
+      },
+    });
 
-    assert.equal(result.ok, false, `${finishReason} must fail`);
-    if (!result.ok) {
-      assert.equal(result.failure.status, "invalid_output", finishReason);
-    }
+    assert.equal(result.outcome, "fatal", `${finishReason} must be terminal`);
+    assert.equal(result.attempts.at(-1)?.status, "invalid_output", finishReason);
+    assert.equal(router.report.stopped, true);
+    assert.equal(calls, 1);
+    assert.equal(fallbackCalls, 0);
   }
 });
 
@@ -492,6 +617,78 @@ test("host output is semantically validated before becoming router success", asy
   });
   assert.equal(completion.ok, false);
   if (!completion.ok) assert.equal(completion.failure.status, "invalid_output");
+});
+
+test("host completion rejects unsupported and multi-frame image artifacts", async (t) => {
+  const framePixels = Buffer.alloc(canvas.width * canvas.height * 2 * 4, 255);
+  for (let offset = 0; offset < canvas.width * canvas.height * 4; offset += 4) {
+    framePixels[offset] = 255;
+    framePixels[offset + 1] = 0;
+    framePixels[offset + 2] = 0;
+  }
+  for (let offset = canvas.width * canvas.height * 4; offset < framePixels.length; offset += 4) {
+    framePixels[offset] = 0;
+    framePixels[offset + 1] = 0;
+    framePixels[offset + 2] = 255;
+  }
+  const frames = sharp(framePixels, {
+    raw: { width: canvas.width, height: canvas.height * 2, channels: 4, pageHeight: canvas.height },
+  });
+  const cases = [
+    {
+      name: "SVG",
+      artifact: Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}"/>`),
+    },
+    { name: "animated GIF", artifact: await frames.clone().gif({ loop: 0, delay: [100, 100] }).toBuffer() },
+    { name: "multipage TIFF", artifact: await frames.clone().tiff().toBuffer() },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const executors = createHostExecutors({
+        capabilities: {
+          openai: { ocr: false, scene: false, completion: true },
+          gemini: { ocr: false, scene: false, completion: false },
+        },
+        invoke: async () => ({
+          ok: true, model: "host-image", output: { kind: "image", image: entry.artifact },
+        }),
+      });
+      const image = await png();
+      const result = await executors.openai.completion!({
+        image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
+      });
+
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.failure.status, "invalid_output");
+    });
+  }
+});
+
+test("host completion accepts single-frame PNG and JPEG artifacts", async () => {
+  for (const artifact of [
+    await png(),
+    await sharp({
+      create: { ...canvas, channels: 3, background: "#336699" },
+    }).jpeg().toBuffer(),
+  ]) {
+    const executors = createHostExecutors({
+      capabilities: {
+        openai: { ocr: false, scene: false, completion: true },
+        gemini: { ocr: false, scene: false, completion: false },
+      },
+      invoke: async () => ({
+        ok: true, model: "host-image", output: { kind: "image", image: artifact },
+      }),
+    });
+    const image = await png();
+    const result = await executors.openai.completion!({
+      image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
+    });
+
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal((await sharp(result.value.image).metadata()).format, "png");
+  }
 });
 
 test("transient transport is bounded and authentication advances without retry", async () => {
