@@ -120,7 +120,7 @@ exit 0; no output
 - `src/providers/provider-adapters.ts`
 - `tests/provider-adapters.test.ts`
 - `tests/provider-routing.test.ts`
-- `.superpowers/sdd/2026-09-05-model-fallback/final-fix-report.md`
+- `docs/verification/2026-09-05-model-fallback.md`
 
 ## Self-review and limitations
 
