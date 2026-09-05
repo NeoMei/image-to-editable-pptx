@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { watch as watchFileSystem } from "node:fs";
 import {
   chmod,
   lstat,
@@ -18,6 +19,7 @@ import test from "node:test";
 import {
   createFileHostBridge,
   type FileHostBridge,
+  type HostBridgeRequest,
   type HostBridgeResponse,
 } from "../src/providers/host-bridge.js";
 
@@ -60,6 +62,20 @@ async function waitForRequest(root: string): Promise<string> {
       // The bridge creates the request directory and files asynchronously.
     }
     await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  throw new Error("request directory was not created");
+}
+
+async function waitForRequestDirectory(root: string): Promise<string> {
+  const requestsRoot = join(root, "requests");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const entries = await readdir(requestsRoot);
+      if (entries.length === 1) return join(requestsRoot, entries[0]!);
+    } catch {
+      // The bridge creates the requests directory lazily.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
   }
   throw new Error("request directory was not created");
 }
@@ -136,6 +152,68 @@ test("hands a private request to the host and accepts atomic raw text success", 
   }
 });
 
+test("publishes request.json atomically only after every input is complete", async () => {
+  const context = await fixture(undefined, { timeoutMs: 2_000 });
+  const largePng = Buffer.alloc(4 * 1024 * 1024);
+  PNG.copy(largePng);
+  const resultPromise = context.bridge.invoke("openai", {
+    operation: "completion",
+    prompt: "x".repeat(900_000),
+    image: largePng,
+    canvas: { width: 1280, height: 720 },
+    hiddenMask: largePng,
+    protectedMask: largePng,
+  });
+  try {
+    const requestDirectory = await waitForRequestDirectory(context.root);
+    const published = new Promise<{ requestId: string }>((resolve, reject) => {
+      let observedPrivateTemporaryMarker = false;
+      const watcher = watchFileSystem(requestDirectory, (event, filename) => {
+        if (filename === ".request.json.tmp") {
+          observedPrivateTemporaryMarker = true;
+          return;
+        }
+        if (filename !== "request.json" || event !== "rename") return;
+        watcher.close();
+        void (async () => {
+          try {
+            assert.equal(observedPrivateTemporaryMarker, true);
+            const document = JSON.parse(
+              await readFile(join(requestDirectory, "request.json"), "utf8"),
+            ) as { requestId: string };
+            assert.deepEqual(
+              await Promise.all([
+                readFile(join(requestDirectory, "input.png")),
+                readFile(join(requestDirectory, "hidden-mask.png")),
+                readFile(join(requestDirectory, "protected-mask.png")),
+              ]),
+              [largePng, largePng, largePng],
+            );
+            resolve(document);
+          } catch (error) {
+            reject(error);
+          }
+        })();
+      });
+      setTimeout(() => {
+        watcher.close();
+        reject(new Error("request.json publication was not observed"));
+      }, 1_000).unref();
+    });
+    const request = await published;
+    await respondAtomically(requestDirectory, {
+      version: 1,
+      requestId: request.requestId,
+      status: "success",
+      model: "gpt-image-2",
+      text: "host response",
+    });
+    assert.equal((await resultPromise).ok, true);
+  } finally {
+    await context.cleanup();
+  }
+});
+
 test("returns unavailable immediately when capability is not explicitly callable", async () => {
   const context = await fixture({
     openai: { callable: false, operations: ["ocr"] },
@@ -152,6 +230,36 @@ test("returns unavailable immediately when capability is not explicitly callable
     if (!result.ok) {
       assert.equal(result.failure.status, "unavailable");
       assert.equal(result.failure.reason, "capability_unavailable");
+    }
+    await assert.rejects(readdir(join(context.root, "requests")), /ENOENT/);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("validates malformed runtime requests before checking capabilities", async () => {
+  const context = await fixture({
+    openai: { callable: true, operations: ["scene"] },
+  });
+  try {
+    for (const request of [
+      {
+        operation: "not-an-operation",
+        prompt: "ocr",
+        image: PNG,
+        canvas: { width: 1280, height: 720 },
+      },
+      null,
+    ]) {
+      const result = await context.bridge.invoke(
+        "openai",
+        request as unknown as HostBridgeRequest,
+      );
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.failure.status, "invalid_input");
+        assert.equal(result.failure.reason, "invalid_bridge_request");
+      }
     }
     await assert.rejects(readdir(join(context.root, "requests")), /ENOENT/);
   } finally {

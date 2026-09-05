@@ -6,6 +6,7 @@ import {
   mkdtemp,
   open,
   realpath,
+  rename,
 } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
@@ -442,18 +443,18 @@ export async function createFileHostBridge(
           failure: new ProviderFailure("unavailable", "capability_unavailable"),
         };
       }
-      if (!capabilities[provider][request.operation]) {
-        return {
-          ok: false,
-          failure: new ProviderFailure("unavailable", "capability_unavailable"),
-        };
-      }
       try {
         validateRequest(request);
       } catch {
         return {
           ok: false,
           failure: new ProviderFailure("invalid_input", "invalid_bridge_request"),
+        };
+      }
+      if (!capabilities[provider][request.operation]) {
+        return {
+          ok: false,
+          failure: new ProviderFailure("unavailable", "capability_unavailable"),
         };
       }
       let requestDirectory: string;
@@ -499,9 +500,17 @@ export async function createFileHostBridge(
             ? {}
             : { protectedMaskFile: "protected-mask.png" }),
         };
+        const temporaryRequestPath = join(
+          requestDirectory,
+          ".request.json.tmp",
+        );
         await writePrivateFile(
-          join(requestDirectory, "request.json"),
+          temporaryRequestPath,
           JSON.stringify(requestDocument),
+        );
+        await rename(
+          temporaryRequestPath,
+          join(requestDirectory, "request.json"),
         );
       } catch {
         return localFailure();
