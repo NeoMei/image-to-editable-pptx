@@ -240,12 +240,12 @@ test("source-locks visible bytes when accepted provider output changes every out
 
 test("rejects bad hidden content after one provider request", async () => {
   const current = await qualifiedFixture();
+  const retainedFront = (await sourceLockedOcclusionFixture()).pngs.retainedFront;
   let calls = 0;
   const outcome = await evaluateOccludedCandidate(current.input, {
     async complete(request) {
       calls += 1;
-      return providerReturning((await sourceLockedOcclusionFixture()).pngs.retainedFront)
-        .complete(request);
+      return providerReturning(retainedFront).complete(request);
     },
   });
   assert.equal(calls, 1);
