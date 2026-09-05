@@ -2,6 +2,7 @@ import type { AssetProvenance } from "../contracts.js";
 import type { SemanticCandidate } from "../scene/plan.js";
 
 export type OcclusionCompletionProvider = {
+  ownsTimeout?: boolean;
   complete(request: {
     crop: Buffer;
     hiddenMask: Buffer;

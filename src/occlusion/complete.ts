@@ -4,6 +4,7 @@ import sharp from "sharp";
 import { z } from "zod";
 
 import { sanitizeProviderMetadata } from "../recording.js";
+import { RoutingTerminalError } from "../providers/routing.js";
 import type {
   CompletedCandidate,
   OcclusionCompletionInput,
@@ -508,7 +509,8 @@ export async function completeOccludedCandidate(
     );
     if (derived === undefined) return undefined;
     evidence = derived;
-  } catch {
+  } catch (error) {
+    if (error instanceof RoutingTerminalError) throw error;
     return undefined;
   }
 
@@ -527,15 +529,15 @@ export async function completeOccludedCandidate(
   };
   let sanitizedMetadata: z.infer<ReturnType<typeof z.json>>;
   try {
-    const providerResult: unknown = await callWithTimeout(
-      provider.complete({
-        crop: input.crop,
-        hiddenMask,
-        protectedVisibleMask: input.visibleMask,
-        semanticContext: [...input.semanticContext],
-      }),
-      input.timeoutMs,
-    );
+    const providerPromise = provider.complete({
+      crop: input.crop,
+      hiddenMask,
+      protectedVisibleMask: input.visibleMask,
+      semanticContext: [...input.semanticContext],
+    });
+    const providerResult: unknown = provider.ownsTimeout === true
+      ? await providerPromise
+      : await callWithTimeout(providerPromise, input.timeoutMs);
     if (
       typeof providerResult !== "object" ||
       providerResult === null ||
@@ -560,7 +562,8 @@ export async function completeOccludedCandidate(
     sanitizedMetadata = z.json().parse(
       sanitizeProviderMetadata(completion.sanitizedMetadata),
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof RoutingTerminalError) throw error;
     return undefined;
   }
 

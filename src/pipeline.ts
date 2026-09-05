@@ -28,6 +28,7 @@ import { z } from "zod";
 
 import {
   ANALYSIS_LEDGER_NAME,
+  AnalysisRoutingReportSchema,
   readAnalysisPackage,
   readVerifiedAnalysisArtifact,
   writeAnalysisPackageV2,
@@ -35,7 +36,13 @@ import {
   type AnalysisPackageV2,
   type CompletionArtifact,
 } from "./analysis/package.js";
-import { loadConfig, type AppConfig } from "./config.js";
+import {
+  loadConfig,
+  loadRoutingConfig,
+  type AppConfig,
+  type ProviderRoutingConfig,
+} from "./config.js";
+import type { FileHostBridge } from "./providers/host-bridge.js";
 import {
   CandidateDecisionSchema,
   OcrResultSchema,
@@ -72,6 +79,7 @@ import {
 } from "./occlusion/complete.js";
 import type { CompletedCandidate } from "./occlusion/contracts.js";
 import { analyzeScene, refineSceneRegions } from "./providers/qwen-scene.js";
+import { createScenePrompt } from "./providers/qwen-scene-prompt.js";
 import {
   parseQwenOcrResponse,
   recognizeText,
@@ -80,6 +88,7 @@ import {
   parseQwenVisionContent,
 } from "./providers/qwen-vision.js";
 import { createWanxOcclusionCompletionProvider } from "./providers/wanx-edit.js";
+import { ProviderRoutingSession } from "./providers/provider-routing.js";
 import {
   sanitizeHttpResponseBody,
   type ProviderResponseObserver,
@@ -203,13 +212,21 @@ export type RunPipelineOptions = {
   replay?: ReplayInputs;
   record?: boolean;
   config?: AppConfig;
+  routingConfig?: ProviderRoutingConfig;
+  hostBridge?: FileHostBridge;
   fidelityBuild?: FidelityBuild;
   requiredTextCount?: number;
 };
 
 export type AnalyzeOptions = Pick<
   RunPipelineOptions,
-  "imagePath" | "outDir" | "replay" | "record" | "config"
+  | "imagePath"
+  | "outDir"
+  | "replay"
+  | "record"
+  | "config"
+  | "routingConfig"
+  | "hostBridge"
 >;
 
 export type BuildOptions = {
@@ -597,9 +614,15 @@ async function completeEligibleCandidates(input: {
   source: SourceCanvas;
   ocr: OcrResult;
   scene: SceneGraph;
-  config: AppConfig;
+  config?: AppConfig;
+  provider?: ReturnType<ProviderRoutingSession["completionProvider"]>;
+  maxOcclusionCompletions?: number;
+  requestTimeoutMs?: number;
 }): Promise<{ artifacts: CompletionArtifact[]; requests: number }> {
-  const limit = input.config.maxOcclusionCompletions ?? 4;
+  const limit =
+    input.maxOcclusionCompletions ??
+    input.config?.maxOcclusionCompletions ??
+    4;
   const budget = new OcclusionCompletionBudget(limit);
   if (limit === 0) return { artifacts: [], requests: 0 };
 
@@ -618,7 +641,14 @@ async function completeEligibleCandidates(input: {
     }
   }
 
-  const provider = createWanxOcclusionCompletionProvider(input.config);
+  const provider =
+    input.provider ??
+    (input.config === undefined
+      ? undefined
+      : createWanxOcclusionCompletionProvider(input.config));
+  if (provider === undefined) {
+    throw new Error("Completion provider configuration is unavailable");
+  }
   let requests = 0;
   const countedProvider = {
     async complete(request: Parameters<typeof provider.complete>[0]) {
@@ -664,7 +694,8 @@ async function completeEligibleCandidates(input: {
           `relation-count:${candidate.relations.length}`,
         ],
         budget,
-        timeoutMs: input.config.requestTimeoutMs,
+        timeoutMs:
+          input.requestTimeoutMs ?? input.config?.requestTimeoutMs ?? 120_000,
       },
       countedProvider,
     );
@@ -702,6 +733,165 @@ async function completeEligibleCandidates(input: {
     });
   }
   return { artifacts, requests };
+}
+
+async function analyzeWithRouting(input: {
+  options: AnalyzeOptions;
+  outDir: string;
+  source: SourceCanvas;
+  canonicalImage: Buffer;
+  startedAt: number;
+}): Promise<AnalysisResultV2> {
+  const routingConfig = input.options.routingConfig!;
+  const alibabaObservers = routingConfig.alibaba === undefined
+    ? undefined
+    : {
+        ocr: responseObserver(input.outDir, "ocr", routingConfig.alibaba.apiKey),
+        scene: responseObserver(input.outDir, "vision", routingConfig.alibaba.apiKey),
+      };
+  const session = new ProviderRoutingSession({
+    routingConfig,
+    ...(input.options.hostBridge === undefined
+      ? {}
+      : { hostBridge: input.options.hostBridge }),
+    ...(alibabaObservers === undefined ? {} : { alibabaObservers }),
+  });
+  let ocrDuration = 0;
+  let fullVisionDuration = 0;
+  try {
+    const ocrStartedAt = performance.now();
+    const ocr = await session.ocr(input.canonicalImage, {
+      width: input.source.width,
+      height: input.source.height,
+    }).finally(() => { ocrDuration = elapsed(ocrStartedAt); });
+
+    const fullVisionStartedAt = performance.now();
+    const fullScene = await session.scene(
+      input.canonicalImage,
+      { width: input.source.width, height: input.source.height },
+      createScenePrompt({ width: input.source.width, height: input.source.height }),
+    ).finally(() => { fullVisionDuration = elapsed(fullVisionStartedAt); });
+
+    const regionalStartedAt = performance.now();
+    const refined = await refineSceneRegions(
+      input.canonicalImage,
+      fullScene.value,
+      { maxRegionAnalysis: routingConfig.maxRegionAnalysis },
+      undefined,
+      async (image, canvas, prompt) => {
+        const result = await session.scene(image, canvas, prompt);
+        return { graph: result.value, model: result.model };
+      },
+    );
+    const regionalVisionDuration = elapsed(regionalStartedAt);
+    const refinements = await writeRefinementArtifacts(input.outDir, refined);
+
+    const completionStartedAt = performance.now();
+    const completion = await completeEligibleCandidates({
+      outDir: input.outDir,
+      source: input.source,
+      ocr: ocr.value,
+      scene: refined.graph,
+      provider: session.completionProvider(),
+      maxOcclusionCompletions: routingConfig.maxOcclusionCompletions,
+      requestTimeoutMs:
+        input.options.hostBridge === undefined
+          ? routingConfig.requestTimeoutMs
+          : Math.max(routingConfig.requestTimeoutMs, 10 * 60 * 1_000),
+    });
+    const completionDuration = elapsed(completionStartedAt);
+    const canonicalScene = SceneGraphSchema.parse(refined.graph) as SceneGraph;
+    await Promise.all([
+      writeRecording(join(input.outDir, "ocr.json"), ocr.value),
+      writeRecording(join(input.outDir, "scene-graph.json"), canonicalScene),
+    ]);
+    const [ocrHash, sceneHash] = await Promise.all([
+      sha256File(join(input.outDir, "ocr.json")),
+      sha256File(join(input.outDir, "scene-graph.json")),
+    ]);
+    const successfulCompletionModels = session.report.operations
+      .filter((operation) => operation.operation === "completion" && operation.outcome === "success")
+      .map((operation) => operation.selectedModel)
+      .filter((model): model is string => model !== undefined);
+    const regionalModel = refined.effectiveModels?.at(-1) ?? fullScene.model;
+    const routing = AnalysisRoutingReportSchema.parse(
+      JSON.parse(JSON.stringify({
+        version: 1,
+        ...session.report,
+        transportAttempts: session.transportAttempts,
+      })),
+    );
+    const ledger: AnalysisPackageV2 = {
+      analysisVersion: 2,
+      mode: "live",
+      recorded: input.options.record === true,
+      canvas: { width: input.source.width, height: input.source.height },
+      source: {
+        path: "source.rgba",
+        sha256: sha256(input.source.rgba),
+        originalSha256: sha256(input.source.sourceBytes),
+        format: input.source.format,
+      },
+      ocr: { path: "ocr.json", sha256: ocrHash },
+      scene: { path: "scene-graph.json", sha256: sceneHash },
+      refinements,
+      completions: completion.artifacts,
+      requests: {
+        ocr: 1,
+        fullVision: 1,
+        regionalVision: refined.requests.length,
+        completion: completion.requests,
+      },
+      models: {
+        ocr: ocr.model,
+        fullVision: fullScene.model,
+        regionalVision: regionalModel,
+        ...(successfulCompletionModels.length === 0
+          ? {}
+          : { completion: successfulCompletionModels.at(-1)! }),
+      },
+      durationsMs: {
+        ocr: ocrDuration,
+        fullVision: fullVisionDuration,
+        regionalVision: regionalVisionDuration,
+        completion: completionDuration,
+        analyze: elapsed(input.startedAt),
+      },
+      warnings: [...refined.warnings],
+      routing,
+    };
+    await writeAnalysisPackageV2({
+      directory: input.outDir,
+      canvas: input.source,
+      ocr: ocr.value,
+      scene: canonicalScene,
+      refinements,
+      completions: completion.artifacts,
+      ledger,
+    });
+    await Promise.all([
+      rm(join(input.outDir, "raw-responses"), { recursive: true, force: true }),
+      rm(join(input.outDir, "parse-errors"), { recursive: true, force: true }),
+    ]);
+    return {
+      analysisVersion: 2,
+      source: input.source,
+      ocr: ocr.value,
+      scene: canonicalScene,
+      ledger,
+      directory: input.outDir,
+    };
+  } catch (error) {
+    await writeProviderMetadataRecording(
+      join(input.outDir, "routing-report.json"),
+      JSON.parse(JSON.stringify({
+        version: 1,
+        ...session.report,
+        transportAttempts: session.transportAttempts,
+      })),
+    );
+    throw error;
+  }
 }
 
 async function analyzeIntoDirectory(
@@ -762,8 +952,21 @@ async function analyzeIntoDirectory(
     return { analysisVersion: 1, ocr, vision, ledger };
   }
 
-  const config = options.config ?? loadConfig();
   const canonicalImage = await canonicalLocalImage(source);
+  const routingConfig =
+    options.routingConfig ??
+    (options.config === undefined ? loadRoutingConfig() : undefined);
+  if (routingConfig !== undefined) {
+    return analyzeWithRouting({
+      options: { ...options, routingConfig },
+      outDir,
+      source,
+      canonicalImage,
+      startedAt,
+    });
+  }
+
+  const config = options.config ?? loadConfig();
   let ocrDuration = 0;
   let fullVisionDuration = 0;
   const ocrStartedAt = performance.now();
@@ -1746,15 +1949,19 @@ export async function runPipeline(
     targetPath: options.outDir,
     sourceImagePath: options.imagePath,
     build: async (stagingDir, targetDir) => {
-      const config =
-        options.config ??
-        (options.replay === undefined ? loadConfig() : undefined);
+      const config = options.config;
       const analyzed = await analyzeIntoDirectory({
         imagePath: options.imagePath,
         outDir: stagingDir,
         ...(options.replay === undefined ? {} : { replay: options.replay }),
         ...(options.record === undefined ? {} : { record: options.record }),
         ...(config === undefined ? {} : { config }),
+        ...(options.routingConfig === undefined
+          ? {}
+          : { routingConfig: options.routingConfig }),
+        ...(options.hostBridge === undefined
+          ? {}
+          : { hostBridge: options.hostBridge }),
       });
       let analysis: AnalysisResult = analyzed;
       if (analyzed.analysisVersion === 2) {

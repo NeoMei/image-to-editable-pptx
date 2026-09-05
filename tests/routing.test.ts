@@ -2,12 +2,32 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  RoutingTerminalError,
   ProviderFailure,
   ROUTING_CANDIDATES,
   SerialOperationRouter,
   type CandidateExecutor,
   type CandidateKey,
 } from "../src/providers/routing.js";
+
+test("typed routing terminal error preserves only safe terminal routing data", () => {
+  const result = {
+    sequence: 2,
+    operation: "scene" as const,
+    outcome: "fatal" as const,
+    selectedCandidate: undefined,
+    selectedModel: undefined,
+    attempts: [{
+      candidate: "api-openai" as const,
+      status: "policy_refused" as const,
+      disposition: "policy_refused" as const,
+    }],
+  };
+  const error = new RoutingTerminalError(result);
+  assert.equal(error.name, "RoutingTerminalError");
+  assert.equal(error.result, result);
+  assert.doesNotMatch(error.message, /secret|provider response/i);
+});
 
 function success<T>(model: string, value: T) {
   return { ok: true, validated: true, model, value } as const;

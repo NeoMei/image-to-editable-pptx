@@ -10,6 +10,7 @@ import {
   type OcclusionCompletionInput,
   type OcclusionCompletionProvider,
 } from "../src/occlusion/complete.js";
+import { RoutingTerminalError } from "../src/providers/routing.js";
 
 const WIDTH = 9;
 const HEIGHT = 5;
@@ -420,6 +421,29 @@ test("provider failures and timeouts leave the original candidate in the backgro
       },
     ),
     undefined,
+  );
+});
+
+test("fatal routed completion escapes the optional quality fallback", async () => {
+  const { input } = await fixture();
+  const terminal = new RoutingTerminalError({
+    sequence: 1,
+    operation: "completion",
+    outcome: "fatal",
+    selectedCandidate: undefined,
+    selectedModel: undefined,
+    attempts: [{
+      candidate: "api-openai",
+      status: "policy_refused",
+      disposition: "policy_refused",
+    }],
+  });
+  await assert.rejects(
+    completeOccludedCandidate(input, {
+      ownsTimeout: true,
+      async complete() { throw terminal; },
+    }),
+    terminal,
   );
 });
 

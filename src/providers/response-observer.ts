@@ -4,6 +4,7 @@ export type ProviderResponseObserver = {
   recordRawResponse(payload: unknown): Promise<void>;
   recordRawHttpResponse(body: string): Promise<void>;
   recordParseError(error: unknown): Promise<void>;
+  recordTransportAttempt?(): void;
 };
 
 export const MAX_PROVIDER_HTTP_BODY_CHARS = 65_536;

@@ -152,6 +152,22 @@ export type RoutingFailure = RoutingResultBase &
 
 export type RoutingResult<T> = RoutingSuccess<T> | RoutingFailure;
 
+/** Terminal routing outcome suitable for propagation through optional stages. */
+export class RoutingTerminalError extends Error {
+  readonly result: RoutingFailure;
+
+  constructor(result: RoutingFailure) {
+    super(`Provider routing ${result.outcome} for ${result.operation}`);
+    this.name = "RoutingTerminalError";
+    this.result = result;
+  }
+}
+
+export function requireRoutingSuccess<T>(result: RoutingResult<T>): RoutingSuccess<T> {
+  if (result.outcome !== "success") throw new RoutingTerminalError(result);
+  return result;
+}
+
 export type RoutingOperationReport = Readonly<{
   sequence: number;
   operation: ProviderOperation;

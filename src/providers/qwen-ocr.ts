@@ -162,6 +162,7 @@ export async function recognizeText(
   observer?: ProviderResponseObserver,
 ): Promise<OcrResult> {
   const baseUrl = requireSafeOcrBase(config);
+  observer?.recordTransportAttempt?.();
   const response = await fetch(
     `${baseUrl}/services/aigc/multimodal-generation/generation`,
     {
