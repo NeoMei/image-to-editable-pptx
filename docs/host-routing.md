@@ -19,7 +19,45 @@ next candidate. `policy_refused`, `invalid_input`, `invalid_output`, and
 `local_failure` are fatal and stop the run. A missing candidate is recorded as
 `unavailable` / `missing_candidate`; it does not make a transport request.
 
-## Discover capabilities; do not infer them
+## Automatic local OpenCodex host
+
+Without `--host-bridge`, the CLI's live `analyze` and `run` commands automatically
+run `ocx access endpoints --json` and query the public loopback `/v1/models`
+endpoint. Existing signed-in OpenAI and Google Antigravity accounts can therefore
+serve host candidates without `OPENAI_API_KEY` or `GEMINI_API_KEY`. No OAuth
+files, cookies, or internal tokens are read; account/provider configuration is
+not changed. The local public API must accept unauthenticated local
+admission; a protected or stopped endpoint is unavailable, not a reason to extract
+credentials. Only literal loopback HTTP endpoints are accepted; redirects are rejected.
+
+The default analysis routes are `openai/gpt-5.6-sol` and
+`google-antigravity/gemini-3.1-pro`; override them using
+`OPENCODEX_OPENAI_ANALYSIS_MODEL` and `OPENCODEX_GEMINI_ANALYSIS_MODEL` with a model
+advertised by the matching provider with vision support. Catalog entries create
+candidates, not proof of access: only a real successful response and validated
+operation result establish success. OpenAI uses streaming Responses (required by
+ChatGPT accounts); Gemini uses non-streaming Responses. Completion uses OpenAI
+`gpt-image-2` JSON image edits or Gemini `gemini-3.1-flash-image` with source and masks.
+The JSON edit shape follows the [Codex image client](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/endpoint/images.rs),
+not the official Platform adapter's multipart upload. All three images are sent
+as labeled references; local mask/recomposition checks still gate acceptance.
+Before advertising or invoking OpenAI completion, `ocx config get images --json`
+checks public routing settings. A custom image provider, enabled xAI bridge, or
+unknown setting disables that candidate so it cannot silently bypass the fixed
+provider order. Keep proxy routing settings stable during a run. The default
+image-edit relay cannot fall back to Gemini; its Gemini fallback is generation-only.
+Gemini's returned opaque `/v1/opencodex/artifacts/<image-id>` is retrieved only
+from that same loopback origin, with byte and geometry validation.
+
+Set `IMAGE_PPT_OPENCODEX=off` to disable discovery. An explicit `--host-bridge`
+takes precedence and uses only that file bridge. Library callers can explicitly
+pass `await discoverOpenCodexBridge()` as `hostBridge`; library/offline builds do
+not discover accounts implicitly. Each bridge invocation makes one inference
+attempt; Gemini completion also retrieves its image artifact. Discovery and
+artifact GETs are not counted as inference attempts. Official APIs and Alibaba
+retain the fixed fallback order above.
+
+## Discover registered-tool capabilities for a file bridge
 
 The host agent must inspect its current registered tools before creating a
 bridge. A model catalog entry, ordinary agent reasoning, or an image editing
@@ -32,7 +70,7 @@ image with the requested canvas geometry.
 Do not use browser or UI automation as a provider fallback. Do not read or
 harvest consumer web-session cookies, `localStorage`, session storage, browser
 profiles, or internal host/session tokens to manufacture API access. Host
-availability comes only from an already registered callable tool; API
+availability for a file bridge comes only from an already registered callable tool; API
 availability comes only from the documented environment variables.
 
 The bridge directory must already exist, be owned by the current user, and have

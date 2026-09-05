@@ -97,7 +97,7 @@ function safeJson(text: string): unknown | undefined {
   }
 }
 
-function containsOpenAiPolicyRefusal(payload: unknown): boolean {
+export function containsOpenAiPolicyRefusal(payload: unknown): boolean {
   const pending: unknown[] = [payload];
   while (pending.length > 0) {
     const current = pending.pop();
@@ -117,7 +117,7 @@ function containsOpenAiPolicyRefusal(payload: unknown): boolean {
   return false;
 }
 
-function containsGeminiPolicyRefusal(payload: unknown): boolean {
+export function containsGeminiPolicyRefusal(payload: unknown): boolean {
   const pending: unknown[] = [payload];
   while (pending.length > 0) {
     const current = pending.pop();
@@ -213,21 +213,22 @@ export function parseValidatedOcrText(text: string, canvas: CanvasSize): OcrResu
   return validateOcr(payload, CanvasSizeSchema.parse(canvas));
 }
 
-function openAiText(payload: unknown): string | undefined {
+export function openAiText(payload: unknown): string | undefined {
   const root = object(payload);
   const output = root?.output;
   if (!Array.isArray(output)) return undefined;
+  const texts: string[] = [];
   for (const item of output) {
     const content = object(item)?.content;
     if (!Array.isArray(content)) continue;
     for (const part of content) {
       const record = object(part);
       if (record?.type === "output_text" && typeof record.text === "string") {
-        return record.text;
+        texts.push(record.text);
       }
     }
   }
-  return undefined;
+  return texts.length === 0 ? undefined : texts.join("\n");
 }
 
 function effectiveOpenAiModel(payload: unknown, configured: string): string {
@@ -320,7 +321,7 @@ async function openAiAlphaMask(
   return sharp(rgba, { raw: { width: canvas.width, height: canvas.height, channels: 4 } }).png().toBuffer();
 }
 
-async function prepareCompletion(input: CompletionAdapterInput): Promise<PreparedCompletion> {
+export async function prepareCompletion(input: CompletionAdapterInput): Promise<PreparedCompletion> {
   CanvasSizeSchema.parse(input.canvas);
   const source = await sharp(input.image).metadata();
   if (source.width !== input.canvas.width || source.height !== input.canvas.height) {
@@ -352,7 +353,7 @@ async function prepareCompletion(input: CompletionAdapterInput): Promise<Prepare
   };
 }
 
-function paddedCompletionPrompt(
+export function paddedCompletionPrompt(
   prompt: string,
   prepared: PreparedCompletion,
 ): string {
@@ -360,7 +361,7 @@ function paddedCompletionPrompt(
   return `${prompt}\nThe original crop occupies x=${left}, y=${top}, width=${width}, height=${height} on the supplied padded canvas. Treat transparent padding as protected context and edit only the hidden-mask region.`;
 }
 
-async function normalizeGeneratedImage(
+export async function normalizeGeneratedImage(
   image: Buffer,
   mimeType: string,
   prepared: PreparedCompletion,

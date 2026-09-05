@@ -55,7 +55,7 @@ opencode debug skill
 
 `host-openai` → `api-openai` → `host-gemini` → `api-gemini` → `api-alibaba`。
 
-宿主候选只在当前 Agent 实际发现了能完成该 operation 的已注册工具时通过 `--host-bridge <private-dir>` 声明；模型目录、普通推理能力、浏览器/UI 自动化或仅能编辑图片的工具不是 OCR/场景 JSON 能力证明。不得通过浏览器消费者会话采集 cookie、`localStorage`、session 数据、浏览器 profile 或宿主内部 token 来伪造 API 访问。没有实际工具时必须省略，不能猜测或伪造模型结果。完整的可复制 capability manifest、request/response 示例、原子响应轮询流程与 schema 见 [Host routing and file bridge protocol](docs/host-routing.md)。
+默认会通过 `ocx access endpoints --json` 自动发现本地 OpenCodex 公共接口，使用已登录的 OpenAI / Google Antigravity 账号作为宿主候选，无需另配官方 API Key。分析默认使用 `gpt-5.6-sol` / `gemini-3.1-pro`，可通过 `OPENCODEX_OPENAI_ANALYSIS_MODEL` / `OPENCODEX_GEMINI_ANALYSIS_MODEL` 选择对应供应商目录中的视觉模型；`IMAGE_PPT_OPENCODEX=off` 关闭自动发现。显式 `--host-bridge <private-dir>` 优先使用已注册工具的文件桥接。模型目录只用于发现候选，实际响应及内容校验通过才算成功。不会读取或改变 OAuth、cookie、浏览器会话或宿主内部 token。协议、故障分类和桥接示例见 [Host routing and file bridge protocol](docs/host-routing.md)。
 
 API 凭证都是可选的，缺少时跳过该 API 候选：
 
@@ -66,7 +66,7 @@ export DASHSCOPE_API_KEY='<your-dashscope-key>'
 export DASHSCOPE_WORKSPACE_ID='<your-dashscope-workspace-id>'
 ```
 
-可用 `OPENAI_ANALYSIS_MODEL` / `OPENAI_IMAGE_MODEL` 和 `GEMINI_ANALYSIS_MODEL` / `GEMINI_IMAGE_MODEL` 覆盖 API 默认模型；当前默认分别为 `gpt-4.1` / `gpt-image-2`、`gemini-2.5-flash` / `gemini-3.1-flash-image`，百炼为 `qwen3.5-ocr` / `qwen3-vl-plus` / `wanx2.1-imageedit`。宿主路由的有效模型名必须来自实际工具元数据，不使用这些 API 默认值代填。
+可用 `OPENAI_ANALYSIS_MODEL` / `OPENAI_IMAGE_MODEL` 和 `GEMINI_ANALYSIS_MODEL` / `GEMINI_IMAGE_MODEL` 覆盖 API 默认模型；当前默认分别为 `gpt-4.1` / `gpt-image-2`、`gemini-2.5-flash` / `gemini-3.1-flash-image`，百炼为 `qwen3.5-ocr` / `qwen3-vl-plus` / `wanx2.1-imageedit`。文件桥接记录实际工具元数据中的模型；OpenCodex 记录响应模型，响应未带模型时记录成功请求的明确模型，不用目录标签冒充实际调用证明。
 
 只有 `unavailable`、`auth_unavailable`、`retryable_exhausted` 会推进到下一候选；`policy_refused`、`invalid_input`、`invalid_output`、`local_failure` 是致命边界，会停止整个运行。每个 operation 都有独立的只向前 sticky 游标，成功后下一次从该候选开始，不会在同一运行中回退到更早候选。
 
@@ -75,7 +75,7 @@ export DASHSCOPE_WORKSPACE_ID='<your-dashscope-workspace-id>'
 ## CLI：网络分析与离线构建
 
 ```bash
-# 生成 self-contained analysis package v2；宿主工具需追加 --host-bridge
+# 生成 self-contained analysis package v2；自动发现本地 OpenCodex，文件桥接可选
 npm run cli -- analyze <source.png> --out <analysis-dir> [--host-bridge <private-dir>] [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
 
 # 只读 analysis package v2 完成分层、修复、QA 和 PPTX 导出；不读取源图，不读取凭证，不访问网络

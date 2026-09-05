@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { loadRoutingConfig, type ProviderRoutingConfig } from "./config.js";
 import { createFileHostBridge } from "./providers/host-bridge.js";
+import { discoverOpenCodexBridge } from "./providers/opencodex-bridge.js";
 import {
   analyzeSlide,
   buildSlide,
@@ -77,12 +78,14 @@ export type CliCommand =
   | RunCommand;
 
 type CliDependencies = {
+  discoverHost?: typeof discoverOpenCodexBridge;
   analyze(options: AnalyzeOptions): Promise<unknown>;
   build(options: BuildOptions): Promise<unknown>;
   run(options: RunPipelineOptions): Promise<unknown>;
 };
 
 const defaultDependencies: CliDependencies = {
+  discoverHost: discoverOpenCodexBridge,
   analyze: analyzeSlide,
   build: buildSlide,
   run: runPipeline,
@@ -290,7 +293,7 @@ export async function runCli(
     {
       const routingConfig = applyAnalysisLimits(loadRoutingConfig(env), command);
       const hostBridge = command.hostBridge === undefined
-        ? undefined
+        ? await dependencies.discoverHost?.(env, { requestTimeoutMs: routingConfig.requestTimeoutMs })
         : await createFileHostBridge(command.hostBridge);
       await dependencies.analyze({
         imagePath: command.image,
@@ -324,7 +327,7 @@ export async function runCli(
     {
       const routingConfig = applyAnalysisLimits(loadRoutingConfig(env), command);
       const hostBridge = command.hostBridge === undefined
-        ? undefined
+        ? await dependencies.discoverHost?.(env, { requestTimeoutMs: routingConfig.requestTimeoutMs })
         : await createFileHostBridge(command.hostBridge);
       await dependencies.run({
         imagePath: command.image,
