@@ -4,9 +4,10 @@
 
 This checkpoint covers only the source-local appearance helper. It does not
 integrate the helper into the completion gate, call a provider, validate a live
-response, publish an artifact, or establish release readiness. Constants were
-selected and frozen against independently labeled synthetic raster fixtures
-before any live acceptance work.
+response, publish an artifact, or establish release readiness. The task brief
+supplied initial threshold candidates. Offline examples were labeled before
+running the helper, and those examples were compared before the candidate values
+were frozen. No threshold search used a live response.
 
 The base fixture is a 32-by-24 cream canvas containing a low-variation blue rear
 rectangle behind a separable orange front bar. Its opposing contact endpoints
@@ -19,15 +20,53 @@ fringe, and an extra disconnected rear-colored island. Additional cases cover
 one-sided/no evidence, same-color layers, excessive rear variation, gradients,
 alternate palettes, a two-times raster scale, and diagonal source alpha fringes.
 
-| Quantity | Units | Boundary examples | Initial result | Frozen value |
-| --- | --- | --- | --- | --- |
-| Samples per source appearance class | unique opaque pixels | 8 background samples qualified; 7 failed with `insufficient_evidence` | separated the labeled pair | minimum 8 |
-| Source variation | p95 of per-pixel maximum RGB-channel distance from the per-channel median | delta 6 qualified; delta 7 failed with `ambiguous_appearance`; the larger gradient also failed | separated uniform/gradient fixtures | maximum 6 levels |
-| Source palette separation | maximum RGB-channel distance between class medians | 36 qualified; 35 and identical rear/front colors failed with `ambiguous_appearance` | separated the labeled pair | minimum 36 levels |
-| Candidate palette distance | maximum RGB-channel distance from a source class median | rear delta 12 accepted; delta 13 and a tied class failed with `ambiguous_appearance` | separated the labeled pair | maximum 12 levels |
-| Candidate interior alpha | 8-bit alpha | 240 accepted; 239 and the glowing edge failed with `ambiguous_appearance` | separated opaque/fringe fixtures | minimum 240 |
-| Contact seam delta | maximum RGB-channel distance for adjacent source-visible/generated pixels | 12 accepted; 13 failed with `seam_mismatch` | separated the labeled pair | maximum 12 levels |
-| Mask support | 8-bit mask/alpha | inherited support handling, not recalibrated here | preserves the existing contract | minimum 16 |
+### Independent labeled comparison
+
+These examples are separate from the one-level boundary tests. Their values are
+not placed at the proposed cutoff. The positive and negative completion returns
+use the same source, geometry, masks, contacts, and background pixels, so the
+comparison exercises returned hidden content rather than a provider stub or a
+different shape.
+
+| Pre-labeled example | Measured fixture property | Observed helper result |
+| --- | --- | --- |
+| mildly varied source rear | source rear p95 deviation 4 | qualified |
+| rough source rear beyond flat-color scope | source rear p95 deviation 14 | rejected `ambiguous_appearance` |
+| base separable source | minimum palette separation 190 | qualified |
+| rear/front palettes too close to distinguish | minimum palette separation 28 | rejected `ambiguous_appearance` |
+| enough local context | 10 identifiable opaque background samples | qualified |
+| sparse local context | 6 identifiable opaque background samples | rejected `insufficient_evidence` |
+| subtly varied rear continuation | interior candidate distance up to 4 and alpha 246 | accepted with 64 generated pixels |
+| near-rear impostor with identical geometry | interior candidate distance 17; source-colored contact edge retained | rejected `ambiguous_appearance` |
+| semi-opaque glowing contact edge | candidate alpha 218 | rejected `ambiguous_appearance` |
+| bounded continuation seam | source-to-returned seam delta 8 | accepted |
+| visible bad continuation seam | source-to-returned seam delta 14 | rejected `seam_mismatch` |
+
+All initial candidates from the task brief separated this pre-labeled set; none
+failed it. Counterfactual candidates also show that separation was meaningful:
+a sample minimum of 6 admits the sparse case while 11 rejects the enough-context
+case; source p95 3 rejects the mild case while 14 admits the rough case; palette
+separation 28 admits the close-palette case while 191 rejects the base source;
+candidate distance 3 rejects the varied positive while 17 admits the impostor;
+interior alpha 218 admits the glow while 247 rejects the positive; and seam delta
+7 rejects the bounded seam while 14 admits the visible bad seam. These are
+offline fixture observations, not claims about product-wide distributions.
+
+### Frozen boundaries
+
+The following one-level checks verify inclusive/exclusive implementation
+semantics. They did not select the thresholds by themselves.
+
+| Quantity | Units | Boundary check | Frozen value |
+| --- | --- | --- | --- |
+| Samples per source appearance class | unique opaque pixels | 8 qualified; 7 failed | minimum 8 |
+| Source variation | p95 maximum RGB-channel distance from per-channel median | 6 qualified; 7 failed | maximum 6 levels |
+| Source palette separation | maximum RGB-channel distance between class medians | 36 qualified; 35 failed | minimum 36 levels |
+| Candidate palette distance | maximum RGB-channel distance from a source class median | 12 accepted; 13 failed | maximum 12 levels |
+| Candidate interior alpha | 8-bit alpha | 240 accepted; 239 failed | minimum 240 |
+| Source contact interior alpha | 8-bit alpha | 240 accepted; 239 failed | minimum 240 |
+| Contact seam delta | maximum RGB-channel distance for adjacent source-visible/generated pixels | 12 accepted; 13 failed | maximum 12 levels |
+| Mask support | 8-bit mask/alpha | inherited, not recalibrated here | minimum 16 |
 
 Opaque candidate pixels classified as background are excluded from generated
 support. Transparent returned pixels do not create support. Front-classified
@@ -35,7 +74,8 @@ pixels fail as `residual_occluder`; unknown opaque pixels and unreliable alpha
 fringes fail as `ambiguous_appearance`. Missing contact continuation and
 disconnected rear-colored islands fail as `contour_mismatch`. Returned changes
 outside the hidden mask and on visible support are counted only as diagnostics;
-the helper does not copy or composite any returned pixels.
+the helper does not copy or composite any returned pixels. Overlapping visible
+and hidden support is malformed geometry and is rejected before classification.
 
 This calibration is deliberately finite: flat, low-variation, locally separable
 colors at the tested raster scales. It is not evidence for textures, gradients,

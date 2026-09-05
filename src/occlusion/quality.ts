@@ -67,7 +67,7 @@ function geometryIsValid(input: AppearanceInput): boolean {
     return false;
   }
   const pixelCount = width * height;
-  return (
+  const validLengthsAndContacts =
     Number.isSafeInteger(pixelCount) &&
     rgba.length === pixelCount * 4 &&
     input.visible.length === pixelCount &&
@@ -75,8 +75,14 @@ function geometryIsValid(input: AppearanceInput): boolean {
     input.occluder.length === pixelCount &&
     input.contacts.every(
       (index) => Number.isSafeInteger(index) && index >= 0 && index < pixelCount,
-    )
-  );
+    );
+  if (!validLengthsAndContacts) return false;
+  for (let index = 0; index < pixelCount; index += 1) {
+    if (maskHasSupport(input.visible, index) && maskHasSupport(input.hidden, index)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function maskHasSupport(mask: Uint8Array, index: number): boolean {
@@ -429,6 +435,9 @@ export function assessHiddenCandidate(input: AppearanceInput & {
 
   let seamMaxDelta = 0;
   for (const contact of new Set(input.contacts)) {
+    if (alphaAt(input.source.rgba, contact) < OPAQUE_INTERIOR_ALPHA) {
+      return { ok: false, reason: "seam_mismatch", metrics };
+    }
     const generatedNeighbors = neighbors(
       contact,
       input.source.width,

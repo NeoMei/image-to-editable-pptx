@@ -122,6 +122,31 @@ test("profiles source-local appearances and accepts only rear-classified hidden 
   assert.deepEqual(fixture.rasters.valid, validSnapshot);
 });
 
+test("rejects overlapping visible and hidden support before classification", async () => {
+  const fixture = await sourceLockedOcclusionFixture();
+  const input = inputFrom(fixture);
+  const qualification = qualifyAppearance(input);
+  if (!qualification.ok) assert.fail(qualification.reason);
+  const hidden = Uint8Array.from(input.hidden);
+  const overlapIndex = 10 * 32 + 13;
+  assert.equal(input.visible[overlapIndex], 255);
+  hidden[overlapIndex] = 255;
+  const malformed = { ...input, hidden };
+
+  const malformedQualification = qualifyAppearance(malformed);
+  assert.equal(malformedQualification.ok, false);
+  if (malformedQualification.ok) assert.fail("overlapping masks must reject");
+  assert.equal(malformedQualification.reason, "geometry");
+
+  const assessed = assessHiddenCandidate({
+    ...malformed,
+    returned: returned(fixture, fixture.rasters.valid),
+    profile: qualification.profile,
+  });
+  expectRejected(assessed, "geometry");
+  assert.equal(assessed.metrics.generatedPixels, 0);
+});
+
 test("fails closed when source-local appearance evidence is insufficient or ambiguous", async () => {
   const fixture = await sourceLockedOcclusionFixture();
   const pixelCount = fixture.geometry.canvas.width * fixture.geometry.canvas.height;
@@ -176,6 +201,106 @@ test("fails closed when source-local appearance evidence is insufficient or ambi
     assert.equal(result.ok, false, current.label);
     if (result.ok) assert.fail(`${current.label} should reject`);
     assert.equal(result.reason, current.reason, current.label);
+  }
+});
+
+test("separates independently labeled offline calibration examples", async () => {
+  const fixture = await sourceLockedOcclusionFixture();
+  for (const current of [
+    {
+      label: fixture.labels.calibrationMildSource,
+      source: fixture.rasters.mildVariationSource,
+      ok: true,
+      reason: undefined,
+    },
+    {
+      label: fixture.labels.calibrationRoughSource,
+      source: fixture.rasters.roughVariationSource,
+      ok: false,
+      reason: "ambiguous_appearance",
+    },
+    {
+      label: fixture.labels.calibrationClosePalette,
+      source: fixture.rasters.closePaletteSource,
+      ok: false,
+      reason: "ambiguous_appearance",
+    },
+    {
+      label: fixture.labels.calibrationEnoughContext,
+      source: fixture.rasters.enoughContextSource,
+      ok: true,
+      reason: undefined,
+    },
+    {
+      label: fixture.labels.calibrationSparseContext,
+      source: fixture.rasters.sparseContextSource,
+      ok: false,
+      reason: "insufficient_evidence",
+    },
+  ]) {
+    const result = qualifyAppearance(inputFrom(fixture, {
+      source: returned(fixture, current.source),
+    }));
+    assert.equal(result.ok, current.ok, current.label);
+    if (!result.ok) assert.equal(result.reason, current.reason, current.label);
+  }
+
+  const input = inputFrom(fixture);
+  const qualification = qualifyAppearance(input);
+  if (!qualification.ok) assert.fail(qualification.reason);
+  for (const current of [
+    {
+      label: fixture.labels.calibrationPositive,
+      rgba: fixture.rasters.calibratedValid,
+      ok: true,
+      reason: undefined,
+    },
+    {
+      label: fixture.labels.calibrationImpostor,
+      rgba: fixture.rasters.nearRearImpostor,
+      ok: false,
+      reason: "ambiguous_appearance",
+    },
+    {
+      label: fixture.labels.calibrationGlow,
+      rgba: fixture.rasters.glowingEdge,
+      ok: false,
+      reason: "ambiguous_appearance",
+    },
+  ] as const) {
+    const result = assessHiddenCandidate({
+      ...input,
+      returned: returned(fixture, current.rgba),
+      profile: qualification.profile,
+    });
+    assert.equal(result.ok, current.ok, current.label);
+    if (!result.ok) assert.equal(result.reason, current.reason, current.label);
+  }
+
+  const seamInput = inputFrom(fixture, {
+    source: returned(fixture, fixture.rasters.seamCalibrationSource),
+  });
+  const seamProfile = qualifyAppearance(seamInput);
+  if (!seamProfile.ok) assert.fail(seamProfile.reason);
+  for (const current of [
+    {
+      label: fixture.labels.calibrationSoftSeam,
+      rgba: fixture.rasters.softSeam,
+      ok: true,
+    },
+    {
+      label: fixture.labels.calibrationHardSeam,
+      rgba: fixture.rasters.hardSeam,
+      ok: false,
+    },
+  ]) {
+    const result = assessHiddenCandidate({
+      ...seamInput,
+      returned: returned(fixture, current.rgba),
+      profile: seamProfile.profile,
+    });
+    assert.equal(result.ok, current.ok, current.label);
+    if (!result.ok) assert.equal(result.reason, "seam_mismatch", current.label);
   }
 });
 
@@ -352,10 +477,49 @@ test("checks seam delta at 12 and rejects one level beyond", async () => {
   }
 });
 
+test("requires opaque source contact alpha at 240 and rejects 239", async () => {
+  const fixture = await sourceLockedOcclusionFixture();
+  for (const alpha of [240, 239]) {
+    const source = Buffer.from(fixture.rasters.original);
+    const candidate = Buffer.from(fixture.rasters.valid);
+    for (const contact of fixture.contacts) {
+      source[contact * 4 + 3] = alpha;
+      candidate[contact * 4 + 3] = alpha;
+    }
+    const input = inputFrom(fixture, { source: returned(fixture, source) });
+    const qualification = qualifyAppearance(input);
+    if (!qualification.ok) assert.fail(qualification.reason);
+    const result = assessHiddenCandidate({
+      ...input,
+      returned: returned(fixture, candidate),
+      profile: qualification.profile,
+    });
+    assert.equal(result.ok, alpha === 240, `source contact alpha ${alpha}`);
+    if (!result.ok) assert.equal(result.reason, "seam_mismatch");
+  }
+});
+
 test("ignores diagonal source alpha fringes while accepting varied palettes and scales", async () => {
   const fixture = await sourceLockedOcclusionFixture();
   const fringedSource = Buffer.from(fixture.rasters.original);
-  for (const index of [4 * 32 + 4, 4 * 32 + 5, 5 * 32 + 4, 18 * 32 + 27, 19 * 32 + 26, 19 * 32 + 27]) {
+  const diagonalFringe = [
+    4 * 32 + 10,
+    5 * 32 + 11,
+    6 * 32 + 12,
+    7 * 32 + 11,
+    8 * 32 + 10,
+    9 * 32 + 11,
+    10 * 32 + 12,
+    12 * 32 + 19,
+    13 * 32 + 20,
+    14 * 32 + 21,
+    15 * 32 + 20,
+    16 * 32 + 19,
+    17 * 32 + 20,
+    18 * 32 + 21,
+  ];
+  for (const index of diagonalFringe) {
+    paintRgb(fringedSource, index, [255, 0, 255]);
     fringedSource[index * 4 + 3] = 120;
   }
   const fringedInput = inputFrom(fixture, { source: returned(fixture, fringedSource) });
