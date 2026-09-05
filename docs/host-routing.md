@@ -29,6 +29,12 @@ inputs and prompt and return the required result. Do not declare completion
 unless the tool accepts the source crop plus both masks and can return one local
 image with the requested canvas geometry.
 
+Do not use browser or UI automation as a provider fallback. Do not read or
+harvest consumer web-session cookies, `localStorage`, session storage, browser
+profiles, or internal host/session tokens to manufacture API access. Host
+availability comes only from an already registered callable tool; API
+availability comes only from the documented environment variables.
+
 The bridge directory must already exist, be owned by the current user, and have
 mode `0700`. `capabilities.json` must be a regular bounded file. The copyable
 OpenAI OCR-and-scene example is also shipped as

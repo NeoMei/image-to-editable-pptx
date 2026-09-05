@@ -31,7 +31,7 @@ The slide layout preserves the accepted canvas aspect ratio; it is not limited t
 
 ## Credential boundary
 
-New `analyze` and `run` operations need at least one real host capability or one complete API credential set. Host OpenAI/Gemini tools are exposed through `--host-bridge`; API candidates use `OPENAI_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), or both `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID`. Missing keys skip that candidate. Never echo, record, commit, paste into a command, copy into bridge files, or copy these values into a response. The CLI intentionally has no API-key, workspace, Authorization, provider-secret, or base-URL flags.
+New `analyze` and `run` operations need at least one real host capability or one complete API credential set. Host OpenAI/Gemini tools are exposed through `--host-bridge`; API candidates use `OPENAI_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), or both `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID`. Missing keys skip that candidate. Never echo, record, commit, paste into a command, copy into bridge files, or copy these values into a response. The CLI intentionally has no API-key, workspace, Authorization, provider-secret, or base-URL flags. Do not use browser/UI automation as a provider fallback and do not harvest cookies, `localStorage`, session data, browser profiles, or internal host/session tokens for API access.
 
 For API routes, the current defaults are `gpt-4.1` / `gpt-image-2`, `gemini-2.5-flash` / `gemini-3.1-flash-image`, and `qwen3.5-ocr` / `qwen3-vl-plus` / `wanx2.1-imageedit`. OpenAI and Gemini defaults may be overridden with `OPENAI_ANALYSIS_MODEL`, `OPENAI_IMAGE_MODEL`, `GEMINI_ANALYSIS_MODEL`, and `GEMINI_IMAGE_MODEL`. A host success must use the effective model identifier returned by actual registered-tool metadata, never an API default or inferred catalog label.
 
@@ -39,7 +39,7 @@ Explain before live analysis that the pipeline makes one logical OCR request and
 
 ## Use registered host tools when available
 
-Before requiring provider keys, inspect the tools actually registered in the current host. A model catalog entry, ordinary agent reasoning, or an image-editing tool is not an OCR/scene JSON capability. Declare only the exact `openai` or `gemini` operations a registered tool can perform with the request's local PNGs and prompt. Omit absent operations and never invent model output.
+Before requiring provider keys, inspect the tools actually registered in the current host. A model catalog entry, ordinary agent reasoning, browser/UI automation, or an image-editing tool is not an OCR/scene JSON capability. Declare only the exact `openai` or `gemini` operations a registered tool can perform with the request's local PNGs and prompt. Omit absent operations and never invent model output or extract consumer web-session credentials.
 
 Read [`docs/host-routing.md`](../../docs/host-routing.md) completely before creating or servicing a bridge. It is the normative shipped reference for the capability manifest, request and response schemas, coordinate systems, failure codes, privacy boundary, atomic publication, routing semantics, and child-monitor loop.
 

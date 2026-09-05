@@ -55,7 +55,7 @@ opencode debug skill
 
 `host-openai` → `api-openai` → `host-gemini` → `api-gemini` → `api-alibaba`。
 
-宿主候选只在当前 Agent 实际发现了能完成该 operation 的已注册工具时通过 `--host-bridge <private-dir>` 声明；模型目录、普通推理能力或仅能编辑图片的工具不是 OCR/场景 JSON 能力证明。没有实际工具时必须省略，不能猜测或伪造模型结果。完整的可复制 capability manifest、request/response 示例、原子响应轮询流程与 schema 见 [Host routing and file bridge protocol](docs/host-routing.md)。
+宿主候选只在当前 Agent 实际发现了能完成该 operation 的已注册工具时通过 `--host-bridge <private-dir>` 声明；模型目录、普通推理能力、浏览器/UI 自动化或仅能编辑图片的工具不是 OCR/场景 JSON 能力证明。不得通过浏览器消费者会话采集 cookie、`localStorage`、session 数据、浏览器 profile 或宿主内部 token 来伪造 API 访问。没有实际工具时必须省略，不能猜测或伪造模型结果。完整的可复制 capability manifest、request/response 示例、原子响应轮询流程与 schema 见 [Host routing and file bridge protocol](docs/host-routing.md)。
 
 API 凭证都是可选的，缺少时跳过该 API 候选：
 
