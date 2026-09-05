@@ -232,6 +232,31 @@ requests. `routing.operations` records the candidates considered for each
 logical request. `routing.transportAttempts` records actual host invocations and
 individual API retry attempts. These numbers need not match.
 
+A completion transport success means only that the selected provider returned a
+validated image with the required geometry and metadata. The local completion
+gate can still reject that image for conservative source-appearance, residual
+occluder, seam, contour, or final-invariant reasons. Such a quality rejection
+does not advance the completion routing cursor or try the next provider. A
+terminal provider refusal still aborts the run and is never rewritten as a
+quality rejection.
+
+Live v2 analysis writes `completion-diagnostics.json` beside, not inside,
+`analysis-ledger.json`. The version-1 sidecar contains only canonical plan
+sequence numbers, bounded reason codes, and bounded numeric metrics; it contains
+no scene labels, IDs, provider messages, paths, URLs, or raw images. It is
+created once in the private analysis staging directory and cannot replace a
+pre-existing regular file or symbolic link. The strict v2 ledger and its hashes
+are unchanged. Offline `build` neither requires nor trusts the sidecar and does
+not create a new quality verdict.
+
+Automatic quality acceptance is intentionally limited to low-variation rear
+surfaces whose rear, front, and local background colors are separable and whose
+contacts and seams can be checked locally. Textures, gradients, glow or
+transparent boundaries, same-color layers, and insufficient local evidence are
+kept in the background. Even an accepted generated layer remains
+`reviewRequired: true`; actual PowerPoint/WPS movement, undo, explicit
+save/discard, and reopen are a later editor-acceptance boundary.
+
 `tests/child-cli-bridge.test.ts` uses a test-only host emulator and a public CC0
 geometric fixture. It drives a real child CLI through OCR and scene request
 files, denies `fetch`, produces a real manifest v2 analysis package, then runs a

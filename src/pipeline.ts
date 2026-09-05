@@ -74,11 +74,16 @@ import {
   type MaskCandidate,
 } from "./image/semantic-mask.js";
 import {
-  completeOccludedCandidate,
+  evaluateOccludedCandidate,
   OcclusionCompletionBudget,
 } from "./occlusion/complete.js";
 import type { CompletedCandidate } from "./occlusion/contracts.js";
 import type { OcclusionCompletionProvider } from "./occlusion/contracts.js";
+import {
+  completionDiagnostic,
+  writeCompletionDiagnostics,
+  type CompletionDiagnostic,
+} from "./occlusion/diagnostics.js";
 import { completionContext } from "./occlusion/request.js";
 import { analyzeScene, refineSceneRegions } from "./providers/qwen-scene.js";
 import { createScenePrompt } from "./providers/qwen-scene-prompt.js";
@@ -633,13 +638,17 @@ async function completeEligibleCandidates(input: {
   provider?: ReturnType<ProviderRoutingSession["completionProvider"]>;
   maxOcclusionCompletions?: number;
   requestTimeoutMs?: number;
-}): Promise<{ artifacts: CompletionArtifact[]; requests: number }> {
+}): Promise<{
+  artifacts: CompletionArtifact[];
+  requests: number;
+  diagnostics: CompletionDiagnostic[];
+}> {
   const limit =
     input.maxOcclusionCompletions ??
     input.config?.maxOcclusionCompletions ??
     4;
   const budget = new OcclusionCompletionBudget(limit);
-  if (limit === 0) return { artifacts: [], requests: 0 };
+  if (limit === 0) return { artifacts: [], requests: 0, diagnostics: [] };
 
   const plan = planSemanticLayers(input.scene, input.ocr);
   const unrelatedTextMask = await blankCanvasMask(input.source);
@@ -670,7 +679,8 @@ async function completeEligibleCandidates(input: {
     () => { requests += 1; },
   );
   const artifacts: CompletionArtifact[] = [];
-  for (const candidate of plan.candidates) {
+  const diagnostics: CompletionDiagnostic[] = [];
+  for (const [candidateIndex, candidate] of plan.candidates.entries()) {
     if (candidate.occlusion === undefined) continue;
     const visible = masks.get(candidate.id);
     if (visible === undefined) continue;
@@ -694,7 +704,7 @@ async function completeEligibleCandidates(input: {
     if (!completeMaskSet) continue;
 
     const sourceCrop = await canonicalCrop(input.source, visible.bbox);
-    const completed = await completeOccludedCandidate(
+    const outcome = await evaluateOccludedCandidate(
       {
         candidate,
         canvas: input.scene.canvas,
@@ -709,7 +719,9 @@ async function completeEligibleCandidates(input: {
       },
       countedProvider,
     );
-    if (completed === undefined) continue;
+    diagnostics.push(completionDiagnostic(candidateIndex, outcome));
+    if (outcome.status !== "accepted") continue;
+    const completed = outcome.artifact;
     const sequence = String(artifacts.length + 1).padStart(3, "0");
     const path = `completions/completion-${sequence}.png`;
     const sourceCropPath =
@@ -742,7 +754,7 @@ async function completeEligibleCandidates(input: {
       provenance: completed.provenance,
     });
   }
-  return { artifacts, requests };
+  return { artifacts, requests, diagnostics };
 }
 
 async function analyzeWithRouting(input: {
@@ -810,6 +822,10 @@ async function analyzeWithRouting(input: {
           : Math.max(routingConfig.requestTimeoutMs, 10 * 60 * 1_000),
     });
     const completionDuration = elapsed(completionStartedAt);
+    await writeCompletionDiagnostics(input.outDir, {
+      version: 1,
+      candidates: completion.diagnostics,
+    });
     const canonicalScene = SceneGraphSchema.parse(refined.graph) as SceneGraph;
     await Promise.all([
       writeRecording(join(input.outDir, "ocr.json"), ocr.value),
@@ -1023,6 +1039,10 @@ async function analyzeIntoDirectory(
     config,
   });
   const completionDuration = elapsed(completionStartedAt);
+  await writeCompletionDiagnostics(outDir, {
+    version: 1,
+    candidates: completion.diagnostics,
+  });
   const canonicalScene = SceneGraphSchema.parse(refined.graph) as SceneGraph;
   await Promise.all([
     writeRecording(join(outDir, "ocr.json"), ocr),

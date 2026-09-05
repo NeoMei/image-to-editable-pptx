@@ -84,3 +84,41 @@ a uniform-color fake geometry can satisfy color checks without being the correct
 hidden object. Existing contact/contour gates, final recomposition invariants,
 and human review remain required. The rejected live orange-bar response was not
 used to choose or adjust any threshold.
+
+## Task 4: bounded diagnostics and offline boundary
+
+Live routed and legacy analysis now record the detailed local completion outcome
+in a separate version-1 `completion-diagnostics.json` sidecar before the strict
+v2 analysis ledger is published. The sidecar permits only the canonical semantic
+plan index, accepted/skipped/rejected status, bounded reason codes, and finite
+bounded metrics. Existing v2 ledger fields, artifact hashes, and source
+provenance remain unchanged. No additional raw request image or provider-return
+image is added to public package content.
+
+The routed integration checks distinguish three boundaries. A provider image can
+be a successful `host-openai` transport while local quality rejects it as
+`residual_occluder`; the run records one completion request, no completion
+artifact, retains the source background, and does not call or advance to Gemini.
+A terminal completion `policy_refused` still aborts the analysis and leaves no
+quality sidecar. Separately, an actual locally evaluated source-locked completion
+survives analysis staging, atomic package publication, package read, and an
+offline build with zero network calls, producing a composite layer that remains
+`reviewRequired: true`.
+
+Sidecar publication uses exclusive private creation rather than the general
+recording helper's replace-capable rename. Tests cover existing regular targets,
+symbolic-link targets, concurrent replacement races, and a staged write failure
+while an earlier owned output remains byte-identical and the foreign symlink
+target remains unchanged. A v2 package without the optional sidecar still reads;
+the offline build neither requires nor consults it for acceptance, and corrupt
+sidecar content cannot rescue an invalid hashed completion artifact.
+
+An offline replay of the earlier rejected provider return against `9ffdf74`
+produced `residual_occluder` with 28,492 residual pixels, zero generated pixels,
+and zero network calls. This is provisional pre-whole-branch evidence only; the
+final private replay must be repeated after whole-branch review. The replay's
+private source and returned image are intentionally not reproduced here.
+
+These automated checks do not establish natural live-provider acceptance or
+final editor acceptance. WPS/PowerPoint object movement, undo, explicit
+save/discard, and reopen remain separate required evidence.
