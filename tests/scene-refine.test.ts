@@ -459,6 +459,12 @@ test("regional provider sends only the crop and preserves the graph with a warni
     assert.match(result.warnings[0]!, /regional_refinement_rejected/);
     assert.match(requestedPrompts[0]!, /do not return text nodes/i);
     assert.doesNotMatch(requestedPrompts[0]!, /carries-text/i);
+    // The regional model receives a standalone request, not the full-slide
+    // prompt. It must receive the same corner-coordinate wire contract.
+    assert.match(requestedPrompts[0]!, /bbox must be \[x1,y1,x2,y2\]/i);
+    assert.match(requestedPrompts[0]!, /coordinates must be integers/i);
+    assert.match(requestedPrompts[0]!, /x2\/y2 must exceed x1\/y1/i);
+    assert.match(requestedPrompts[0]!, /not \[x,y,width,height\]/i);
     assert.deepEqual(await sharp(requestedImages[0]!).metadata().then(({ width, height }) => ({ width, height })), {
       width: 105,
       height: 53,

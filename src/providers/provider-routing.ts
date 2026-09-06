@@ -7,7 +7,6 @@ import type { CanvasSize, SceneGraph } from "../scene/contracts.js";
 import type { FileHostBridge } from "./host-bridge.js";
 import {
   createAlibabaExecutors,
-  createGeminiExecutors,
   createHostExecutors,
   createOpenAiExecutors,
   type ProviderOperationExecutors,
@@ -24,9 +23,8 @@ import {
 } from "./routing.js";
 
 export type RoutingAdapterFactory = Readonly<{
-  host(bridge: FileHostBridge): Readonly<Record<"openai" | "gemini", ProviderOperationExecutors>>;
+  host(bridge: FileHostBridge): Readonly<Record<"openai", ProviderOperationExecutors>>;
   openai(config: RoutedProviderConfig & { requestTimeoutMs: number; maxAttempts: number; onTransportAttempt?: (attempt: number) => void }): ProviderOperationExecutors;
-  gemini(config: RoutedProviderConfig & { requestTimeoutMs: number; maxAttempts: number; onTransportAttempt?: (attempt: number) => void }): ProviderOperationExecutors;
   alibaba(
     config: AppConfig,
     observers?: Readonly<{ ocr?: ProviderResponseObserver; scene?: ProviderResponseObserver }>,
@@ -37,7 +35,6 @@ export type RoutingAdapterFactory = Readonly<{
 const defaultFactory: RoutingAdapterFactory = {
   host: createHostExecutors,
   openai: createOpenAiExecutors,
-  gemini: createGeminiExecutors,
   alibaba: createAlibabaExecutors,
 };
 
@@ -46,9 +43,8 @@ export type RoutedValue<T> = Readonly<{ value: T; model: string; candidate: Cand
 export class ProviderRoutingSession {
   readonly #router = new SerialOperationRouter();
   readonly #routingConfig: ProviderRoutingConfig;
-  readonly #host: Readonly<Record<"openai" | "gemini", ProviderOperationExecutors>> | undefined;
+  readonly #host: Readonly<Record<"openai", ProviderOperationExecutors>> | undefined;
   readonly #openai: ProviderOperationExecutors | undefined;
-  readonly #gemini: ProviderOperationExecutors | undefined;
   readonly #alibaba: ProviderOperationExecutors | undefined;
   readonly #transportCounts = new Map<string, number>();
   #currentOperation: ProviderOperation | undefined;
@@ -75,13 +71,6 @@ export class ProviderRoutingSession {
           ...options.routingConfig.openai,
           ...common,
           onTransportAttempt: () => this.#recordTransport("api-openai"),
-        });
-    this.#gemini = options.routingConfig.gemini === undefined
-      ? undefined
-      : factory.gemini({
-          ...options.routingConfig.gemini,
-          ...common,
-          onTransportAttempt: () => this.#recordTransport("api-gemini"),
         });
     this.#alibaba = options.routingConfig.alibaba === undefined
       ? undefined
@@ -119,7 +108,7 @@ export class ProviderRoutingSession {
       key: CandidateKey,
       executors: ProviderOperationExecutors | undefined,
     ): CandidateExecutor<T> | undefined => {
-      if (executors === undefined) return undefined;
+      if (executors === undefined || (operation === "completion" && key === "host-openai")) return undefined;
       return async () => {
         this.#currentOperation = operation;
         try {
@@ -140,8 +129,6 @@ export class ProviderRoutingSession {
     for (const [key, executor] of [
       ["host-openai", candidate("host-openai", this.#host?.openai)],
       ["api-openai", candidate("api-openai", this.#openai)],
-      ["host-gemini", candidate("host-gemini", this.#host?.gemini)],
-      ["api-gemini", candidate("api-gemini", this.#gemini)],
       ["api-alibaba", candidate("api-alibaba", this.#alibaba)],
     ] as const) {
       if (executor !== undefined) executors[key] = executor;

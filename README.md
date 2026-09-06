@@ -3,7 +3,7 @@
 > High-fidelity semantic reconstruction for image-based slides
 > 高保真地把图片式幻灯片重构为可编辑 PPTX
 
-Image to Editable PPTX 先通过本地 OpenCodex 已登录账号、宿主已注册的 OpenAI/Gemini 工具，或可选的 OpenAI、Gemini、阿里云百炼 API 生成 OCR 与通用语义场景图，再在本地把可靠的文字、独立图标、复合前景和文字底板重构成可编辑层。重组或局部验证不达标的候选不会被强行拆出，而是保留在背景中，优先保住视觉保真度。
+Image to Editable PPTX 先通过本地 OpenCodex 已登录账号、宿主已注册的 OpenAI 工具，或可选的 OpenAI、阿里云百炼 API 生成 OCR 与通用语义场景图，再在本地把可靠的文字、独立图标、复合前景和文字底板重构成可编辑层。重组或局部验证不达标的候选不会被强行拆出，而是保留在背景中，优先保住视觉保真度。
 
 这不是 Canva Magic Layers 的调用器，也不会把位图导入冒充可编辑。只有实际写入 PPTX 的文字对象和 PNG 资产才算可编辑层。
 
@@ -51,22 +51,26 @@ opencode debug skill
 
 ## 模型路由与可选凭证
 
-`analyze` 和 `run` 对 `ocr` / `scene` / `completion` 各自按以下固定顺序串行选择：
+`analyze` 和 `run` 按 operation 串行选择：
 
-`host-openai` → `api-openai` → `host-gemini` → `api-gemini` → `api-alibaba`。
+- OCR / 场景分析：`host-openai` → `api-openai` → `api-alibaba`。
+- 图层补全：`api-openai` → `api-alibaba`；ChatGPT 宿主补全已停用，包含 OpenCodex 自动发现和文件桥接。旧能力声明不会重新启用它。
 
-默认会通过 `ocx access endpoints --json` 自动发现本地 OpenCodex 公共接口，使用已登录的 OpenAI / Google Antigravity 账号作为宿主候选，无需另配官方 API Key。分析默认使用 `gpt-5.6-sol` / `gemini-3.1-pro`，可通过 `OPENCODEX_OPENAI_ANALYSIS_MODEL` / `OPENCODEX_GEMINI_ANALYSIS_MODEL` 选择对应供应商目录中的视觉模型；`IMAGE_PPT_OPENCODEX=off` 关闭自动发现。显式 `--host-bridge <private-dir>` 优先使用已注册工具的文件桥接。模型目录只用于发现候选，实际响应及内容校验通过才算成功。不会读取或改变 OAuth、cookie、浏览器会话或宿主内部 token。协议、故障分类和桥接示例见 [Host routing and file bridge protocol](docs/host-routing.md)。
+补全账本仍保留 `host-openai` 的 `unavailable` / `missing_candidate` 跳过记录，不产生宿主请求。未配置任何补全 API 时保留安全背景，不声称完成隐藏图层；已配置 API 的真实失败仍遵守原有降级及终止规则。
+
+Gemini 已从 OCR、场景分析和图层补全中移除；旧 Gemini 环境变量不再启用候选。历史分析包中的 Gemini 账本记录仍可供离线读取，不会重新调用该模型。
+
+默认会通过 `ocx access endpoints --json` 自动发现本地 OpenCodex 公共接口，使用已登录的 OpenAI 账号作为宿主候选，无需另配官方 API Key。分析默认使用 `gpt-5.6-sol`，可通过 `OPENCODEX_OPENAI_ANALYSIS_MODEL` 选择对应供应商目录中的视觉模型；`IMAGE_PPT_OPENCODEX=off` 关闭自动发现。显式 `--host-bridge <private-dir>` 优先使用已注册工具的文件桥接。模型目录只用于发现候选，实际响应及内容校验通过才算成功。不会读取或改变 OAuth、cookie、浏览器会话或宿主内部 token。协议、故障分类和桥接示例见 [Host routing and file bridge protocol](docs/host-routing.md)。
 
 API 凭证都是可选的，缺少时跳过该 API 候选：
 
 ```bash
 export OPENAI_API_KEY='<your-openai-key>'
-export GEMINI_API_KEY='<your-gemini-key>' # 也可使用 GOOGLE_API_KEY
 export DASHSCOPE_API_KEY='<your-dashscope-key>'
 export DASHSCOPE_WORKSPACE_ID='<your-dashscope-workspace-id>'
 ```
 
-可用 `OPENAI_ANALYSIS_MODEL` / `OPENAI_IMAGE_MODEL` 和 `GEMINI_ANALYSIS_MODEL` / `GEMINI_IMAGE_MODEL` 覆盖 API 默认模型；当前默认分别为 `gpt-4.1` / `gpt-image-2`、`gemini-2.5-flash` / `gemini-3.1-flash-image`，百炼为 `qwen3.5-ocr` / `qwen3-vl-plus` / `wanx2.1-imageedit`。文件桥接记录实际工具元数据中的模型；OpenCodex 记录响应模型，响应未带模型时记录成功请求的明确模型，不用目录标签冒充实际调用证明。
+可用 `OPENAI_ANALYSIS_MODEL` / `OPENAI_IMAGE_MODEL` 覆盖 API 默认模型；当前默认为 `gpt-4.1` / `gpt-image-2`，百炼为 `qwen3.5-ocr` / `qwen3-vl-plus` / `wanx2.1-imageedit`。文件桥接记录实际工具元数据中的模型；OpenCodex 记录响应模型，响应未带模型时记录成功请求的明确模型，不用目录标签冒充实际调用证明。
 
 只有 `unavailable`、`auth_unavailable`、`retryable_exhausted` 会推进到下一候选；`policy_refused`、`invalid_input`、`invalid_output`、`local_failure` 是致命边界，会停止整个运行。每个 operation 都有独立的只向前 sticky 游标，成功后下一次从该候选开始，不会在同一运行中回退到更早候选。
 
@@ -131,7 +135,7 @@ npm pack --dry-run
 ```
 
 测试使用本地 fixture 和可注入 provider，不应访问网络。
-子进程 bridge E2E 使用测试专用 host emulator，真实启动 CLI、写入 v2 分析包并生成 PPTX/三张 QA 图，同时确定性禁止网络。它证明文件协议集成，不是真实 OpenAI/Gemini 验收，也不证明 completion、文字可编辑或 PowerPoint/WPS 验收。
+子进程 bridge E2E 使用测试专用 host emulator，真实启动 CLI、写入 v2 分析包并生成 PPTX/三张 QA 图，同时确定性禁止网络。它证明文件协议集成，不是真实 OpenAI 验收，也不证明 completion、文字可编辑或 PowerPoint/WPS 验收。
 依赖审计仅临时接受 PptxGenJS 4.0.1 未使用的 `image-size` 声明所带来的两个
 无可安装修复版本的公告；门禁绑定精确版本、扫描发布代码确认不可达，并于
 2026-10-03 到期复审。任何新增公告或依赖变化都会失败。

@@ -1,12 +1,18 @@
 # Host routing and file bridge protocol
 
-`analyze` and `run` use one fixed candidate order for each provider operation:
+`analyze` and `run` use the following candidate order for OCR and scene analysis:
 
 1. `host-openai`
 2. `api-openai`
-3. `host-gemini`
-4. `api-gemini`
-5. `api-alibaba`
+3. `api-alibaba`
+
+Completion uses `api-openai` → `api-alibaba`. ChatGPT host completion is
+suspended for both automatic OpenCodex and registered-tool bridges. Its ledger
+slot remains `unavailable` / `missing_candidate`, with no host transport attempt;
+stale completion declarations do not enable it. When neither completion API is
+configured (all attempts are `missing_candidate`), retain the safe background
+rather than claiming a completed hidden layer. Configured API failures retain
+the original fallback and terminal-exhaustion rules.
 
 The operations are `ocr`, `scene`, and `completion`. Routing is serial and each
 operation has its own forward-only sticky cursor. After one candidate succeeds,
@@ -19,42 +25,37 @@ next candidate. `policy_refused`, `invalid_input`, `invalid_output`, and
 `local_failure` are fatal and stop the run. A missing candidate is recorded as
 `unavailable` / `missing_candidate`; it does not make a transport request.
 
+Gemini is retired for all three operations. Its old API credentials and model
+variables cannot enable a candidate. Historical v2 routing records remain
+readable offline; they are provenance, not executable routing instructions.
+
 ## Automatic local OpenCodex host
 
 Without `--host-bridge`, the CLI's live `analyze` and `run` commands automatically
 run `ocx access endpoints --json` and query the public loopback `/v1/models`
-endpoint. Existing signed-in OpenAI and Google Antigravity accounts can therefore
-serve host candidates without `OPENAI_API_KEY` or `GEMINI_API_KEY`. No OAuth
+endpoint. Existing signed-in OpenAI accounts can therefore
+serve the host candidate without `OPENAI_API_KEY`. No OAuth
 files, cookies, or internal tokens are read; account/provider configuration is
 not changed. The local public API must accept unauthenticated local
 admission; a protected or stopped endpoint is unavailable, not a reason to extract
 credentials. Only literal loopback HTTP endpoints are accepted; redirects are rejected.
 
-The default analysis routes are `openai/gpt-5.6-sol` and
-`google-antigravity/gemini-3.1-pro`; override them using
-`OPENCODEX_OPENAI_ANALYSIS_MODEL` and `OPENCODEX_GEMINI_ANALYSIS_MODEL` with a model
+The default analysis route is `openai/gpt-5.6-sol`; override it using
+`OPENCODEX_OPENAI_ANALYSIS_MODEL` with a model
 advertised by the matching provider with vision support. Catalog entries create
 candidates, not proof of access: only a real successful response and validated
 operation result establish success. OpenAI uses streaming Responses (required by
-ChatGPT accounts); Gemini uses non-streaming Responses. Completion uses OpenAI
-`gpt-image-2` JSON image edits or Gemini `gemini-3.1-flash-image` with source and masks.
-The JSON edit shape follows the [Codex image client](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/endpoint/images.rs),
-not the official Platform adapter's multipart upload. All three images are sent
-as labeled references; local mask/recomposition checks still gate acceptance.
-Before advertising or invoking OpenAI completion, `ocx config get images --json`
-checks public routing settings. A custom image provider, enabled xAI bridge, or
-unknown setting disables that candidate so it cannot silently bypass the fixed
-provider order. Keep proxy routing settings stable during a run. The default
-image-edit relay cannot fall back to Gemini; its Gemini fallback is generation-only.
-Gemini's returned opaque `/v1/opencodex/artifacts/<image-id>` is retrieved only
-from that same loopback origin, with byte and geometry validation.
+ChatGPT accounts). OpenCodex advertises OCR and scene only. Completion invocations
+return `unavailable` before preparing or transmitting images. Discovery no
+longer queries image-routing settings. The previous host image-edit route failed
+source-locked quality checks, including the independent-mask diagnostic; merely
+receiving an image is not evidence of usable layer completion.
 
 Set `IMAGE_PPT_OPENCODEX=off` to disable discovery. An explicit `--host-bridge`
 takes precedence and uses only that file bridge. Library callers can explicitly
 pass `await discoverOpenCodexBridge()` as `hostBridge`; library/offline builds do
 not discover accounts implicitly. Each bridge invocation makes one inference
-attempt; Gemini completion also retrieves its image artifact. Discovery and
-artifact GETs are not counted as inference attempts. Official APIs and Alibaba
+attempt. Discovery GETs are not counted as inference attempts. Official APIs and Alibaba
 retain the fixed fallback order above.
 
 ## Discover registered-tool capabilities for a file bridge
@@ -63,9 +64,9 @@ The host agent must inspect its current registered tools before creating a
 bridge. A model catalog entry, ordinary agent reasoning, or an image editing
 tool is not proof that OCR or scene JSON is callable. Declare a provider and
 operation only when a registered tool can receive the operation's local PNG
-inputs and prompt and return the required result. Do not declare completion
-unless the tool accepts the source crop plus both masks and can return one local
-image with the requested canvas geometry.
+inputs and prompt and return the required result. Declare only OCR and scene.
+Do not declare or service host completion, even if an image tool is registered;
+the converter ignores old completion declarations.
 
 Do not use browser or UI automation as a provider fallback. Do not read or
 harvest consumer web-session cookies, `localStorage`, session storage, browser
@@ -90,9 +91,14 @@ OpenAI OCR-and-scene example is also shipped as
 }
 ```
 
-Provider keys are only `openai` and `gemini`. Operation values are only `ocr`,
-`scene`, and `completion`. Omit an unavailable provider instead of guessing.
+The only active provider key is `openai`. Active operations are `ocr` and
+`scene`. The low-level version-1 schema retains `completion` for protocol
+compatibility, but converter adapters and routing never schedule it.
+Omit an unavailable provider instead of guessing.
 `callable: false` disables all of that declaration's operations.
+An old `providers.gemini` field is ignored without enabling any operations;
+other unknown provider keys remain invalid. Direct Gemini invocations are
+rejected without creating requests or sending image data.
 
 Start the CLI without waiting for it to finish, then service requests while the
 child is running:
@@ -160,10 +166,10 @@ Return exactly one full-canvas background `[0,0,1000,1000]`. Use only the roles
 and relation kinds named in the request prompt. OCR, not scene labels, owns text
 content and pixel geometry.
 
-For completion, return `imagePath` instead of `text`. It must be an absolute
-path to one bounded local regular PNG/JPEG file. The adapter requires the image
-geometry to equal the request canvas. HTTP(S) URLs, symlinks, directories,
-multiple images, or invented output are invalid.
+The legacy completion response schema retains `imagePath` for one bounded local
+regular PNG/JPEG file. This is protocol compatibility only, not an active
+converter capability. Do not service legacy completion requests; return
+`unavailable`. No completion image is promoted through the host adapter.
 
 Here `actual-tool-model` is an explicit placeholder. In a real response, the
 `model` value is the effective model identifier reported by the actual host
@@ -215,7 +221,6 @@ complete credential set is available:
 | Candidate | Credentials | Analysis default | Completion default |
 | --- | --- | --- | --- |
 | `api-openai` | `OPENAI_API_KEY` | `OPENAI_ANALYSIS_MODEL` or `gpt-4.1` | `OPENAI_IMAGE_MODEL` or `gpt-image-2` |
-| `api-gemini` | `GEMINI_API_KEY`, falling back to `GOOGLE_API_KEY` | `GEMINI_ANALYSIS_MODEL` or `gemini-2.5-flash` | `GEMINI_IMAGE_MODEL` or `gemini-3.1-flash-image` |
 | `api-alibaba` | both `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID` | `qwen3.5-ocr` / `qwen3-vl-plus` | `wanx2.1-imageedit` |
 
 Never put credentials in CLI flags, bridge files, prompts, recordings, logs, or
@@ -262,9 +267,9 @@ geometric fixture. It drives a real child CLI through OCR and scene request
 files, denies `fetch`, produces a real manifest v2 analysis package, then runs a
 separate offline child build and checks the PPTX and all three QA previews. This
 proves the filesystem integration without live model access; it does not prove
-real OpenAI/Gemini output, completion, editable text, or PowerPoint/WPS behavior.
+real OpenAI output, completion, editable text, or PowerPoint/WPS behavior.
 
 A prior live Alibaba smoke at commit `6523547` used the same public fixture and
 successfully selected `qwen3.5-ocr` and `qwen3-vl-plus`, then built v2 offline
 with all provider credentials removed. That evidence does not cover OpenAI,
-Gemini, completion, text editability, private slides, or editor acceptance.
+completion, text editability, private slides, or editor acceptance.

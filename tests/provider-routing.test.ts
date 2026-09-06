@@ -3,7 +3,7 @@ import test from "node:test";
 
 import sharp from "sharp";
 
-import type { ProviderRoutingConfig } from "../src/config.js";
+import { loadConfig, type ProviderRoutingConfig } from "../src/config.js";
 import {
   ProviderRoutingSession,
   type RoutingAdapterFactory,
@@ -12,7 +12,7 @@ import { ProviderFailure } from "../src/providers/routing.js";
 
 const routingConfig: ProviderRoutingConfig = {
   openai: { apiKey: "openai", analysisModel: "openai-analysis", imageModel: "openai-image" },
-  gemini: { apiKey: "gemini", analysisModel: "gemini-analysis", imageModel: "gemini-image" },
+  alibaba: loadConfig({ DASHSCOPE_API_KEY: "alibaba", DASHSCOPE_WORKSPACE_ID: "workspace-123" }),
   requestTimeoutMs: 1000,
   maxAttempts: 1,
   maxRegionAnalysis: 0,
@@ -28,7 +28,6 @@ test("routing session wires host and API adapters in fixed order with independen
   const factory: RoutingAdapterFactory = {
     host: () => ({
       openai: { ocr: unavailable("host-openai:ocr"), scene: unavailable("host-openai:scene") },
-      gemini: { ocr: unavailable("host-gemini:ocr"), scene: unavailable("host-gemini:scene") },
     }),
     openai: () => ({
       ocr: unavailable("api-openai:ocr"),
@@ -38,15 +37,12 @@ test("routing session wires host and API adapters in fixed order with independen
         relations: [],
       } }),
     }),
-    gemini: () => ({
-      ocr: async () => ({ ok: true, validated: true, model: "gemini-effective", value: { lines: [] } }),
-      scene: unavailable("api-gemini:scene"),
+    alibaba: () => ({
+      ocr: async () => ({ ok: true, validated: true, model: "qwen-effective", value: { lines: [] } }),
     }),
-    alibaba: () => ({}),
   };
   const hostBridge = { capabilities: {
     openai: { ocr: true, scene: true, completion: false },
-    gemini: { ocr: true, scene: true, completion: false },
   }, invoke: async () => assert.fail("factory owns the host double") } as never;
   const session = new ProviderRoutingSession({ routingConfig, hostBridge, factory });
   const image = await sharp({ create: { width: 8, height: 8, channels: 4, background: "white" } }).png().toBuffer();
@@ -56,20 +52,19 @@ test("routing session wires host and API adapters in fixed order with independen
   assert.deepEqual(ocr.value, { lines: [] });
   assert.equal(scene.model, "openai-effective");
   assert.deepEqual(attempts, [
-    "host-openai:ocr", "api-openai:ocr", "host-gemini:ocr",
+    "host-openai:ocr", "api-openai:ocr",
     "host-openai:scene",
   ]);
-  assert.equal(session.report.operations[0]?.selectedCandidate, "api-gemini");
+  assert.equal(session.report.operations[0]?.selectedCandidate, "api-alibaba");
   assert.equal(session.report.operations[1]?.selectedCandidate, "api-openai");
 });
 
 test("routing session converts fatal and exhausted outcomes into typed terminal errors", async () => {
   const factory: RoutingAdapterFactory = {
-    host: () => ({ openai: {}, gemini: {} }),
+    host: () => ({ openai: {} }),
     openai: () => ({
       ocr: async () => ({ ok: false, failure: new ProviderFailure("policy_refused") }),
     }),
-    gemini: () => ({}),
     alibaba: () => ({}),
   };
   const session = new ProviderRoutingSession({ routingConfig, factory });
@@ -93,10 +88,8 @@ test("routing session reaches Alibaba only after both host and API families adva
   const factory: RoutingAdapterFactory = {
     host: () => ({
       openai: { ocr: unavailable("host-openai") },
-      gemini: { ocr: unavailable("host-gemini") },
     }),
     openai: () => ({ ocr: unavailable("api-openai") }),
-    gemini: () => ({ ocr: unavailable("api-gemini") }),
     alibaba: () => ({ ocr: async () => {
       calls.push("api-alibaba");
       return { ok: true, validated: true, model: "qwen3.5-ocr", value: { lines: [] } };
@@ -104,7 +97,6 @@ test("routing session reaches Alibaba only after both host and API families adva
   };
   const hostBridge = { capabilities: {
     openai: { ocr: true, scene: false, completion: false },
-    gemini: { ocr: true, scene: false, completion: false },
   }, invoke: async () => assert.fail("factory owns host") } as never;
   const session = new ProviderRoutingSession({
     routingConfig: {
@@ -123,7 +115,7 @@ test("routing session reaches Alibaba only after both host and API families adva
   const image = await sharp({ create: { width: 8, height: 8, channels: 4, background: "white" } }).png().toBuffer();
   const result = await session.ocr(image, { width: 8, height: 8 });
   assert.equal(result.candidate, "api-alibaba");
-  assert.deepEqual(calls, ["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]);
+  assert.deepEqual(calls, ["host-openai", "api-openai", "api-alibaba"]);
 });
 
 test("completion routing forwards the bounded rear-object context without rewriting it", async () => {
@@ -132,7 +124,7 @@ test("completion routing forwards the bounded rear-object context without rewrit
   }).png().toBuffer();
   let prompt = "";
   const factory: RoutingAdapterFactory = {
-    host: () => ({ openai: {}, gemini: {} }),
+    host: () => ({ openai: {} }),
     openai: () => ({
       completion: async (input) => {
         prompt = input.prompt;
@@ -149,7 +141,6 @@ test("completion routing forwards the bounded rear-object context without rewrit
         };
       },
     }),
-    gemini: () => ({}),
     alibaba: () => ({}),
   };
   const session = new ProviderRoutingSession({ routingConfig, factory });
@@ -171,18 +162,17 @@ test("completion routing forwards the bounded rear-object context without rewrit
   assert.equal(session.report.operations[0]?.selectedCandidate, "api-openai");
 });
 
-test("partial host capabilities count transport only for declared operations", async () => {
+test("partial host capabilities never invoke undeclared operations", async () => {
   const calls: string[] = [];
   const hostBridge = {
     capabilities: {
       openai: { ocr: false, scene: true, completion: false },
-      gemini: { ocr: true, scene: false, completion: false },
     },
-    invoke: async (provider: "openai" | "gemini", request: { operation: string }) => {
+    invoke: async (provider: "openai", request: { operation: string }) => {
       calls.push(`${provider}:${request.operation}`);
       return {
         ok: true as const,
-        model: "host-gemini-ocr",
+        model: "host-openai-ocr",
         output: { kind: "text" as const, text: "{\"lines\":[]}" },
       };
     },
@@ -200,16 +190,12 @@ test("partial host capabilities count transport only for declared operations", a
     create: { width: 8, height: 8, channels: 4, background: "white" },
   }).png().toBuffer();
 
-  const result = await session.ocr(image, { width: 8, height: 8 });
-
-  assert.equal(result.candidate, "host-gemini");
-  assert.deepEqual(calls, ["gemini:ocr"]);
-  assert.deepEqual(session.transportAttempts, [
-    { operation: "ocr", candidate: "host-gemini", count: 1 },
-  ]);
+  await assert.rejects(session.ocr(image, { width: 8, height: 8 }), /routing exhausted/);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(session.transportAttempts, []);
   assert.deepEqual(session.report.operations[0]?.attempts, [
     { candidate: "host-openai", status: "unavailable", disposition: "missing_candidate" },
     { candidate: "api-openai", status: "unavailable", disposition: "missing_candidate" },
-    { candidate: "host-gemini", status: "success", model: "host-gemini-ocr" },
+    { candidate: "api-alibaba", status: "unavailable", disposition: "missing_candidate" },
   ]);
 });

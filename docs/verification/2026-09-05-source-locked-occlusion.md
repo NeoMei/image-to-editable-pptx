@@ -205,3 +205,42 @@ and API route coverage is incomplete. Read-only release checks also show
 `origin` main/HEAD still at `29d203a`, no remote fallback branch or `v0.3.0`
 tag, and npm `latest` still at `0.2.2`. No merge, push, tag, publication, or
 cache installation was attempted.
+
+## 2026-09-06: bounded regional repair and saved-return diagnosis
+
+The regional prompt omitted the bbox wire format even though regional analysis
+is a standalone request. A saved host OpenAI response supplied an invalid box
+`[393,47,214,903]`; the parser correctly rejected `x2 must exceed x1`. This is
+consistent with a width/height interpretation, not proof of the model's intent.
+The pending prompt repair shares the full-slide integer corner-coordinate
+contract and explicitly excludes `[x,y,width,height]`. Parser strictness,
+routing advancement, and quality thresholds are unchanged.
+
+A single real host OpenAI regional request with the repaired prompt, using the
+same saved graph's selected crop, succeeded on `gpt-5.6-sol` and parsed three
+nodes and one relation. This is an isolated regional check, not a rerun of the
+natural end-to-end path. Private request/response/summary evidence is retained
+under `.codex-tmp/release-v0.3.0/regional-root-cause-or4OG4/`; the earlier failure
+is under `regional-root-cause-z3qIKm/` in the same private parent directory.
+Fresh focused scene tests passed 33/33 and strict types passed. Fresh full
+`npm run verify` exited 0 with 531 source and 531 compiled tests, strict types,
+build, dependency audit, and whitespace checks.
+
+Offline diagnosis of the saved Gemini return reproduced its rejection using
+the production quality exports. All source appearance qualification checks
+passed. Of 28,800 hidden pixels, 26,707 classified as rear, 1,717 as background,
+376 as unknown, and none as residual front or alpha fringe. The first unknown
+pixel's nearest palette distance was 13, above the frozen maximum of 12.
+Thus the saved return violates the current fail-closed appearance contract;
+these counts do not establish that the remaining contour/seam gates would pass.
+The detailed private diagnosis is under
+`.codex-tmp/release-v0.3.0/quality-root-cause-2026-09-06/`. The precise ChatGPT
+completion pixels cannot be diagnosed because its returned bytes were not saved.
+
+No thresholds were tuned to this live sample. Any anti-aliasing/color tolerance
+policy change needs a separately agreed design and independent labeled
+calibration examples. No Alibaba requests were made in this continuation;
+the user's suspected token limit remains unverified. Release remains
+**BLOCKED**: no accepted live generated layer, generated-artifact offline
+rebuild, or corresponding WPS acceptance has been established. No merge, push,
+tag, npm publication, or installed-cache change was made.

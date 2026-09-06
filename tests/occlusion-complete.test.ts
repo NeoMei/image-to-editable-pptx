@@ -702,6 +702,22 @@ test("fatal routed completion escapes the optional quality fallback", async () =
   );
 });
 
+test("exhausted configured completion APIs remain terminal instead of looking unconfigured", async () => {
+  const { input } = await qualifiedFixture();
+  const terminal = new RoutingTerminalError({
+    sequence: 1,
+    operation: "completion",
+    outcome: "exhausted",
+    selectedCandidate: undefined,
+    selectedModel: undefined,
+    attempts: [{ candidate: "api-openai", status: "auth_unavailable", disposition: "auth_unavailable" }],
+  });
+  await assert.rejects(completeOccludedCandidate(input, {
+    ownsTimeout: true,
+    async complete() { throw terminal; },
+  }), terminal);
+});
+
 test("zero disables completion and a shared budget permits at most four calls", async () => {
   const disabled = await qualifiedFixture();
   let disabledCalls = 0;

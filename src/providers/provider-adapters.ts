@@ -60,20 +60,6 @@ export type ApiAdapterOptions = RoutedProviderConfig & Readonly<{
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_IMAGE_EDITS_URL = "https://api.openai.com/v1/images/edits";
-const GEMINI_API_ORIGIN = "https://generativelanguage.googleapis.com";
-const GEMINI_POLICY_FINISH_REASONS = new Set([
-  "SAFETY",
-  "RECITATION",
-  "BLOCKLIST",
-  "PROHIBITED_CONTENT",
-  "SPII",
-  "IMAGE_SAFETY",
-  "IMAGE_PROHIBITED_CONTENT",
-  "IMAGE_RECITATION",
-  "ESCALATION",
-]);
-const GEMINI_ANALYSIS_SUCCESS_FINISH_REASONS = new Set(["STOP"]);
-const GEMINI_COMPLETION_SUCCESS_FINISH_REASONS = new Set(["STOP", "MAX_TOKENS"]);
 
 function failure(
   status: ConstructorParameters<typeof ProviderFailure>[0],
@@ -115,25 +101,6 @@ export function containsOpenAiPolicyRefusal(payload: unknown): boolean {
       record.reason === "moderation_blocked" ||
       record.code === "content_filter" ||
       record.reason === "content_filter"
-    ) return true;
-    pending.push(...Object.values(record));
-  }
-  return false;
-}
-
-export function containsGeminiPolicyRefusal(payload: unknown): boolean {
-  const pending: unknown[] = [payload];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (Array.isArray(current)) {
-      pending.push(...current);
-      continue;
-    }
-    const record = object(current);
-    if (record === undefined) continue;
-    if (
-      (typeof record.finishReason === "string" && GEMINI_POLICY_FINISH_REASONS.has(record.finishReason)) ||
-      (typeof record.blockReason === "string" && record.blockReason !== "BLOCK_REASON_UNSPECIFIED")
     ) return true;
     pending.push(...Object.values(record));
   }
@@ -491,131 +458,6 @@ export function createOpenAiExecutors(options: ApiAdapterOptions): ProviderOpera
   };
 }
 
-function geminiUrl(model: string): string {
-  if (!/^[A-Za-z0-9._-]{1,128}$/.test(model)) throw new Error("Invalid Gemini model identifier");
-  return `${GEMINI_API_ORIGIN}/v1/models/${model}:generateContent`;
-}
-
-function geminiParts(payload: unknown): Record<string, unknown>[] {
-  const candidates = object(payload)?.candidates;
-  if (!Array.isArray(candidates)) return [];
-  const parts = object(object(candidates[0])?.content)?.parts;
-  return Array.isArray(parts)
-    ? parts.map(object).filter((part): part is Record<string, unknown> => part !== undefined)
-    : [];
-}
-
-function geminiFinishReasonIs(payload: unknown, allowed: ReadonlySet<string>): boolean {
-  const candidates = object(payload)?.candidates;
-  const finishReason = Array.isArray(candidates)
-    ? object(candidates[0])?.finishReason
-    : undefined;
-  return typeof finishReason === "string" && allowed.has(finishReason);
-}
-
-function effectiveGeminiModel(payload: unknown, configured: string): string {
-  const model = object(payload)?.modelVersion;
-  return typeof model === "string" && model.length > 0 ? model : configured;
-}
-
-export function createGeminiExecutors(options: ApiAdapterOptions): ProviderOperationExecutors {
-  const fetcher = options.fetch ?? fetch;
-  const request = async (model: string, body: unknown): Promise<ProviderExecution<unknown>> => {
-    let url: string;
-    try { url = geminiUrl(model); } catch { return failure("invalid_input"); }
-    const result = await requestWithRetries(fetcher, url, {
-      method: "POST",
-      headers: { "x-goog-api-key": options.apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, {
-      requestTimeoutMs: options.requestTimeoutMs,
-      maxAttempts: options.maxAttempts,
-      policy: containsGeminiPolicyRefusal,
-      ...(options.onTransportAttempt === undefined
-        ? {}
-        : { onTransportAttempt: options.onTransportAttempt }),
-    });
-    if (!result.ok) return result;
-    return result.value.payload === undefined ? failure("invalid_output") : success("gemini-http", result.value.payload);
-  };
-  const analyze = async <T>(input: AnalysisAdapterInput, prompt: string, parse: (text: string) => T): Promise<ProviderExecution<T>> => {
-    const response = await request(options.analysisModel, {
-      contents: [{ role: "user", parts: [
-        { text: prompt },
-        { inline_data: { mime_type: "image/png", data: input.image.toString("base64") } },
-      ] }],
-      generationConfig: { responseMimeType: "application/json" },
-    });
-    if (!response.ok) return response;
-    if (!geminiFinishReasonIs(response.value, GEMINI_ANALYSIS_SUCCESS_FINISH_REASONS)) {
-      return failure("invalid_output");
-    }
-    const textParts = geminiParts(response.value).flatMap((part) =>
-      part.thought !== true && typeof part.text === "string" ? [part.text] : []
-    );
-    if (textParts.length === 0) return failure("invalid_output");
-    const text = textParts.join("");
-    try {
-      return success(effectiveGeminiModel(response.value, options.analysisModel), parse(text));
-    } catch {
-      return failure("invalid_output");
-    }
-  };
-  return {
-    ocr: (input) => analyze(input, `${OCR_PROMPT}\nCanvas: ${input.canvas.width} x ${input.canvas.height}.`, (text) => parseValidatedOcrText(text, input.canvas)),
-    scene: (input) => analyze(input, input.prompt, (text) => parseQwenSceneContent(text, input.canvas)),
-    completion: async (input) => {
-      let prepared: PreparedCompletion;
-      try { prepared = await prepareCompletion(input); } catch { return failure("invalid_input"); }
-      const response = await request(options.imageModel, {
-        contents: [{ role: "user", parts: [
-          { text: paddedCompletionPrompt(input.prompt, prepared) },
-          { inline_data: { mime_type: "image/png", data: prepared.image.toString("base64") } },
-          { inline_data: { mime_type: "image/png", data: prepared.hiddenMask.toString("base64") } },
-          { inline_data: { mime_type: "image/png", data: prepared.protectedMask.toString("base64") } },
-        ] }],
-        generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
-      });
-      if (!response.ok) return response;
-      const candidates = object(response.value)?.candidates;
-      if (!Array.isArray(candidates) || candidates.length !== 1) {
-        return failure("invalid_output");
-      }
-      if (!geminiFinishReasonIs(response.value, GEMINI_COMPLETION_SUCCESS_FINISH_REASONS)) {
-        return failure("invalid_output");
-      }
-      const imageParts = geminiParts(response.value).filter((part) => {
-        if (part.thought === true) return false;
-        return object(part.inlineData) !== undefined || object(part.inline_data) !== undefined;
-      });
-      if (imageParts.length !== 1) return failure("invalid_output");
-      const imagePart = imageParts[0];
-      const inline = object(imagePart?.inlineData) ?? object(imagePart?.inline_data);
-      const encoded = inline?.data;
-      if (typeof encoded !== "string") return failure("invalid_output");
-      try {
-        if (encoded.length > Math.ceil(MAX_GENERATED_IMAGE_BYTES * 4 / 3) + 4) throw new Error("Image payload too large");
-        const mimeType = inline?.mimeType ?? inline?.mime_type;
-        if (typeof mimeType !== "string") throw new Error("Image MIME missing");
-        const image = await normalizeGeneratedImage(Buffer.from(encoded, "base64"), mimeType, prepared);
-        const model = effectiveGeminiModel(response.value, options.imageModel);
-        const finishReason = object(candidates[0])?.finishReason;
-        return success(model, {
-          image,
-          modelId: model,
-          taskId: createHash("sha256").update(encoded).digest("hex"),
-          sanitizedMetadata: {
-            finishReason:
-              typeof finishReason === "string" ? finishReason : "STOP",
-          },
-        });
-      } catch {
-        return failure("invalid_output");
-      }
-    },
-  };
-}
-
 function createHostProviderExecutors(
   bridge: FileHostBridge,
   provider: HostProvider,
@@ -642,33 +484,13 @@ function createHostProviderExecutors(
       if (result.output.kind !== "text") throw new Error("Expected host scene text");
       return parseQwenSceneContent(result.output.text, input.canvas);
     }) } : {}),
-    ...(capabilities.completion ? { completion: (input: CompletionAdapterInput) => invoke({ operation: "completion", prompt: input.prompt, image: input.image, canvas: input.canvas, hiddenMask: input.hiddenMask, protectedMask: input.protectedMask }, async (result) => {
-      if (result.output.kind !== "image") throw new Error("Expected host completion image");
-      const metadata = await sharp(result.output.image, { animated: true }).metadata();
-      if (
-        (metadata.format !== "png" && metadata.format !== "jpeg") ||
-        (metadata.pages ?? 1) !== 1
-      ) {
-        throw new Error("Host completion must be a single-frame PNG or JPEG");
-      }
-      if (metadata.width !== input.canvas.width || metadata.height !== input.canvas.height) {
-        throw new Error("Host completion geometry mismatch");
-      }
-      const image = await sharp(result.output.image).png().toBuffer();
-      return {
-        image,
-        modelId: result.model,
-        taskId: createHash("sha256").update(image).digest("hex"),
-        sanitizedMetadata: { channel: "host" },
-      };
-    }) } : {}),
+    // Host completion remains disabled even when an old manifest advertises it.
   };
 }
 
-export function createHostExecutors(bridge: FileHostBridge): Readonly<Record<HostProvider, ProviderOperationExecutors>> {
+export function createHostExecutors(bridge: FileHostBridge): Readonly<{ openai: ProviderOperationExecutors }> {
   return {
     openai: createHostProviderExecutors(bridge, "openai"),
-    gemini: createHostProviderExecutors(bridge, "gemini"),
   };
 }
 

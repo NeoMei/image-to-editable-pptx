@@ -667,7 +667,14 @@ export async function evaluateOccludedCandidate(
       sanitizedMetadata: providerResult.sanitizedMetadata,
     };
   } catch (error) {
-    if (error instanceof RoutingTerminalError) throw error;
+    if (error instanceof RoutingTerminalError) {
+      // No configured completion candidate is an optional-stage absence, not
+      // a failed inference. Preserve terminal semantics for real API failures.
+      const missing = error.result.operation === "completion" &&
+        error.result.outcome === "exhausted" && error.result.attempts.length > 0 &&
+        error.result.attempts.every((attempt) => attempt.status === "unavailable" && attempt.disposition === "missing_candidate");
+      if (!missing) throw error;
+    }
     return checkedOutcome({ status: "skipped", reason: "provider_failure" });
   }
   try {

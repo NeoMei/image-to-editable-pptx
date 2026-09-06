@@ -176,15 +176,11 @@ async function acceptedCompletionReturn(
 
 function routedOcclusionBridge(options: {
   fixture: Awaited<ReturnType<typeof routedOcclusionFixture>>;
-  completionFailure?: ProviderFailure;
-  completionMode?: "accepted" | "residual";
-  onCompletion?: () => Promise<void>;
   calls?: string[];
 }): FileHostBridge {
   return {
     capabilities: {
       openai: { ocr: true, scene: true, completion: true },
-      gemini: { ocr: true, scene: true, completion: true },
     },
     async invoke(provider, request) {
       options.calls?.push(`${provider}:${request.operation}`);
@@ -202,23 +198,50 @@ function routedOcclusionBridge(options: {
           output: { kind: "text", text: options.fixture.scene },
         };
       }
-      if (options.completionFailure !== undefined) {
-        return { ok: false, failure: options.completionFailure };
-      }
-      await options.onCompletion?.();
-      return {
-        ok: true,
-        model: `${provider}-completion-model`,
-        output: {
-          kind: "image",
-          image: options.completionMode === "accepted"
-            ? await acceptedCompletionReturn(request)
-            : await residualOccluderReturn(request),
-        },
-      };
+      assert.fail("host completion must never be invoked");
     },
   };
 }
+
+
+function installCompletionApi(options: {
+  completionFailure?: ProviderFailure;
+  completionMode?: "accepted" | "residual";
+  onCompletion?: () => Promise<void>;
+  calls?: string[];
+} = {}): void {
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "https://api.openai.com/v1/images/edits");
+    assert.equal(init?.method, "POST");
+    assert.ok(init?.body instanceof FormData);
+    options.calls?.push("api-openai:completion");
+    if (options.completionFailure) return Response.json({ error: { code: "content_filter", message: "policy refused" } }, { status: 400 });
+    await options.onCompletion?.();
+    const form = init.body;
+    const sourceFile = form.get("image") as Blob;
+    const maskFile = form.get("mask") as Blob;
+    const image = Buffer.from(await sourceFile.arrayBuffer());
+    const alpha = await sharp(Buffer.from(await maskFile.arrayBuffer())).extractChannel("alpha").raw().toBuffer({ resolveWithObject: true });
+    const hidden = await sharp(Buffer.from(alpha.data.map(value => 255 - value)), { raw: { width: alpha.info.width, height: alpha.info.height, channels: 1 } }).png().toBuffer();
+    const match = /original crop occupies x=(\d+), y=(\d+), width=(\d+), height=(\d+)/.exec(String(form.get("prompt")));
+    assert.ok(match);
+    const [left, top, width, height] = match.slice(1).map(Number) as [number, number, number, number];
+    const request = {
+      operation: "completion" as const, prompt: "", canvas: { width, height },
+      image: await sharp(image).extract({ left, top, width, height }).png().toBuffer(),
+      hiddenMask: await sharp(hidden).extract({ left, top, width, height }).png().toBuffer(),
+    };
+    const completed = options.completionMode === "accepted"
+      ? await acceptedCompletionReturn(request) : await residualOccluderReturn(request);
+    const padded = await sharp(completed).extend({
+      left, top, right: alpha.info.width - left - width, bottom: alpha.info.height - top - height,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    }).png().toBuffer();
+    return Response.json({ data: [{ b64_json: padded.toString("base64") }] });
+  };
+}
+
+const completionApiConfig = { apiKey: "test-only-key", analysisModel: "test-analysis", imageModel: "gpt-image-2" };
 
 const routedOcclusionConfig = {
   requestTimeoutMs: 100,
@@ -326,7 +349,6 @@ test("host-only analysis builds offline with no API credentials", async () => {
   const bridge: FileHostBridge = {
     capabilities: {
       openai: { ocr: true, scene: true, completion: false },
-      gemini: { ocr: false, scene: false, completion: false },
     },
     async invoke(_provider, request) {
       return {
@@ -374,10 +396,65 @@ test("host-only analysis builds offline with no API credentials", async () => {
       const built = await buildSlide({ analysisDir, outDir: outputDir });
       assert.equal(networkCalls, 0);
       await access(built.pptxPath);
+
+      // Retired provider names in historical provenance never become live
+      // execution instructions, but must not invalidate a self-contained v2.
+      assert.ok(ledger.routing);
+      const historicalLedger = {
+        ...ledger,
+        routing: {
+          ...ledger.routing,
+          transportAttempts: ledger.routing.transportAttempts.map((entry) => ({ ...entry, candidate: "host-gemini" })),
+          operations: ledger.routing.operations.map((entry) => ({
+            ...entry,
+            selectedCandidate: "host-gemini",
+            attempts: entry.attempts.map((attempt) => ({ ...attempt, candidate: "host-gemini" })),
+          })),
+        },
+      };
+      await writeFile(join(analysisDir, "analysis-ledger.json"), JSON.stringify(historicalLedger));
+      const historical = await readAnalysisPackage(analysisDir);
+      assert.equal(historical.analysisVersion, 2);
+      const rebuilt = await buildSlide({ analysisDir, outDir: join(directory, "historical-output") });
+      await access(rebuilt.pptxPath);
+      assert.equal(networkCalls, 0);
     } finally {
       globalThis.fetch = originalFetch;
     }
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("host-only occlusion analysis preserves the background when completion APIs are absent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "host-completion-disabled-"));
+  const fixture = await routedOcclusionFixture();
+  const calls: string[] = [];
+  const imagePath = join(directory, "source.png");
+  const analysisDir = join(directory, "analysis");
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => assert.fail("host-only analysis must not contact any API");
+    await writeFile(imagePath, fixture.image);
+    await analyzeSlide({ imagePath, outDir: analysisDir, routingConfig: routedOcclusionConfig, hostBridge: routedOcclusionBridge({ fixture, calls }) });
+    assert.deepEqual(calls, ["openai:ocr", "openai:scene"]);
+    const ledger = await readAnalysisPackage(analysisDir);
+    assert.equal(ledger.analysisVersion, 2);
+    if (ledger.analysisVersion !== 2) return;
+    assert.equal(ledger.completions.length, 0);
+    assert.deepEqual(ledger.routing?.transportAttempts.filter(item => item.operation === "completion"), []);
+    const completion = ledger.routing?.operations.find(item => item.operation === "completion");
+    assert.equal(completion?.outcome, "exhausted");
+    assert.ok(completion?.attempts.every(item => item.status === "unavailable" && item.disposition === "missing_candidate"));
+    const diagnostics = CompletionDiagnosticsSchema.parse(JSON.parse(await readFile(join(analysisDir, COMPLETION_DIAGNOSTICS_NAME), "utf8")));
+    assert.equal(diagnostics.candidates[0]?.status, "skipped");
+    const outputDir = join(directory, "output");
+    const built = await buildSlide({ analysisDir, outDir: outputDir });
+    await access(built.pptxPath);
+    const background = await sharp(join(outputDir, "clean-background.png")).ensureAlpha().raw().toBuffer();
+    assert.deepEqual([...background.subarray((24 * OCCLUSION_WIDTH + 145) * 4, (24 * OCCLUSION_WIDTH + 145) * 4 + 4)], [...REAR_COLOR]);
+  } finally {
+    globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -393,10 +470,11 @@ test("records routed transport success separately from quality rejection without
   const originalFetch = globalThis.fetch;
   let networkCalls = 0;
   try {
+    installCompletionApi({ calls });
     await analyzeSlide({
       imagePath,
       outDir: analysisDir,
-      routingConfig: routedOcclusionConfig,
+      routingConfig: { ...routedOcclusionConfig, openai: completionApiConfig },
       hostBridge: routedOcclusionBridge({ fixture, calls }),
     });
 
@@ -408,18 +486,18 @@ test("records routed transport success separately from quality rejection without
     assert.equal(calls.filter((call) => call.endsWith(":completion")).length, 1);
     assert.deepEqual(
       calls.filter((call) => call.endsWith(":completion")),
-      ["openai:completion"],
+      ["api-openai:completion"],
     );
     const routedCompletion = ledger.routing?.operations.find(
       ({ operation }) => operation === "completion",
     );
     assert.equal(routedCompletion?.outcome, "success");
-    assert.equal(routedCompletion?.selectedCandidate, "host-openai");
+    assert.equal(routedCompletion?.selectedCandidate, "api-openai");
     assert.deepEqual(
       ledger.routing?.transportAttempts.filter(
         ({ operation }) => operation === "completion",
       ),
-      [{ operation: "completion", candidate: "host-openai", count: 1 }],
+      [{ operation: "completion", candidate: "api-openai", count: 1 }],
     );
     const diagnostics = CompletionDiagnosticsSchema.parse(JSON.parse(
       await readFile(join(analysisDir, COMPLETION_DIAGNOSTICS_NAME), "utf8"),
@@ -463,26 +541,24 @@ test("terminal completion refusal aborts analysis instead of becoming a quality 
   const fixture = await routedOcclusionFixture();
   const calls: string[] = [];
   await writeFile(imagePath, fixture.image, { mode: 0o600 });
+  const originalFetch = globalThis.fetch;
   try {
+    installCompletionApi({ calls, completionFailure: new ProviderFailure("policy_refused") });
     await assert.rejects(
       analyzeSlide({
         imagePath,
         outDir,
-        routingConfig: routedOcclusionConfig,
+        routingConfig: { ...routedOcclusionConfig, openai: completionApiConfig },
         hostBridge: routedOcclusionBridge({
           fixture,
           calls,
-          completionFailure: new ProviderFailure(
-            "policy_refused",
-            "policy_refused",
-          ),
         }),
       }),
       /Provider routing fatal for completion/,
     );
     assert.deepEqual(
       calls.filter((call) => call.endsWith(":completion")),
-      ["openai:completion"],
+      ["api-openai:completion"],
     );
     const failedRuns = await readdir(`${outDir}.failed-runs`);
     assert.equal(failedRuns.length, 1);
@@ -496,6 +572,7 @@ test("terminal completion refusal aborts analysis instead of becoming a quality 
       /ENOENT/,
     );
   } finally {
+    globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -510,13 +587,13 @@ test("actual evaluated completion survives analysis publication and offline buil
   const originalFetch = globalThis.fetch;
   let networkCalls = 0;
   try {
+    installCompletionApi({ completionMode: "accepted" });
     await analyzeSlide({
       imagePath,
       outDir: analysisDir,
-      routingConfig: routedOcclusionConfig,
+      routingConfig: { ...routedOcclusionConfig, openai: completionApiConfig },
       hostBridge: routedOcclusionBridge({
         fixture,
-        completionMode: "accepted",
       }),
     });
     const ledger = await readAnalysisPackage(analysisDir);
@@ -574,7 +651,13 @@ test("completion diagnostics publication failure preserves earlier output and fo
   const external = join(directory, "foreign-diagnostics.json");
   await writeFile(imagePath, fixture.image, { mode: 0o600 });
   await writeFile(external, "foreign diagnostics remain unchanged\n", { mode: 0o600 });
+  const originalFetch = globalThis.fetch;
   try {
+    installCompletionApi({ onCompletion: async () => {
+      const stagingName = (await readdir(directory)).find(name => name.startsWith(".output.staging-"));
+      assert.ok(stagingName);
+      await symlink(external, join(directory, stagingName, COMPLETION_DIAGNOSTICS_NAME));
+    } });
     await runPipeline({
       imagePath,
       outDir: outputDir,
@@ -587,19 +670,9 @@ test("completion diagnostics publication failure preserves earlier output and fo
       runPipeline({
         imagePath,
         outDir: outputDir,
-        routingConfig: routedOcclusionConfig,
+        routingConfig: { ...routedOcclusionConfig, openai: completionApiConfig },
         hostBridge: routedOcclusionBridge({
           fixture,
-          async onCompletion() {
-            const stagingName = (await readdir(directory)).find((name) =>
-              name.startsWith(".output.staging-"),
-            );
-            assert.ok(stagingName);
-            await symlink(
-              external,
-              join(directory, stagingName, COMPLETION_DIAGNOSTICS_NAME),
-            );
-          },
         }),
       }),
       /completion diagnostics/i,
@@ -629,6 +702,7 @@ test("completion diagnostics publication failure preserves earlier output and fo
       true,
     );
   } finally {
+    globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
   }
 });

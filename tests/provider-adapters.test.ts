@@ -5,7 +5,6 @@ import sharp from "sharp";
 
 import {
   createAlibabaExecutors,
-  createGeminiExecutors,
   createHostExecutors,
   createOpenAiExecutors,
   prepareCompletion,
@@ -49,6 +48,19 @@ const sceneText = JSON.stringify({
     confidence: 1, zIndex: 0, label: "canvas", extractionHints: [],
   }],
   relations: [],
+});
+
+test("host executors expose only the OpenAI provider", () => {
+  const executors = createHostExecutors({
+    capabilities: {
+      openai: { ocr: false, scene: false, completion: false },
+    },
+    invoke: async () => {
+      throw new Error("not called");
+    },
+  });
+
+  assert.deepEqual(Object.keys(executors), ["openai"]);
 });
 
 test("OpenAI OCR uses the fixed Responses endpoint and validates pixel geometry", async () => {
@@ -154,7 +166,7 @@ for (const operation of ["ocr", "scene"] as const) {
       const router = new SerialOperationRouter();
       const result = await router.route<unknown>(operation, {
         "api-openai": () => executors[operation]!(request),
-        "host-gemini": async () => { assert.fail("fatal envelope must not advance to Gemini"); },
+        "api-alibaba": async () => { assert.fail("fatal envelope must not advance to Alibaba"); },
       });
       assert.equal(result.outcome, "fatal");
       assert.equal(result.attempts.at(-1)?.status, expected);
@@ -197,94 +209,6 @@ for (const operation of ["ocr", "scene"] as const) {
     });
   }
 }
-
-test("Gemini scene uses fixed generateContent endpoint and accepts inlineData output aliases", async () => {
-  let requestUrl = "";
-  let headers: HeadersInit | undefined;
-  const fetcher: typeof fetch = async (input, init) => {
-    requestUrl = String(input);
-    headers = init?.headers;
-    return new Response(JSON.stringify({
-      modelVersion: "gemini-2.5-flash-2026-08",
-      candidates: [{ finishReason: "STOP", content: { parts: [{ text: sceneText }] } }],
-    }), { status: 200 });
-  };
-  const result = await createGeminiExecutors({
-    apiKey: "gemini-test-key", analysisModel: "gemini-2.5-flash",
-    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-    maxAttempts: 1, fetch: fetcher,
-  }).scene!({ image: await png(), canvas, prompt: "scene" });
-
-  assert.equal(result.ok, true);
-  if (result.ok) assert.equal(result.model, "gemini-2.5-flash-2026-08");
-  assert.equal(requestUrl, "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent");
-  assert.equal((headers as Record<string, string>)["x-goog-api-key"], "gemini-test-key");
-});
-
-test("Gemini OCR ignores thought text and parses the final answer", async () => {
-  const finalText = JSON.stringify({
-    lines: [{
-      text: "actual",
-      bbox: { x: 2, y: 3, width: 10, height: 8 },
-      quad: [{ x: 2, y: 3 }, { x: 12, y: 3 }, { x: 12, y: 11 }, { x: 2, y: 11 }],
-    }],
-  });
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash",
-    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-    maxAttempts: 1,
-    fetch: async () => Response.json({
-      candidates: [{ finishReason: "STOP", content: { parts: [
-        { thought: true, text: '{"lines":[]}' },
-        { text: finalText },
-      ] } }],
-    }),
-  }).ocr!({ image: await png(), canvas });
-
-  assert.equal(result.ok, true);
-  if (result.ok) assert.equal(result.value.lines[0]?.text, "actual");
-});
-
-test("Gemini scene joins split final text parts in order", async () => {
-  const splitAt = Math.floor(sceneText.length / 2);
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash",
-    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-    maxAttempts: 1,
-    fetch: async () => Response.json({
-      candidates: [{ finishReason: "STOP", content: { parts: [
-        { text: sceneText.slice(0, splitAt) },
-        { text: sceneText.slice(splitAt) },
-      ] } }],
-    }),
-  }).scene!({ image: await png(), canvas, prompt: "scene" });
-
-  assert.equal(result.ok, true);
-  if (result.ok) assert.equal(result.value.nodes[0]?.id, "background");
-});
-
-test("Gemini image completion excludes thought images and rejects incompatible geometry", async () => {
-  const thought = await png(64, 32);
-  const incompatible = await png(32, 64);
-  const fetcher: typeof fetch = async () => new Response(JSON.stringify({
-    modelVersion: "gemini-3.1-flash-image",
-    candidates: [{ finishReason: "STOP", content: { parts: [
-      { thought: true, inlineData: { mimeType: "image/png", data: thought.toString("base64") } },
-      { inline_data: { mime_type: "image/png", data: incompatible.toString("base64") } },
-    ] } }],
-  }), { status: 200 });
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash",
-    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-    maxAttempts: 1, fetch: fetcher,
-  }).completion!({
-    image: await png(), canvas, prompt: "complete", hiddenMask: await png(),
-    protectedMask: await png(),
-  });
-
-  assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.failure.status, "invalid_output");
-});
 
 test("completion padding reads alpha support without treating transparent white as protected", async () => {
   const crop = { width: 2, height: 2 };
@@ -368,66 +292,6 @@ test("OpenAI completion pads to valid geometry, sends transparent hidden mask, a
   }
 });
 
-test("Gemini API completion carries the cleared crop through padding and crop reversal", async () => {
-  const fixture = await sourceLockedOcclusionFixture();
-  const hiddenMask = await fixtureMask(fixture.masks.hidden);
-  const protectedMask = await fixtureMask(
-    Uint8Array.from(fixture.masks.hidden, (value) => value === 0 ? 255 : 0),
-  );
-  let submittedImage: Buffer | undefined;
-  let submittedMask: Buffer | undefined;
-  const fetcher: typeof fetch = async (_input, init) => {
-    const body = JSON.parse(String(init?.body));
-    const parts = body.contents[0].parts;
-    submittedImage = Buffer.from(parts[1].inline_data.data, "base64");
-    submittedMask = Buffer.from(parts[2].inline_data.data, "base64");
-    return Response.json({
-      modelVersion: "gemini-3.1-flash-image",
-      candidates: [{ finishReason: "STOP", content: { parts: [{
-        inlineData: { mimeType: "image/png", data: submittedImage.toString("base64") },
-      }] } }],
-    });
-  };
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash",
-    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-    maxAttempts: 1, fetch: fetcher,
-  }).completion!({
-    image: fixture.pngs.cleared,
-    canvas: fixture.geometry.canvas,
-    prompt: "complete rear object",
-    hiddenMask,
-    protectedMask,
-  });
-  assert.ok(submittedImage);
-  assert.ok(submittedMask);
-  assert.deepEqual(await pixel(submittedImage, 456 + 14, 340 + 4), [0, 0, 0, 0]);
-  assert.deepEqual(await pixel(submittedImage, 456 + 4, 340 + 4), [40, 100, 160, 255]);
-  assert.deepEqual(await pixel(submittedMask, 456 + 14, 340 + 4), [255, 255, 255, 0]);
-  assert.deepEqual(await pixel(submittedMask, 456 + 4, 340 + 4), [255, 255, 255, 255]);
-  assert.equal(result.ok, true);
-  if (result.ok) {
-    assert.deepEqual(await pixel(result.value.image, 14, 4), [0, 0, 0, 0]);
-    assert.deepEqual(await pixel(result.value.image, 4, 4), [40, 100, 160, 255]);
-  }
-});
-
-test("Gemini completion rejects ambiguous multiple final images", async () => {
-  const image = await png(1024, 512);
-  const fetcher: typeof fetch = async () => new Response(JSON.stringify({
-    candidates: [{ finishReason: "STOP", content: { parts: [
-      { inlineData: { mimeType: "image/png", data: image.toString("base64") } },
-      { inlineData: { mimeType: "image/png", data: image.toString("base64") } },
-    ] } }],
-  }), { status: 200 });
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash", imageModel: "gemini-3.1-flash-image",
-    requestTimeoutMs: 1000, maxAttempts: 1, fetch: fetcher,
-  }).completion!({ image: await png(), canvas, prompt: "complete", hiddenMask: await png(), protectedMask: await png() });
-  assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.failure.status, "invalid_output");
-});
-
 test("OpenAI completion rejects multiple results and stops routing", async () => {
   const generated = await png(1152, 576);
   let fallbackCalls = 0;
@@ -445,7 +309,7 @@ test("OpenAI completion rejects multiple results and stops routing", async () =>
     "api-openai": () => executors.completion!({
       image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
     }),
-    "host-gemini": async () => {
+    "api-alibaba": async () => {
       fallbackCalls += 1;
       assert.fail("ambiguous OpenAI results must stop routing");
     },
@@ -457,145 +321,21 @@ test("OpenAI completion rejects multiple results and stops routing", async () =>
   assert.equal(fallbackCalls, 0);
 });
 
-test("Gemini completion rejects multiple candidates and stops routing", async () => {
-  const generated = await png(1152, 576);
-  const candidate = {
-    finishReason: "STOP",
-    content: { parts: [{
-      inlineData: { mimeType: "image/png", data: generated.toString("base64") },
-    }] },
-  };
-  let fallbackCalls = 0;
-  const executors = createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash", imageModel: "gemini-3.1-flash-image",
+test("OpenAI completion rejects non-PNG bytes from its PNG response field", async () => {
+  const jpeg = await sharp({
+    create: { width: 1152, height: 576, channels: 3, background: "red" },
+  }).jpeg().toBuffer();
+  const result = await createOpenAiExecutors({
+    apiKey: "key", analysisModel: "gpt-4.1", imageModel: "gpt-image-2",
     requestTimeoutMs: 1000, maxAttempts: 1,
-    fetch: async () => Response.json({ candidates: [candidate, candidate] }),
+    fetch: async () => Response.json({ data: [{ b64_json: jpeg.toString("base64") }] }),
+  }).completion!({
+    image: await png(), canvas, prompt: "complete",
+    hiddenMask: await png(), protectedMask: await png(),
   });
-  const image = await png();
-  const router = new SerialOperationRouter();
-  const result = await router.route("completion", {
-    "api-gemini": () => executors.completion!({
-      image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
-    }),
-    "api-alibaba": async () => {
-      fallbackCalls += 1;
-      assert.fail("ambiguous Gemini candidates must stop routing");
-    },
-  });
-
-  assert.equal(result.outcome, "fatal");
-  assert.equal(result.attempts.at(-1)?.status, "invalid_output");
-  assert.equal(router.report.stopped, true);
-  assert.equal(fallbackCalls, 0);
-});
-
-test("Gemini documented content-filter finish reasons are fatal across OCR, scene, and completion", async () => {
-  const cases = [
-    { operation: "ocr", finishReason: "SPII" },
-    { operation: "scene", finishReason: "RECITATION" },
-    { operation: "completion", finishReason: "IMAGE_PROHIBITED_CONTENT" },
-    { operation: "completion", finishReason: "IMAGE_RECITATION" },
-    { operation: "scene", finishReason: "ESCALATION" },
-  ] as const;
-
-  for (const { operation, finishReason } of cases) {
-    let calls = 0;
-    const executors = createGeminiExecutors({
-      apiKey: "key", analysisModel: "gemini-2.5-flash",
-      imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-      maxAttempts: 2,
-      fetch: async () => {
-        calls += 1;
-        return Response.json({ candidates: [{ finishReason }] });
-      },
-    });
-    const image = await png();
-    const result = operation === "ocr"
-      ? await executors.ocr!({ image, canvas })
-      : operation === "scene"
-        ? await executors.scene!({ image, canvas, prompt: "scene" })
-        : await executors.completion!({
-            image, canvas, prompt: "complete",
-            hiddenMask: image, protectedMask: image,
-          });
-
-    assert.equal(result.ok, false, `${finishReason} must fail`);
-    if (!result.ok) {
-      assert.equal(result.failure.status, "policy_refused", finishReason);
-    }
-    assert.equal(calls, 1, `${finishReason} must not retry`);
-  }
-});
-
-test("Gemini prompt-level blocking is fatal and is never retried", async () => {
-  let calls = 0;
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash",
-    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-    maxAttempts: 2,
-    fetch: async () => {
-      calls += 1;
-      return Response.json({ promptFeedback: { blockReason: "SAFETY" } });
-    },
-  }).ocr!({ image: await png(), canvas });
 
   assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.failure.status, "policy_refused");
-  assert.equal(calls, 1);
-});
-
-test("Gemini non-policy finish reasons remain invalid output rather than refusals", async () => {
-  const cases = [
-    { operation: "ocr", finishReason: "LANGUAGE" },
-    { operation: "scene", finishReason: "OTHER" },
-    { operation: "completion", finishReason: "NO_IMAGE" },
-    { operation: "completion", finishReason: "IMAGE_OTHER" },
-  ] as const;
-
-  for (const { operation, finishReason } of cases) {
-    let calls = 0;
-    let fallbackCalls = 0;
-    const generated = await png(1152, 576);
-    const executors = createGeminiExecutors({
-      apiKey: "key", analysisModel: "gemini-2.5-flash",
-      imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
-      maxAttempts: 1,
-      fetch: async () => {
-        calls += 1;
-        return Response.json({
-          candidates: [{
-            finishReason,
-            content: { parts: operation === "completion"
-              ? [{ inlineData: { mimeType: "image/png", data: generated.toString("base64") } }]
-              : [{ text: operation === "ocr" ? '{"lines":[]}' : sceneText }],
-            },
-          }],
-        });
-      },
-    });
-    const image = await png();
-    const router = new SerialOperationRouter();
-    const result = await router.route<unknown>(operation, {
-      "api-gemini": () => operation === "ocr"
-        ? executors.ocr!({ image, canvas })
-        : operation === "scene"
-          ? executors.scene!({ image, canvas, prompt: "scene" })
-          : executors.completion!({
-              image, canvas, prompt: "complete",
-              hiddenMask: image, protectedMask: image,
-            }),
-      "api-alibaba": async () => {
-        fallbackCalls += 1;
-        assert.fail("invalid Gemini finish state must stop routing");
-      },
-    });
-
-    assert.equal(result.outcome, "fatal", `${finishReason} must be terminal`);
-    assert.equal(result.attempts.at(-1)?.status, "invalid_output", finishReason);
-    assert.equal(router.report.stopped, true);
-    assert.equal(calls, 1);
-    assert.equal(fallbackCalls, 0);
-  }
+  if (!result.ok) assert.equal(result.failure.status, "invalid_output");
 });
 
 test("host output is semantically validated before becoming router success", async () => {
@@ -603,7 +343,6 @@ test("host output is semantically validated before becoming router success", asy
   const executors = createHostExecutors({
     capabilities: {
       openai: { ocr: true, scene: true, completion: true },
-      gemini: { ocr: false, scene: false, completion: false },
     },
     invoke: async (_provider, request) => request.operation === "scene"
       ? { ok: true, model: "host-scene", output: { kind: "text", text: sceneText } }
@@ -612,86 +351,12 @@ test("host output is semantically validated before becoming router success", asy
 
   const scene = await executors.openai.scene!({ image, canvas, prompt: "scene" });
   assert.equal(scene.ok, true);
-  const completion = await executors.openai.completion!({
-    image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
-  });
-  assert.equal(completion.ok, false);
-  if (!completion.ok) assert.equal(completion.failure.status, "invalid_output");
+  const ocr = await executors.openai.ocr!({ image, canvas });
+  assert.equal(ocr.ok, false);
+  if (!ocr.ok) assert.equal(ocr.failure.status, "invalid_output");
 });
 
-test("host completion rejects unsupported and multi-frame image artifacts", async (t) => {
-  const framePixels = Buffer.alloc(canvas.width * canvas.height * 2 * 4, 255);
-  for (let offset = 0; offset < canvas.width * canvas.height * 4; offset += 4) {
-    framePixels[offset] = 255;
-    framePixels[offset + 1] = 0;
-    framePixels[offset + 2] = 0;
-  }
-  for (let offset = canvas.width * canvas.height * 4; offset < framePixels.length; offset += 4) {
-    framePixels[offset] = 0;
-    framePixels[offset + 1] = 0;
-    framePixels[offset + 2] = 255;
-  }
-  const frames = sharp(framePixels, {
-    raw: { width: canvas.width, height: canvas.height * 2, channels: 4, pageHeight: canvas.height },
-  });
-  const cases = [
-    {
-      name: "SVG",
-      artifact: Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${canvas.width}" height="${canvas.height}"/>`),
-    },
-    { name: "animated GIF", artifact: await frames.clone().gif({ loop: 0, delay: [100, 100] }).toBuffer() },
-    { name: "multipage TIFF", artifact: await frames.clone().tiff().toBuffer() },
-  ];
-
-  for (const entry of cases) {
-    await t.test(entry.name, async () => {
-      const executors = createHostExecutors({
-        capabilities: {
-          openai: { ocr: false, scene: false, completion: true },
-          gemini: { ocr: false, scene: false, completion: false },
-        },
-        invoke: async () => ({
-          ok: true, model: "host-image", output: { kind: "image", image: entry.artifact },
-        }),
-      });
-      const image = await png();
-      const result = await executors.openai.completion!({
-        image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
-      });
-
-      assert.equal(result.ok, false);
-      if (!result.ok) assert.equal(result.failure.status, "invalid_output");
-    });
-  }
-});
-
-test("host completion accepts single-frame PNG and JPEG artifacts", async () => {
-  for (const artifact of [
-    await png(),
-    await sharp({
-      create: { ...canvas, channels: 3, background: "#336699" },
-    }).jpeg().toBuffer(),
-  ]) {
-    const executors = createHostExecutors({
-      capabilities: {
-        openai: { ocr: false, scene: false, completion: true },
-        gemini: { ocr: false, scene: false, completion: false },
-      },
-      invoke: async () => ({
-        ok: true, model: "host-image", output: { kind: "image", image: artifact },
-      }),
-    });
-    const image = await png();
-    const result = await executors.openai.completion!({
-      image, canvas, prompt: "complete", hiddenMask: image, protectedMask: image,
-    });
-
-    assert.equal(result.ok, true);
-    if (result.ok) assert.equal((await sharp(result.value.image).metadata()).format, "png");
-  }
-});
-
-test("transient transport is bounded and authentication advances without retry", async () => {
+test("OpenAI transient transport and authentication attempts are bounded", async () => {
   let transientCalls = 0;
   const recordedAttempts: number[] = [];
   const transient = createOpenAiExecutors({
@@ -707,9 +372,9 @@ test("transient transport is bounded and authentication advances without retry",
   if (!transientResult.ok) assert.equal(transientResult.failure.status, "retryable_exhausted");
 
   let authCalls = 0;
-  const auth = createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash",
-    imageModel: "gemini-3.1-flash-image", requestTimeoutMs: 1000,
+  const auth = createOpenAiExecutors({
+    apiKey: "key", analysisModel: "gpt-4.1",
+    imageModel: "gpt-image-2", requestTimeoutMs: 1000,
     maxAttempts: 2,
     fetch: async () => { authCalls += 1; return new Response("denied", { status: 401 }); },
   });
@@ -819,45 +484,5 @@ test("Alibaba scene classifies SDK transport failures as retryable exhausted", a
     assert.equal(calls, 1);
   } finally {
     globalThis.fetch = originalFetch;
-  }
-});
-
-test("generated image MIME must match the bytes that were decoded", async () => {
-  const jpeg = await sharp({
-    create: { width: 1152, height: 576, channels: 3, background: "red" },
-  }).jpeg().toBuffer();
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash", imageModel: "gemini-3.1-flash-image",
-    requestTimeoutMs: 1000, maxAttempts: 1,
-    fetch: async () => Response.json({
-      candidates: [{ finishReason: "STOP", content: { parts: [{
-        inlineData: { mimeType: "image/png", data: jpeg.toString("base64") },
-      }] } }],
-    }),
-  }).completion!({
-    image: await png(), canvas, prompt: "complete",
-    hiddenMask: await png(), protectedMask: await png(),
-  });
-  assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.failure.status, "invalid_output");
-});
-
-test("Gemini completion records the selected candidate finish reason", async () => {
-  const generated = await png(1152, 576);
-  const result = await createGeminiExecutors({
-    apiKey: "key", analysisModel: "gemini-2.5-flash", imageModel: "gemini-3.1-flash-image",
-    requestTimeoutMs: 1000, maxAttempts: 1,
-    fetch: async () => Response.json({
-      candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{
-        inlineData: { mimeType: "image/png", data: generated.toString("base64") },
-      }] } }],
-    }),
-  }).completion!({
-    image: await png(), canvas, prompt: "complete",
-    hiddenMask: await png(), protectedMask: await png(),
-  });
-  assert.equal(result.ok, true);
-  if (result.ok) {
-    assert.deepEqual(result.value.sanitizedMetadata, { finishReason: "MAX_TOKENS" });
   }
 });

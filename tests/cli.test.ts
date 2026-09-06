@@ -267,7 +267,7 @@ test("dispatches a host-only network command without API credentials", async () 
       run: async (options) => {
         dispatched = true;
         assert.equal(options.routingConfig?.openai, undefined);
-        assert.equal(options.routingConfig?.gemini, undefined);
+        assert.equal("gemini" in options.routingConfig!, false);
         assert.equal(options.routingConfig?.alibaba, undefined);
       },
     },

@@ -3,8 +3,8 @@ import { promisify } from "node:util";
 
 import type { FileHostBridge, HostBridgeRequest, HostBridgeResult, HostProvider } from "./host-bridge.js";
 import {
-  containsGeminiPolicyRefusal, containsOpenAiPolicyRefusal,
-  normalizeGeneratedImage, openAiText, paddedCompletionPrompt, prepareCompletion,
+  containsOpenAiPolicyRefusal,
+  openAiText,
 } from "./provider-adapters.js";
 import { isSafeModelIdentifier, ProviderFailure, type ProviderFailureStatus } from "./routing.js";
 
@@ -17,7 +17,6 @@ type DiscoveryOptions = Readonly<{
 }>;
 const execute = promisify(execFile);
 const MAX_TEXT_BYTES = 8 * 1024 * 1024;
-const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 
 function object(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -36,7 +35,7 @@ function httpFailure(status: number): ProviderFailureStatus {
 }
 
 function refused(payload: unknown): boolean {
-  return containsOpenAiPolicyRefusal(payload) || containsGeminiPolicyRefusal(payload) ||
+  return containsOpenAiPolicyRefusal(payload) ||
     /^(?:response\.refusal\.(?:delta|done))$/.test(String(object(payload)?.type));
 }
 
@@ -143,40 +142,15 @@ export async function discoverOpenCodexBridge(
       object(entry.capabilities)?.supports_vision === true);
     return row === undefined ? undefined : `${provider}/${bare}`;
   };
-  const analysis = {
-    openai: select("openai", env.OPENCODEX_OPENAI_ANALYSIS_MODEL ?? "gpt-5.6-sol"),
-    gemini: select("google-antigravity", env.OPENCODEX_GEMINI_ANALYSIS_MODEL ?? "gemini-3.1-pro"),
-  };
-  const geminiImage = select("google-antigravity", "gemini-3.1-flash-image");
-  if (!analysis.openai && !analysis.gemini && !geminiImage) return undefined;
-  const defaultImageRoute = async (): Promise<boolean> => {
-    try {
-      const settings = await (options.imageRouting ?? (async () => {
-        try {
-          const result = await execute("ocx", ["config", "get", "images", "--json"], {
-            env: { ...env }, timeout: 5000, maxBuffer: 64 * 1024, encoding: "utf8",
-          });
-          return JSON.parse(result.stdout) as unknown;
-        } catch (error) {
-          // The documented CLI distinguishes an absent optional images section
-          // from command/config failures. No raw diagnostic is exposed or saved.
-          const detail = object(error);
-          if (detail?.code === 2 && detail.stderr === "Error: config path not found: images\n") return {};
-          return undefined;
-        }
-      }))();
-      const config = object(settings);
-      return config !== undefined && config.provider === undefined && config.bridgeEnabled !== true;
-    } catch { return false; }
-  };
-  const openaiCompletion = !!analysis.openai && await defaultImageRoute();
+  const analysis = select("openai", env.OPENCODEX_OPENAI_ANALYSIS_MODEL ?? "gpt-5.6-sol");
+  if (!analysis) return undefined;
   const timeout = options.requestTimeoutMs ?? 120_000;
   const headers = { "Content-Type": "application/json" };
-  const call = async (provider: HostProvider, model: string, prompt: string, images: Buffer[]) => {
+  const call = async (model: string, prompt: string, images: Buffer[]) => {
     const response = await fetcher(new URL("responses", base), {
       method: "POST", headers, redirect: "error", signal: AbortSignal.timeout(timeout),
       body: JSON.stringify({
-        model, stream: provider === "openai", store: false,
+        model, stream: true, store: false,
         instructions: "Follow the supplied image analysis or editing task. Return only the requested result.",
         input: [{ role: "user", content: [
           { type: "input_text", text: prompt },
@@ -199,59 +173,16 @@ export async function discoverOpenCodexBridge(
   };
   return {
     capabilities: {
-      openai: { ocr: !!analysis.openai, scene: !!analysis.openai, completion: openaiCompletion },
-      gemini: { ocr: !!analysis.gemini, scene: !!analysis.gemini, completion: !!geminiImage },
+      openai: { ocr: true, scene: true, completion: false },
     },
     async invoke(provider: HostProvider, request: HostBridgeRequest): Promise<HostBridgeResult> {
       try {
-        if (request.operation !== "completion") {
-          const model = analysis[provider];
-          if (model === undefined) return fail("unavailable");
-          const result = await call(provider, model, request.prompt, [request.image]);
-          return { ok: true, model: result.model, output: { kind: "text", text: result.text } };
-        }
-        if (!request.hiddenMask || !request.protectedMask) return fail("invalid_input");
-        const input = { ...request, hiddenMask: request.hiddenMask, protectedMask: request.protectedMask };
-        let prepared: Awaited<ReturnType<typeof prepareCompletion>>;
-        try { prepared = await prepareCompletion(input); } catch { return fail("invalid_input"); }
-        const prompt = paddedCompletionPrompt(request.prompt, prepared) +
-          "\nThree reference images follow in order: 1) source canvas; 2) hidden-region alpha mask (transparent pixels may be edited, opaque pixels must be preserved); 3) protection mask (white pixels must never change). Return only one edited source canvas, not a collage or a mask.";
-        const images = [prepared.image, prepared.hiddenMask, prepared.protectedMask];
-        if (provider === "openai") {
-          if (!openaiCompletion || !await defaultImageRoute()) return fail("unavailable");
-          // ChatGPT's public local relay accepts Codex JSON edits, not Platform multipart.
-          const response = await fetcher(new URL("images/edits", base), {
-            method: "POST", headers, redirect: "error", signal: AbortSignal.timeout(timeout),
-            body: JSON.stringify({ model: "gpt-image-2", prompt,
-              images: images.map((image) => ({ image_url: `data:image/png;base64,${image.toString("base64")}` })),
-              size: `${prepared.canvas.width}x${prepared.canvas.height}`,
-            }),
-          });
-          const text = (await boundedBytes(response, 96 * 1024 * 1024)).toString("utf8");
-          let payload: Record<string, unknown> | undefined;
-          try { payload = object(JSON.parse(text)); } catch { /* Keep upstream errors private. */ }
-          if (refused(payload)) return fail("policy_refused");
-          if (!response.ok) return fail(httpFailure(response.status));
-          const data = payload?.data;
-          const encoded = Array.isArray(data) && data.length === 1 ? object(data[0])?.b64_json : undefined;
-          if (typeof encoded !== "string" || encoded.length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 4) return fail("invalid_output");
-          const image = await normalizeGeneratedImage(Buffer.from(encoded, "base64"), "image/png", prepared);
-          const model = typeof payload?.model === "string" ? payload.model : "gpt-image-2";
-          if (!isSafeModelIdentifier(model)) return fail("invalid_output");
-          return { ok: true, model, output: { kind: "image", image } };
-        }
-        if (!geminiImage) return fail("unavailable");
-        const result = await call(provider, geminiImage, prompt, images);
-        // OpenCodex materializes Gemini inline images behind this opaque local route.
-        // Never fetch model-supplied absolute URLs, filesystem paths, or other endpoints.
-        const links = [...result.text.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)];
-        const path = links[0]?.[1];
-        if (links.length !== 1 || path === undefined || !/^\/v1\/opencodex\/artifacts\/[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.(?:png|jpe?g)$/.test(path)) return fail("invalid_output");
-        const imageResponse = await fetcher(new URL(path, base), { redirect: "error", signal: AbortSignal.timeout(timeout) });
-        if (!imageResponse.ok) { await imageResponse.body?.cancel(); return fail("invalid_output"); }
-        const mime = imageResponse.headers.get("content-type")?.split(";")[0] ?? "";
-        const image = await normalizeGeneratedImage(await boundedBytes(imageResponse, MAX_IMAGE_BYTES), mime, prepared);
-        return { ok: true, model: result.model, output: { kind: "image", image } };
+        if (provider !== "openai") return fail("unavailable");
+        // Real host completions failed source-locked QA, including a mask probe.
+        // Reject before preparing or transmitting any image-edit request.
+        if (request.operation === "completion") return fail("unavailable");
+        const result = await call(analysis, request.prompt, [request.image]);
+        return { ok: true, model: result.model, output: { kind: "text", text: result.text } };
       } catch (error) {
         if (error instanceof ProviderFailure) return { ok: false, failure: error };
         if (error instanceof Error && ["AbortError", "TimeoutError", "TypeError"].includes(error.name)) return fail("retryable_exhausted");

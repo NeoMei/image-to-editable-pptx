@@ -237,6 +237,48 @@ test("returns unavailable immediately when capability is not explicitly callable
   }
 });
 
+test("ignores a legacy Gemini-only manifest without publishing a Gemini request", async () => {
+  const context = await fixture(
+    { gemini: { callable: true, operations: ["ocr", "scene", "completion"] } },
+    { timeoutMs: 20, pollIntervalMs: 2 },
+  );
+  try {
+    const result = await context.bridge.invoke("gemini" as never, {
+      operation: "ocr",
+      prompt: "ocr",
+      image: PNG,
+      canvas: { width: 1280, height: 720 },
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.failure.status, "unavailable");
+      assert.equal(result.failure.reason, "capability_unavailable");
+    }
+    assert.deepEqual(context.bridge.capabilities, {
+      openai: { ocr: false, scene: false, completion: false },
+    });
+    await assert.rejects(readdir(join(context.root, "requests")), /ENOENT/);
+  } finally {
+    await context.cleanup();
+  }
+});
+
+test("rejects unknown provider fields instead of silently treating misspellings as unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "host-bridge-test-"));
+  try {
+    await chmod(root, 0o700);
+    await writeFile(join(root, "capabilities.json"), JSON.stringify({
+      version: 1,
+      providers: {
+        openia: { callable: true, operations: ["ocr"] },
+      },
+    }), { mode: 0o600 });
+    await assert.rejects(createFileHostBridge(root), /unrecognized/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("validates malformed runtime requests before checking capabilities", async () => {
   const context = await fixture({
     openai: { callable: true, operations: ["scene"] },

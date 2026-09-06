@@ -1,11 +1,9 @@
 export type ProviderOperation = "ocr" | "scene" | "completion";
 export type ProviderChannel = "host" | "api";
-export type ProviderName = "openai" | "gemini" | "alibaba";
+export type ProviderName = "openai" | "alibaba";
 export type CandidateKey =
   | "host-openai"
   | "api-openai"
-  | "host-gemini"
-  | "api-gemini"
   | "api-alibaba";
 
 export type RoutingCandidate = Readonly<{
@@ -18,9 +16,7 @@ export type RoutingCandidate = Readonly<{
 export const ROUTING_CANDIDATES: readonly RoutingCandidate[] = Object.freeze([
   { index: 0, key: "host-openai", channel: "host", provider: "openai" },
   { index: 1, key: "api-openai", channel: "api", provider: "openai" },
-  { index: 2, key: "host-gemini", channel: "host", provider: "gemini" },
-  { index: 3, key: "api-gemini", channel: "api", provider: "gemini" },
-  { index: 4, key: "api-alibaba", channel: "api", provider: "alibaba" },
+  { index: 2, key: "api-alibaba", channel: "api", provider: "alibaba" },
 ]);
 
 export type ProviderFailureStatus =

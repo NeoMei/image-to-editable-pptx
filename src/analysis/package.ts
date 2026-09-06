@@ -111,6 +111,8 @@ const AnalysisDurationsSchema = z
   })
   .strict();
 
+// Historical v2 packages may name retired providers. Read these as provenance
+// only; live candidates are controlled separately by providers/routing.ts.
 const RoutingAttemptSchema = z.union([
   z.object({
     candidate: z.enum(["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]),

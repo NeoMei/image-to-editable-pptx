@@ -20,7 +20,6 @@ export type RoutedProviderConfig = {
 
 export type ProviderRoutingConfig = {
   openai?: RoutedProviderConfig;
-  gemini?: RoutedProviderConfig;
   alibaba?: AppConfig;
   requestTimeoutMs: number;
   maxAttempts: number;
@@ -148,9 +147,6 @@ export function loadRoutingConfig(
   env: Environment = process.env,
 ): ProviderRoutingConfig {
   const openaiKey = optionalCredential(env, "OPENAI_API_KEY");
-  const geminiKey =
-    optionalCredential(env, "GEMINI_API_KEY") ??
-    optionalCredential(env, "GOOGLE_API_KEY");
   const dashscopeKey = optionalCredential(env, "DASHSCOPE_API_KEY");
   const workspaceId = optionalCredential(env, "DASHSCOPE_WORKSPACE_ID");
   const alibaba =
@@ -167,19 +163,6 @@ export function loadRoutingConfig(
               optionalCredential(env, "OPENAI_ANALYSIS_MODEL") ?? "gpt-4.1",
             imageModel:
               optionalCredential(env, "OPENAI_IMAGE_MODEL") ?? "gpt-image-2",
-          },
-        }),
-    ...(geminiKey === undefined
-      ? {}
-      : {
-          gemini: {
-            apiKey: geminiKey,
-            analysisModel:
-              optionalCredential(env, "GEMINI_ANALYSIS_MODEL") ??
-              "gemini-2.5-flash",
-            imageModel:
-              optionalCredential(env, "GEMINI_IMAGE_MODEL") ??
-              "gemini-3.1-flash-image",
           },
         }),
     ...(alibaba === undefined ? {} : { alibaba }),

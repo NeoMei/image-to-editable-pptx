@@ -40,14 +40,32 @@ function failure(
   return { ok: false, failure: new ProviderFailure(status, reason) } as const;
 }
 
+test("all operations bypass retired Gemini executors and stick to Alibaba after OpenAI exhaustion", async () => {
+  const router = new SerialOperationRouter();
+  const calls: string[] = [];
+  const executors = {
+    "host-openai": async () => failure("unavailable", "capability_unavailable"),
+    "api-openai": async () => failure("auth_unavailable", "credentials_unavailable"),
+    "host-gemini": async () => { calls.push("host-gemini"); return success("retired-host", "wrong"); },
+    "api-gemini": async () => { calls.push("api-gemini"); return success("retired-api", "wrong"); },
+    "api-alibaba": async () => { calls.push("api-alibaba"); return success("qwen", "accepted"); },
+  };
+  for (const operation of ["ocr", "scene", "completion"] as const) {
+    const first = await router.route(operation, executors);
+    assert.equal(first.selectedCandidate, "api-alibaba");
+    assert.deepEqual(first.attempts.map(({ candidate }) => candidate), ["host-openai", "api-openai", "api-alibaba"]);
+    const second = await router.route(operation, executors);
+    assert.deepEqual(second.attempts.map(({ candidate }) => candidate), ["api-alibaba"]);
+  }
+  assert.deepEqual(calls, Array(6).fill("api-alibaba"));
+});
+
 test("uses fixed order, records missing and unavailable candidates, and keeps independent operation cursors", async () => {
   assert.deepEqual(
     ROUTING_CANDIDATES.map((candidate) => candidate.key),
     [
       "host-openai",
       "api-openai",
-      "host-gemini",
-      "api-gemini",
       "api-alibaba",
     ],
   );
@@ -59,16 +77,16 @@ test("uses fixed order, records missing and unavailable candidates, and keeps in
       calls.push(`ocr:${candidate.key}`);
       return failure("auth_unavailable", "credentials_unavailable");
     },
-    "host-gemini": async ({ candidate }) => {
+    "api-alibaba": async ({ candidate }) => {
       calls.push(`ocr:${candidate.key}`);
-      return success("gemini-2.5-flash", "ocr-result");
+      return success("qwen3.5-ocr", "ocr-result");
     },
   };
 
   const first = await router.route("ocr", ocrExecutors);
   assert.equal(first.outcome, "success");
-  assert.equal(first.selectedCandidate, "host-gemini");
-  assert.equal(first.selectedModel, "gemini-2.5-flash");
+  assert.equal(first.selectedCandidate, "api-alibaba");
+  assert.equal(first.selectedModel, "qwen3.5-ocr");
   assert.deepEqual(first.attempts, [
     {
       candidate: "host-openai",
@@ -81,16 +99,16 @@ test("uses fixed order, records missing and unavailable candidates, and keeps in
       disposition: "credentials_unavailable",
     },
     {
-      candidate: "host-gemini",
+      candidate: "api-alibaba",
       status: "success",
-      model: "gemini-2.5-flash",
+      model: "qwen3.5-ocr",
     },
   ]);
 
   const second = await router.route("ocr", ocrExecutors);
-  assert.equal(second.selectedCandidate, "host-gemini");
+  assert.equal(second.selectedCandidate, "api-alibaba");
   assert.deepEqual(second.attempts.map((attempt) => attempt.candidate), [
-    "host-gemini",
+    "api-alibaba",
   ]);
 
   const scene = await router.route("scene", {
@@ -102,8 +120,8 @@ test("uses fixed order, records missing and unavailable candidates, and keeps in
   assert.equal(scene.selectedCandidate, "host-openai");
   assert.deepEqual(calls, [
     "ocr:api-openai",
-    "ocr:host-gemini",
-    "ocr:host-gemini",
+    "ocr:api-alibaba",
+    "ocr:api-alibaba",
     "scene:host-openai",
   ]);
   assert.deepEqual(
@@ -121,19 +139,19 @@ test("uses fixed order, records missing and unavailable candidates, and keeps in
 
 test("sticky routing only moves forward after a retryable failure", async () => {
   const calls: CandidateKey[] = [];
-  let hostGeminiCalls = 0;
+  let openAiCalls = 0;
   const router = new SerialOperationRouter();
   const executors: Partial<Record<CandidateKey, CandidateExecutor<number>>> = {
-    "host-gemini": async ({ candidate }) => {
+    "api-openai": async ({ candidate }) => {
       calls.push(candidate.key);
-      hostGeminiCalls += 1;
-      return hostGeminiCalls === 1
-        ? success("gemini-host", 1)
+      openAiCalls += 1;
+      return openAiCalls === 1
+        ? success("openai-api", 1)
         : failure("retryable_exhausted", "retryable_exhausted");
     },
-    "api-gemini": async ({ candidate }) => {
+    "api-alibaba": async ({ candidate }) => {
       calls.push(candidate.key);
-      return success("gemini-api", 2);
+      return success("alibaba-api", 2);
     },
   };
 
@@ -154,10 +172,10 @@ test("sticky routing only moves forward after a retryable failure", async () => 
   assert.equal(second.value, 2);
   assert.equal(third.value, 2);
   assert.deepEqual(calls, [
-    "host-gemini",
-    "host-gemini",
-    "api-gemini",
-    "api-gemini",
+    "api-openai",
+    "api-openai",
+    "api-alibaba",
+    "api-alibaba",
   ]);
 });
 
@@ -204,8 +222,6 @@ test("exhaustion is explicit, ordered, and never records provider error strings"
     [
       { candidate: "host-openai", status: "unavailable" },
       { candidate: "api-openai", status: "retryable_exhausted" },
-      { candidate: "host-gemini", status: "unavailable" },
-      { candidate: "api-gemini", status: "retryable_exhausted" },
       { candidate: "api-alibaba", status: "unavailable" },
     ],
   );

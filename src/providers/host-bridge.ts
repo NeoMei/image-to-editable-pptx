@@ -21,7 +21,7 @@ import {
   type ProviderOperation,
 } from "./routing.js";
 
-export type HostProvider = "openai" | "gemini";
+export type HostProvider = "openai";
 
 export type HostBridgeRequest = Readonly<{
   operation: ProviderOperation;
@@ -131,7 +131,7 @@ const CapabilitiesSchema = z
     providers: z
       .object({
         openai: ProviderCapabilitySchema.optional(),
-        gemini: ProviderCapabilitySchema.optional(),
+        gemini: z.unknown().optional(),
       })
       .strict(),
   })
@@ -325,11 +325,6 @@ function capabilityMap(
       scene: supports("openai", "scene"),
       completion: supports("openai", "completion"),
     },
-    gemini: {
-      ocr: supports("gemini", "ocr"),
-      scene: supports("gemini", "scene"),
-      completion: supports("gemini", "completion"),
-    },
   };
 }
 
@@ -437,7 +432,7 @@ export async function createFileHostBridge(
   return {
     capabilities,
     async invoke(provider, request) {
-      if (provider !== "openai" && provider !== "gemini") {
+      if (provider !== "openai") {
         return {
           ok: false,
           failure: new ProviderFailure("unavailable", "capability_unavailable"),

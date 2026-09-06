@@ -21,7 +21,7 @@ import { readAnalysisPackage } from "../src/analysis/package.js";
 type BridgeRequest = Readonly<{
   version: 1;
   requestId: string;
-  provider: "openai" | "gemini";
+  provider: "openai";
   operation: "ocr" | "scene" | "completion";
   canvas: { width: number; height: number };
   imageFile: string;
@@ -42,8 +42,6 @@ function credentialFreeEnvironment(preloadPath: string): NodeJS.ProcessEnv {
     "DASHSCOPE_API_KEY",
     "DASHSCOPE_WORKSPACE_ID",
     "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
   ]) {
     delete env[name];
   }
