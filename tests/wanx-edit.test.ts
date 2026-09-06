@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import sharp from "sharp";
+
 import type { AppConfig } from "../src/config.js";
 import {
   createWanxOcclusionCompletionProvider,
   inpaintBackground,
 } from "../src/providers/wanx-edit.js";
+import { sourceLockedOcclusionFixture } from "./fixtures/occlusion/source-locked.js";
 
 const PROMPT =
   "移除白色遮罩区域中的文字、图标、线条和面板边框，延续周围米白色纸张纹理与自然阴影，不添加任何新文字、符号、物体或装饰。";
@@ -233,6 +236,10 @@ test("submits masked PNGs, polls pending and running states, then downloads the 
 });
 
 test("adapts Wanx to the provider-neutral completion contract with sanitized metadata", async () => {
+  const fixture = await sourceLockedOcclusionFixture();
+  const hiddenMask = await sharp(fixture.masks.hidden, {
+    raw: { width: 32, height: 24, channels: 1 },
+  }).png().toBuffer();
   const originalFetch = globalThis.fetch;
   const calls: FetchCall[] = [];
   const downloaded = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);
@@ -265,8 +272,8 @@ test("adapts Wanx to the provider-neutral completion contract with sanitized met
   try {
     const provider = createWanxOcclusionCompletionProvider(config);
     const result = await provider.complete({
-      crop: Buffer.from("candidate-crop"),
-      hiddenMask: Buffer.from("hidden-mask"),
+      crop: fixture.pngs.cleared,
+      hiddenMask,
       protectedVisibleMask: Buffer.from("visible-mask"),
       semanticContext: ["continue the accepted rear contour"],
     });
@@ -288,12 +295,24 @@ test("adapts Wanx to the provider-neutral completion contract with sanitized met
     };
     assert.equal(
       body.input.base_image_url,
-      `data:image/png;base64,${Buffer.from("candidate-crop").toString("base64")}`,
+      `data:image/png;base64,${fixture.pngs.cleared.toString("base64")}`,
     );
     assert.equal(
       body.input.mask_image_url,
-      `data:image/png;base64,${Buffer.from("hidden-mask").toString("base64")}`,
+      `data:image/png;base64,${hiddenMask.toString("base64")}`,
     );
+    const transported = Buffer.from(body.input.base_image_url.split(",")[1]!, "base64");
+    const transportedMask = Buffer.from(body.input.mask_image_url.split(",")[1]!, "base64");
+    const pixel = async (image: Buffer, x: number, y: number) => {
+      const decoded = await sharp(image).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      const offset = (y * decoded.info.width + x) * decoded.info.channels;
+      return [...decoded.data.subarray(offset, offset + 4)];
+    };
+    assert.deepEqual(await pixel(transported, 14, 4), [0, 0, 0, 0]);
+    assert.deepEqual(await pixel(transported, 4, 4), [40, 100, 160, 255]);
+    const decodedMask = await sharp(transportedMask).greyscale().raw().toBuffer();
+    assert.equal(decodedMask[4 * 32 + 14], 255);
+    assert.equal(decodedMask[4 * 32 + 4], 0);
     assert.match(body.input.prompt, /accepted rear contour/i);
     assert.doesNotMatch(
       JSON.stringify(result.sanitizedMetadata),

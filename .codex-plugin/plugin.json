@@ -1,6 +1,6 @@
 {
   "name": "image-to-editable-pptx",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Reconstruct PNG and JPEG slide images as high-fidelity PPTX files with editable text and safe semantic layers.",
   "author": {
     "name": "NeoMei",
@@ -20,13 +20,13 @@
   "interface": {
     "displayName": "Image to Editable PPTX",
     "shortDescription": "Turn PNG and JPEG slides into editable PPTX files.",
-    "longDescription": "Reconstruct a bounded PNG or JPEG slide canvas as a high-fidelity PPTX with editable OCR text and only safely extracted semantic PNG layers.",
+    "longDescription": "Reconstruct PNG or JPEG slides with editable OCR text and safely extracted PNG layers, using existing local OpenCodex accounts, optional registered-tool bridges, or provider APIs with Alibaba fallback.",
     "developerName": "NeoMei",
     "category": "Productivity",
     "capabilities": [
       "Write"
     ],
     "websiteURL": "https://github.com/NeoMei/image-to-editable-pptx",
-    "defaultPrompt": "Convert this PNG or JPEG slide into a high-fidelity editable PPTX with safe semantic layers."
+    "defaultPrompt": "Convert this slide image into a high-fidelity editable PPTX using automatic local OpenCodex discovery, an explicit registered-tool bridge when available, and the documented API fallback order ending with Alibaba. Verify actual provider results; never infer access from missing API keys or model listings alone."
   }
 }

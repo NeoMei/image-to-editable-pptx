@@ -112,6 +112,8 @@ test("npm pack dry-run ships the complete runtime without tests, fixtures, or lo
     "src/analysis/package.ts",
     "src/fidelity/build.ts",
     ".codex-plugin/plugin.json",
+    "docs/host-routing.md",
+    "docs/examples/host-capabilities.json",
     "skills/image-to-editable-pptx/SKILL.md",
     "skills/image-to-editable-pptx/agents/openai.yaml",
   ]) {

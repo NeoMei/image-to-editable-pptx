@@ -111,6 +111,47 @@ const AnalysisDurationsSchema = z
   })
   .strict();
 
+// Historical v2 packages may name retired providers. Read these as provenance
+// only; live candidates are controlled separately by providers/routing.ts.
+const RoutingAttemptSchema = z.union([
+  z.object({
+    candidate: z.enum(["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]),
+    status: z.literal("success"),
+    model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/),
+  }).strict(),
+  z.object({
+    candidate: z.enum(["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]),
+    status: z.enum(["unavailable", "auth_unavailable", "retryable_exhausted", "policy_refused", "invalid_input", "invalid_output", "local_failure"]),
+    disposition: z.enum([
+      "unavailable", "auth_unavailable", "retryable_exhausted", "policy_refused",
+      "invalid_input", "invalid_output", "local_failure", "missing_candidate",
+      "capability_unavailable", "credentials_unavailable", "bridge_timeout",
+      "invalid_bridge_response", "bridge_local_failure", "unsafe_requests_directory",
+      "invalid_bridge_request", "mismatched_request_id", "invalid_model_identifier",
+      "invalid_image_artifact",
+    ]),
+  }).strict(),
+]);
+
+export const AnalysisRoutingReportSchema = z.object({
+  version: z.literal(1),
+  mode: z.literal("serial-forward-sticky"),
+  stopped: z.boolean(),
+  transportAttempts: z.array(z.object({
+    operation: z.enum(["ocr", "scene", "completion"]),
+    candidate: z.enum(["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]),
+    count: z.number().int().positive(),
+  }).strict()),
+  operations: z.array(z.object({
+    sequence: z.number().int().positive(),
+    operation: z.enum(["ocr", "scene", "completion"]),
+    outcome: z.enum(["success", "fatal", "exhausted"]),
+    selectedCandidate: z.enum(["host-openai", "api-openai", "host-gemini", "api-gemini", "api-alibaba"]).optional(),
+    selectedModel: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/).optional(),
+    attempts: z.array(RoutingAttemptSchema),
+  }).strict()),
+}).strict();
+
 export const AnalysisPackageV2Schema = z
   .object({
     analysisVersion: z.literal(2),
@@ -137,6 +178,7 @@ export const AnalysisPackageV2Schema = z
     models: AnalysisModelsSchema,
     durationsMs: AnalysisDurationsSchema,
     warnings: z.array(z.string()),
+    routing: AnalysisRoutingReportSchema.optional(),
   })
   .strict()
   .superRefine((ledger, context) => {

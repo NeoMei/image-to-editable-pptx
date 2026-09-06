@@ -2,7 +2,9 @@
 
 import { pathToFileURL } from "node:url";
 
-import { loadConfig, type AppConfig } from "./config.js";
+import { loadRoutingConfig, type ProviderRoutingConfig } from "./config.js";
+import { createFileHostBridge } from "./providers/host-bridge.js";
+import { discoverOpenCodexBridge } from "./providers/opencodex-bridge.js";
 import {
   analyzeSlide,
   buildSlide,
@@ -16,12 +18,14 @@ const USAGE = `Image to Editable PPTX
 
 Usage:
   npm run cli -- analyze <slide.png|slide.jpg|slide.jpeg> --out <dir>
-    [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>] [--record]
+    [--host-bridge <private-dir>] [--max-region-analysis <0..8>]
+    [--max-occlusion-completions <0..4>] [--record]
   npm run cli -- build --analysis <dir> --out <dir> [--required-text-count <n>]
   npm run cli -- build-v1 <slide.png|slide.jpg|slide.jpeg> --analysis <dir> --out <dir>
     [--required-text-count <n>]
   npm run cli -- run <slide.png|slide.jpg|slide.jpeg> --out <dir>
-    [--max-region-analysis <0..8>] [--max-occlusion-completions <0..4>]
+    [--host-bridge <private-dir>] [--max-region-analysis <0..8>]
+    [--max-occlusion-completions <0..4>]
     [--required-text-count <n>] [--record]
 
 build consumes a self-contained analysis package v2 without network access.
@@ -38,6 +42,7 @@ type AnalyzeCommand = AnalysisLimits & {
   image: string;
   out: string;
   record: boolean;
+  hostBridge?: string;
 };
 
 type BuildCommand = {
@@ -63,6 +68,7 @@ type RunCommand = AnalysisLimits & {
   out: string;
   record: boolean;
   requiredTextCount?: number;
+  hostBridge?: string;
 };
 
 export type CliCommand =
@@ -72,12 +78,14 @@ export type CliCommand =
   | RunCommand;
 
 type CliDependencies = {
+  discoverHost?: typeof discoverOpenCodexBridge;
   analyze(options: AnalyzeOptions): Promise<unknown>;
   build(options: BuildOptions): Promise<unknown>;
   run(options: RunPipelineOptions): Promise<unknown>;
 };
 
 const defaultDependencies: CliDependencies = {
+  discoverHost: discoverOpenCodexBridge,
   analyze: analyzeSlide,
   build: buildSlide,
   run: runPipeline,
@@ -144,7 +152,8 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
       argument !== "--analysis" &&
       argument !== "--required-text-count" &&
       argument !== "--max-region-analysis" &&
-      argument !== "--max-occlusion-completions"
+      argument !== "--max-occlusion-completions" &&
+      argument !== "--host-bridge"
     ) {
       throw usageError(`Unknown option: ${optionName(argument)}`);
     }
@@ -163,6 +172,7 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
   if (out === undefined) throw usageError("--out is required.");
 
   const analysis = values.get("--analysis");
+  const hostBridge = values.get("--host-bridge");
   const requiredTextCount = parseRequiredTextCount(
     values.get("--required-text-count"),
   );
@@ -182,6 +192,9 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
     if (record) throw usageError("--record is not valid for offline build.");
     if (maxRegionAnalysis !== undefined || maxOcclusionCompletions !== undefined) {
       throw usageError("Analysis-stage limit flags are not valid for offline build.");
+    }
+    if (hostBridge !== undefined) {
+      throw usageError("--host-bridge is not valid for offline build.");
     }
     if (values.has("--image")) {
       throw usageError(
@@ -238,7 +251,10 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
       : { maxOcclusionCompletions }),
   };
   if (command === "analyze") {
-    return { command, image, out, record, ...limits };
+    return {
+      command, image, out, record, ...limits,
+      ...(hostBridge === undefined ? {} : { hostBridge }),
+    };
   }
   return {
     command,
@@ -247,20 +263,14 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
     record,
     ...limits,
     ...(requiredTextCount === undefined ? {} : { requiredTextCount }),
+    ...(hostBridge === undefined ? {} : { hostBridge }),
   };
 }
 
-function withConfig<T extends { config?: AppConfig }>(
-  options: Omit<T, "config">,
-  config: AppConfig,
-): T {
-  return { ...options, config } as T;
-}
-
 function applyAnalysisLimits(
-  config: AppConfig,
+  config: ProviderRoutingConfig,
   command: AnalysisLimits,
-): AppConfig {
+): ProviderRoutingConfig {
   return {
     ...config,
     ...(command.maxRegionAnalysis === undefined
@@ -281,17 +291,17 @@ export async function runCli(
   switch (command.command) {
     case "analyze":
     {
-      const config = applyAnalysisLimits(loadConfig(env), command);
-      await dependencies.analyze(
-        withConfig<AnalyzeOptions>(
-          {
-            imagePath: command.image,
-            outDir: command.out,
-            record: command.record,
-          },
-          config,
-        ),
-      );
+      const routingConfig = applyAnalysisLimits(loadRoutingConfig(env), command);
+      const hostBridge = command.hostBridge === undefined
+        ? await dependencies.discoverHost?.(env, { requestTimeoutMs: routingConfig.requestTimeoutMs })
+        : await createFileHostBridge(command.hostBridge);
+      await dependencies.analyze({
+        imagePath: command.image,
+        outDir: command.out,
+        record: command.record,
+        routingConfig,
+        ...(hostBridge === undefined ? {} : { hostBridge }),
+      });
       break;
     }
     case "build":
@@ -315,20 +325,20 @@ export async function runCli(
       break;
     case "run":
     {
-      const config = applyAnalysisLimits(loadConfig(env), command);
-      await dependencies.run(
-        withConfig<RunPipelineOptions>(
-          {
-            imagePath: command.image,
-            outDir: command.out,
-            record: command.record,
-            ...(command.requiredTextCount === undefined
-              ? {}
-              : { requiredTextCount: command.requiredTextCount }),
-          },
-          config,
-        ),
-      );
+      const routingConfig = applyAnalysisLimits(loadRoutingConfig(env), command);
+      const hostBridge = command.hostBridge === undefined
+        ? await dependencies.discoverHost?.(env, { requestTimeoutMs: routingConfig.requestTimeoutMs })
+        : await createFileHostBridge(command.hostBridge);
+      await dependencies.run({
+        imagePath: command.image,
+        outDir: command.out,
+        record: command.record,
+        routingConfig,
+        ...(hostBridge === undefined ? {} : { hostBridge }),
+        ...(command.requiredTextCount === undefined
+          ? {}
+          : { requiredTextCount: command.requiredTextCount }),
+      });
       break;
     }
   }

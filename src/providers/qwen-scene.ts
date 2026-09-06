@@ -22,6 +22,7 @@ import {
   createScenePrompt,
 } from "./qwen-scene-prompt.js";
 import type { ProviderResponseObserver } from "./response-observer.js";
+import { RoutingTerminalError } from "./routing.js";
 
 const WORKSPACE_ID_PATTERN =
   /^(?=.{1,63}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
@@ -382,6 +383,7 @@ async function createSceneCompletion(
     },
   });
 
+  observer?.recordTransportAttempt?.();
   const completion = await client.chat.completions
     .create({
       model: config.visionModel,
@@ -443,13 +445,21 @@ export async function requestSceneGraph(
 
 export type RegionalRefinementResult = RefinementResult & {
   warnings: string[];
+  effectiveModels?: string[];
 };
+
+export type SceneGraphRequester = (
+  image: Buffer,
+  canvas: CanvasSize,
+  prompt: string,
+) => Promise<{ graph: SceneGraph; model: string }>;
 
 export async function refineSceneRegions(
   image: Buffer,
   graph: SceneGraph,
-  config: AppConfig,
+  config: AppConfig | { maxRegionAnalysis?: number },
   observer?: ProviderResponseObserver,
+  requester?: SceneGraphRequester,
 ): Promise<RegionalRefinementResult> {
   const requests = selectRefinementRequests(
     graph,
@@ -459,6 +469,7 @@ export async function refineSceneRegions(
   const warnings: string[] = [];
   SceneGraphSchema.parse(graph);
   let refinedGraph = graph;
+  const effectiveModels: string[] = [];
 
   for (const request of requests) {
     try {
@@ -475,20 +486,34 @@ export async function refineSceneRegions(
         width: request.crop.width,
         height: request.crop.height,
       };
-      const localGraph = await requestSceneGraph(
-        crop,
-        cropCanvas,
-        createRegionalScenePrompt(cropCanvas, request),
-        config,
-        observer,
-      );
+      const prompt = createRegionalScenePrompt(cropCanvas, request);
+      const routed = requester === undefined
+        ? {
+            graph: await requestSceneGraph(
+              crop,
+              cropCanvas,
+              prompt,
+              config as AppConfig,
+              observer,
+            ),
+            model: (config as AppConfig).visionModel,
+          }
+        : await requester(crop, cropCanvas, prompt);
+      const localGraph = routed.graph;
+      effectiveModels.push(routed.model);
       refinedGraph = mergeRefinedSubgraph(refinedGraph, request, localGraph);
-    } catch {
+    } catch (error) {
+      if (error instanceof RoutingTerminalError) throw error;
       warnings.push(
         `regional_refinement_rejected:${request.reason}:${request.targetNodeIds.join(",")}`,
       );
     }
   }
 
-  return { graph: refinedGraph, requests, warnings };
+  return {
+    graph: refinedGraph,
+    requests,
+    warnings,
+    ...(requester === undefined ? {} : { effectiveModels }),
+  };
 }

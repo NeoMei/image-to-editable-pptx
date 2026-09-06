@@ -31,6 +31,10 @@ import {
 } from "../src/image/semantic-mask.js";
 import type { SourceCanvas } from "../src/image/source.js";
 import { buildTightTextMask } from "../src/image/text-mask.js";
+import {
+  completeOccludedCandidate,
+  OcclusionCompletionBudget,
+} from "../src/occlusion/complete.js";
 import type { CompletedCandidate } from "../src/occlusion/contracts.js";
 import type {
   SceneGraph,
@@ -289,6 +293,163 @@ const rejectedRepairMetrics = {
   ringChannelMad: 0,
   filledPixelDistanceP95: 0,
 };
+
+test("builds a completion whose disjoint masks store support in alpha", async () => {
+  const fixture = await semanticFixture();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const candidate = plan.candidates.find(({ id }) => id === "good-rear")!;
+  const completion = await completionFor(
+    fixture.source, candidate, GOOD_REAR, GOOD_FRONT, [43, 109, 168, 255],
+  );
+  for (const key of ["visibleMask", "generatedMask"] as const) {
+    const { data, info } = await sharp(completion[key]).greyscale().raw()
+      .toBuffer({ resolveWithObject: true });
+    const rgba = Buffer.alloc(info.width * info.height * 4, 255);
+    for (let index = 0; index < data.length; index += 1) rgba[index * 4 + 3] = data[index]!;
+    completion[key] = await sharp(rgba, {
+      raw: { width: info.width, height: info.height, channels: 4 },
+    }).png().toBuffer();
+  }
+  assert.equal(completion.provenance.kind, "composite");
+  if (completion.provenance.kind !== "composite") assert.fail("expected composite");
+  completion.provenance.visibleMaskSha256 = sha256(completion.visibleMask);
+  completion.provenance.generatedMaskSha256 = sha256(completion.generatedMask);
+  const workDir = await mkdtemp(join(tmpdir(), "semantic-alpha-completion-"));
+  try {
+    const result = await buildSemanticLayers({
+      ...fixture, plan, completions: new Map([[candidate.id, completion]]), workDir,
+    });
+    const asset = result.manifest.elements.find(({ id }) => id === candidate.id);
+    assert.equal(asset?.kind, "asset");
+    if (asset?.kind !== "asset") assert.fail("expected accepted completion asset");
+    assert.equal(asset.reviewRequired, true);
+    assert.deepEqual(asset.provenance, completion.provenance);
+    assert.equal(result.recomposition.accepted, true);
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("accepts an actual source-locked completion and rejects a tampered visible byte", async () => {
+  const fixture = await semanticFixture();
+  for (let y = 29; y < 39; y += 1) {
+    fixture.source.rgba.set(BACKGROUND, (y * fixture.source.width + 151) * 4);
+  }
+  fixture.source.sourceBytes = await sharp(fixture.source.rgba, {
+    raw: { width: fixture.source.width, height: fixture.source.height, channels: 4 },
+  }).png().toBuffer();
+  const plan = planSemanticLayers(fixture.graph, fixture.ocr);
+  const candidate = plan.candidates.find(({ id }) => id === "good-rear");
+  assert.ok(candidate);
+  const selected = chooseSemanticMask(
+    await deriveSemanticMasks(fixture.source, candidate),
+    await emptyMask(),
+  );
+  assert.ok(selected);
+  const width = Math.ceil(selected.bbox.width);
+  const height = Math.ceil(selected.bbox.height);
+  const cropBounds = {
+    left: Math.floor(selected.bbox.x),
+    top: Math.floor(selected.bbox.y),
+    width,
+    height,
+  };
+  const sourceCrop = await sharp(fixture.source.rgba, {
+    raw: { width: fixture.source.width, height: fixture.source.height, channels: 4 },
+  }).extract(cropBounds).png().toBuffer();
+  const front = Buffer.alloc(width * height);
+  const returnedRgba = await sharp(sourceCrop).ensureAlpha().raw().toBuffer();
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const canvasX = cropBounds.left + x;
+      const canvasY = cropBounds.top + y;
+      if (
+        canvasX >= GOOD_FRONT.x && canvasX < GOOD_FRONT.x + GOOD_FRONT.width &&
+        canvasY >= GOOD_FRONT.y && canvasY < GOOD_FRONT.y + GOOD_FRONT.height
+      ) {
+        front[y * width + x] = 255;
+        returnedRgba.set([43, 109, 168, 255], (y * width + x) * 4);
+      }
+    }
+  }
+  const [frontMask, returned] = await Promise.all([
+    sharp(front, { raw: { width, height, channels: 1 } }).png().toBuffer(),
+    sharp(returnedRgba, { raw: { width, height, channels: 4 } }).png().toBuffer(),
+  ]);
+  const completion = await completeOccludedCandidate({
+    candidate,
+    canvas: fixture.graph.canvas,
+    cropBounds: selected.bbox,
+    crop: sourceCrop,
+    visibleMask: selected.mask,
+    occluderMasks: new Map([["good-front", frontMask]]),
+    semanticContext: ["rear continues behind front"],
+    budget: new OcclusionCompletionBudget(1),
+    timeoutMs: 100,
+  }, {
+    async complete() {
+      return {
+        image: returned,
+        modelId: "integration-model",
+        taskId: "integration-task",
+        sanitizedMetadata: { status: "succeeded" },
+      };
+    },
+  });
+  assert.ok(completion);
+  assert.equal(completion.reviewRequired, true);
+  assert.equal(completion.provenance.kind, "composite");
+  if (completion.provenance.kind !== "composite") assert.fail("expected composite");
+  assert.equal(completion.provenance.sourceCropSha256, sha256(sourceCrop));
+  const acceptedDir = await mkdtemp(join(tmpdir(), "semantic-established-completion-"));
+  const tamperedDir = await mkdtemp(join(tmpdir(), "semantic-tampered-completion-"));
+  try {
+    const result = await buildSemanticLayers({
+      ...fixture,
+      plan,
+      completions: new Map([[candidate.id, completion]]),
+      workDir: acceptedDir,
+    });
+    const asset = result.manifest.elements.find(({ id }) => id === candidate.id);
+    assert.equal(asset?.kind, "asset", JSON.stringify(result.decisions));
+    if (asset?.kind !== "asset") assert.fail("expected accepted completion asset");
+    assert.equal(asset.reviewRequired, true);
+    assert.deepEqual(asset.provenance, completion.provenance);
+    assert.equal(result.recomposition.accepted, true);
+
+    const tamperedRgba = await sharp(completion.image).ensureAlpha().raw().toBuffer();
+    const visible = await sharp(completion.visibleMask).extractChannel("alpha").raw().toBuffer();
+    const visibleIndex = visible.findIndex((value) => value >= 16);
+    assert.notEqual(visibleIndex, -1);
+    tamperedRgba[visibleIndex * 4] = tamperedRgba[visibleIndex * 4]! ^ 0xff;
+    const tamperedImage = await sharp(tamperedRgba, {
+      raw: { width, height, channels: 4 },
+    }).png().toBuffer();
+    const tampered: CompletedCandidate = {
+      ...completion,
+      image: tamperedImage,
+      provenance: {
+        ...completion.provenance,
+        assetSha256: sha256(tamperedImage),
+      },
+    };
+    const rejected = await buildSemanticLayers({
+      ...fixture,
+      plan,
+      completions: new Map([[candidate.id, tampered]]),
+      workDir: tamperedDir,
+    });
+    assert.equal(rejected.manifest.elements.some(({ id }) => id === candidate.id), false);
+    const rejectedDecision = rejected.decisions.find(
+      ({ candidateId }) => candidateId === candidate.id,
+    );
+    assert.equal(rejectedDecision?.decision, "kept_in_background");
+    assert.equal(rejectedDecision?.reason, "completion_provenance_invalid");
+  } finally {
+    await rm(acceptedDir, { recursive: true, force: true });
+    await rm(tamperedDir, { recursive: true, force: true });
+  }
+});
 
 test("atomically builds graph-ordered semantic layers and rolls back one exposed completion", async () => {
   const fixture = await semanticFixture();

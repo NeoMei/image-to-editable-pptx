@@ -166,6 +166,7 @@ async function runMaskedEdit(
   config: AppConfig,
   prompt: string,
   timing: WanxTiming,
+  onTransportAttempt?: () => void,
 ): Promise<{
   image: Buffer;
   taskId: string;
@@ -173,6 +174,7 @@ async function runMaskedEdit(
 }> {
   const baseUrl = requireSafeWanxBase(config);
   const deadline = timing.now() + config.requestTimeoutMs;
+  onTransportAttempt?.();
   const submission = await fetch(
     `${baseUrl}/services/aigc/image2image/image-synthesis`,
     {
@@ -221,6 +223,7 @@ async function runMaskedEdit(
     const pollSignal = taskTimeoutSignal(deadline, taskId, timing);
     let response: Response;
     try {
+      onTransportAttempt?.();
       response = await fetch(pollUrl, {
         method: "GET",
         headers: { Authorization: `Bearer ${config.apiKey}` },
@@ -282,6 +285,7 @@ async function runMaskedEdit(
       const downloadSignal = taskTimeoutSignal(deadline, taskId, timing);
       let download: Response;
       try {
+        onTransportAttempt?.();
         download = await fetch(safeResultUrl, {
           method: "GET",
           headers: {},
@@ -351,6 +355,7 @@ export async function inpaintBackground(
 export function createWanxOcclusionCompletionProvider(
   config: AppConfig,
   timing: WanxTiming = defaultWanxTiming,
+  onTransportAttempt?: () => void,
 ): OcclusionCompletionProvider {
   return {
     async complete(request) {
@@ -360,6 +365,7 @@ export function createWanxOcclusionCompletionProvider(
         config,
         completionPrompt(request.semanticContext),
         timing,
+        onTransportAttempt,
       );
       return {
         image: result.image,

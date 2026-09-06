@@ -26,6 +26,11 @@ import {
 } from "../src/analysis/package.js";
 import type { OcrResult } from "../src/contracts.js";
 import type { SourceCanvas } from "../src/image/source.js";
+import {
+  COMPLETION_DIAGNOSTICS_NAME,
+  CompletionDiagnosticsSchema,
+  writeCompletionDiagnostics,
+} from "../src/occlusion/diagnostics.js";
 import type { SceneGraph } from "../src/scene/contracts.js";
 
 function sha256(value: Buffer | string): string {
@@ -211,6 +216,137 @@ test("round-trips a complete self-contained v2 package with private JSON files",
     }
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps completion diagnostics bounded and structurally separate from the v2 ledger", async () => {
+  const metrics = {
+    rearSamples: 12,
+    frontSamples: 9,
+    backgroundSamples: 10,
+    generatedPixels: 32,
+    residualPixels: 0,
+    seamMaxDelta: 4,
+    returnedOutsideChangedPixels: 3,
+    returnedVisibleChangedPixels: 2,
+  };
+  const valid = CompletionDiagnosticsSchema.parse({
+    version: 1,
+    candidates: [
+      { sequence: 0, status: "accepted", metrics },
+      { sequence: 1, status: "accepted" },
+      {
+        sequence: 2,
+        status: "rejected",
+        reason: "residual_occluder",
+        metrics,
+      },
+      { sequence: 4, status: "skipped", reason: "disabled" },
+    ],
+  });
+  assert.equal(valid.version, 1);
+  assert.deepEqual(valid.candidates[1], {
+    sequence: 1,
+    status: "accepted",
+  });
+  for (const invalid of [
+    { version: 1, candidates: [{ sequence: 0, status: "accepted", reason: "geometry", metrics }] },
+    { version: 1, candidates: [{ sequence: 0, status: "rejected", metrics }] },
+    { version: 1, candidates: [{ sequence: 0, status: "unknown", reason: "geometry" }] },
+    { version: 1, candidates: [{ sequence: 0, status: "skipped", reason: "geometry", path: "/private/source.png" }] },
+    { version: 1, candidates: [{ sequence: Number.MAX_SAFE_INTEGER + 1, status: "skipped", reason: "disabled" }] },
+    { version: 1, candidates: [{ sequence: 0, status: "accepted", metrics: { ...metrics, seamMaxDelta: 256 } }] },
+    { version: 1, candidates: [{ sequence: 0, status: "accepted", metrics: { ...metrics, generatedPixels: Number.POSITIVE_INFINITY } }] },
+  ]) {
+    assert.equal(CompletionDiagnosticsSchema.safeParse(invalid).success, false);
+  }
+
+  const fixture = await createPackageFixture();
+  try {
+    await assert.rejects(
+      readFile(join(fixture.directory, COMPLETION_DIAGNOSTICS_NAME)),
+      /ENOENT/,
+    );
+    const oldLedger = await readAnalysisPackage(fixture.directory);
+    assert.equal(oldLedger.analysisVersion, 2);
+    const oldLedgerText = await readFile(
+      join(fixture.directory, "analysis-ledger.json"),
+      "utf8",
+    );
+    assert.doesNotMatch(oldLedgerText, /completion-diagnostics|diagnostics/i);
+
+    await writeCompletionDiagnostics(fixture.directory, valid);
+    const withSidecar = await readAnalysisPackage(fixture.directory);
+    assert.equal(withSidecar.analysisVersion, 2);
+    assert.doesNotMatch(
+      await readFile(join(fixture.directory, "analysis-ledger.json"), "utf8"),
+      /completion-diagnostics|diagnostics/i,
+    );
+
+    const completionPath = join(
+      fixture.directory,
+      fixture.ledger.completions[0]!.path,
+    );
+    await writeFile(completionPath, "invalid-completion-artifact", { mode: 0o600 });
+    await writeFile(
+      join(fixture.directory, COMPLETION_DIAGNOSTICS_NAME),
+      "{\"version\":1,\"candidates\":[{\"sequence\":0,\"status\":\"accepted\"}]}",
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      readAnalysisPackage(fixture.directory),
+      /completion|hash mismatch/i,
+    );
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test("publishes completion diagnostics once without replacing regular or symlink targets", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "completion-diagnostics-exclusive-"));
+  const external = join(directory, "external.json");
+  const target = join(directory, COMPLETION_DIAGNOSTICS_NAME);
+  const first = {
+    version: 1 as const,
+    candidates: [{ sequence: 0, status: "skipped" as const, reason: "disabled" as const }],
+  };
+  const second = {
+    version: 1 as const,
+    candidates: [{ sequence: 1, status: "rejected" as const, reason: "geometry" as const }],
+  };
+  try {
+    await writeFile(target, "foreign-regular-file\n", { mode: 0o600 });
+    await assert.rejects(
+      writeCompletionDiagnostics(directory, first),
+      /exist|exclusive|completion diagnostics/i,
+    );
+    assert.equal(await readFile(target, "utf8"), "foreign-regular-file\n");
+
+    await rm(target);
+    await writeFile(external, "foreign-symlink-target\n", { mode: 0o600 });
+    await symlink(external, target);
+    await assert.rejects(
+      writeCompletionDiagnostics(directory, first),
+      /exist|exclusive|completion diagnostics/i,
+    );
+    assert.equal(await readFile(external, "utf8"), "foreign-symlink-target\n");
+
+    await rm(target);
+    const raced = await Promise.allSettled([
+      writeCompletionDiagnostics(directory, first),
+      writeCompletionDiagnostics(directory, second),
+    ]);
+    assert.equal(raced.filter(({ status }) => status === "fulfilled").length, 1);
+    assert.equal(raced.filter(({ status }) => status === "rejected").length, 1);
+    const published = CompletionDiagnosticsSchema.parse(
+      JSON.parse(await readFile(target, "utf8")),
+    );
+    assert.ok(
+      JSON.stringify(published) === JSON.stringify(first) ||
+      JSON.stringify(published) === JSON.stringify(second),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

@@ -1,7 +1,9 @@
 import type { AssetProvenance } from "../contracts.js";
 import type { SemanticCandidate } from "../scene/plan.js";
+import type { QualityMetrics, QualityReason } from "./quality.js";
 
 export type OcclusionCompletionProvider = {
+  ownsTimeout?: boolean;
   complete(request: {
     crop: Buffer;
     hiddenMask: Buffer;
@@ -38,3 +40,22 @@ export type CompletedCandidate = {
   reviewRequired: true;
   provenance: AssetProvenance;
 };
+
+export type CompletionReason =
+  | QualityReason
+  | "disabled"
+  | "provider_failure"
+  | "invalid_metadata"
+  | "invariant_failure";
+
+export type CompletionOutcome =
+  | {
+    status: "accepted";
+    artifact: CompletedCandidate;
+    metrics: QualityMetrics;
+  }
+  | {
+    status: "skipped" | "rejected";
+    reason: CompletionReason;
+    metrics?: QualityMetrics;
+  };

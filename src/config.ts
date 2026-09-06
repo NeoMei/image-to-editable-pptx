@@ -12,6 +12,21 @@ export type AppConfig = {
   maxOcclusionCompletions?: number;
 };
 
+export type RoutedProviderConfig = {
+  apiKey: string;
+  analysisModel: string;
+  imageModel: string;
+};
+
+export type ProviderRoutingConfig = {
+  openai?: RoutedProviderConfig;
+  alibaba?: AppConfig;
+  requestTimeoutMs: number;
+  maxAttempts: number;
+  maxRegionAnalysis: number;
+  maxOcclusionCompletions: number;
+};
+
 type Environment = Readonly<Record<string, string | undefined>>;
 
 const WORKSPACE_ID_PATTERN =
@@ -106,5 +121,58 @@ export function loadConfig(env: Environment = process.env): AppConfig {
       configuredMaxOcclusionCompletions === undefined
         ? 4
         : Number(configuredMaxOcclusionCompletions),
+  };
+}
+
+function optionalCredential(env: Environment, name: string): string | undefined {
+  const value = env[name]?.trim();
+  return value === "" ? undefined : value;
+}
+
+function loadLimit(
+  env: Environment,
+  name: "MAX_REGION_ANALYSIS" | "MAX_OCCLUSION_COMPLETIONS",
+  maximum: 8 | 4,
+): number {
+  const value = env[name];
+  if (value === undefined) return maximum;
+  if (!new RegExp(`^[0-${maximum}]$`).test(value)) {
+    throw new Error(`${name} must be an integer from 0 through ${maximum}`);
+  }
+  return Number(value);
+}
+
+/** Optional-credential live routing config. The legacy loadConfig remains strict. */
+export function loadRoutingConfig(
+  env: Environment = process.env,
+): ProviderRoutingConfig {
+  const openaiKey = optionalCredential(env, "OPENAI_API_KEY");
+  const dashscopeKey = optionalCredential(env, "DASHSCOPE_API_KEY");
+  const workspaceId = optionalCredential(env, "DASHSCOPE_WORKSPACE_ID");
+  const alibaba =
+    dashscopeKey !== undefined && workspaceId !== undefined
+      ? loadConfig(env)
+      : undefined;
+  return {
+    ...(openaiKey === undefined
+      ? {}
+      : {
+          openai: {
+            apiKey: openaiKey,
+            analysisModel:
+              optionalCredential(env, "OPENAI_ANALYSIS_MODEL") ?? "gpt-4.1",
+            imageModel:
+              optionalCredential(env, "OPENAI_IMAGE_MODEL") ?? "gpt-image-2",
+          },
+        }),
+    ...(alibaba === undefined ? {} : { alibaba }),
+    requestTimeoutMs: 120_000,
+    maxAttempts: 2,
+    maxRegionAnalysis: loadLimit(env, "MAX_REGION_ANALYSIS", 8),
+    maxOcclusionCompletions: loadLimit(
+      env,
+      "MAX_OCCLUSION_COMPLETIONS",
+      4,
+    ),
   };
 }

@@ -546,16 +546,20 @@ async function sourceVisibleProvenance(
   });
 }
 
+async function decodeSupportMask(mask: Buffer) {
+  const metadata = await sharp(mask).metadata();
+  const pixels = metadata.hasAlpha
+    ? sharp(mask).extractChannel("alpha")
+    : sharp(mask).greyscale();
+  return pixels.raw().toBuffer({ resolveWithObject: true });
+}
+
 async function projectLocalMask(
   mask: Buffer,
   bbox: BBox,
   canvas: { width: number; height: number },
 ): Promise<Buffer> {
-  const decoded = await sharp(mask)
-    .removeAlpha()
-    .greyscale()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+  const decoded = await decodeSupportMask(mask);
   if (
     decoded.info.width !== Math.ceil(bbox.width) ||
     decoded.info.height !== Math.ceil(bbox.height)
@@ -1594,16 +1598,8 @@ async function validateCompletion(input: {
         .ensureAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true }),
-      sharp(input.completion.visibleMask)
-        .removeAlpha()
-        .greyscale()
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
-      sharp(input.completion.generatedMask)
-        .removeAlpha()
-        .greyscale()
-        .raw()
-        .toBuffer({ resolveWithObject: true }),
+      decodeSupportMask(input.completion.visibleMask),
+      decodeSupportMask(input.completion.generatedMask),
     ]);
   } catch {
     return false;

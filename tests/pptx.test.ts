@@ -144,6 +144,7 @@ test("exports one editable wide slide with ordered, named PowerPoint layers", as
       Math.round(((480 + 16) * 13.333 * EMU_PER_INCH) / 1280),
     );
     assert.match(slideXml, /<a:bodyPr\b[^>]*\banchor="ctr"/);
+    assert.match(trackedTextXml, /<a:bodyPr\b[^>]*\bwrap="none"/);
     assert.doesNotMatch(slideXml, /<a:(?:normAutofit|spAutoFit)\b/);
 
     const generatedNames = Array.from(
@@ -264,7 +265,7 @@ test("exports manifest v2 through one custom portrait transform", async () => {
         {
           kind: "text",
           id: "portrait-text",
-          text: "Portrait editable",
+          text: "Portrait\r\neditable",
           bbox: { x: 180, y: 320, width: 360, height: 160 },
           rotation: 0,
           color: "FFFFFF",
@@ -298,6 +299,12 @@ test("exports manifest v2 through one custom portrait transform", async () => {
     const backgroundXml = namedTransform("asset-background", "p:pic");
     const assetXml = namedTransform("asset-portrait-object", "p:pic");
     const textXml = namedTransform("text-portrait-text", "p:sp");
+    assert.deepEqual(
+      Array.from(textXml.matchAll(/<a:t>(.*?)<\/a:t>/g), (match) => match[1]),
+      ["Portrait", "editable"],
+    );
+    assert.equal((textXml.match(/<a:p>/g) ?? []).length, 2);
+    assert.match(textXml, /<a:bodyPr\b[^>]*\bwrap="none"/);
     const page = { width: slideWidth, height: slideHeight };
     for (const item of [backgroundXml, assetXml, textXml]) {
       const x = xmlAttribute(item, "a:off", "x");

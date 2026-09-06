@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "providers": {
+    "openai": {
+      "callable": true,
+      "operations": ["ocr", "scene"]
+    }
+  }
+}

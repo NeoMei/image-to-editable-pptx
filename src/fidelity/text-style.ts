@@ -131,7 +131,7 @@ export function inferEditableTextStyle(
         ? DISPLAY_TEXT_ADVANCE_SCALE
         : 1);
     const targetSpan =
-      measuredSpan * (advanceUnits / widestLineAdvanceUnits);
+      measuredSpan * TEXT_BOX_WIDTH_SAFETY * (advanceUnits / widestLineAdvanceUnits);
     return [
       Math.max(0, (targetSpan - fontSizePx * trackingAdvanceUnits) / gaps),
     ];

@@ -13,12 +13,14 @@ test("parses promoted v2 commands without asking build for the source image agai
   assert.deepEqual(
     parseCliArgs([
       "analyze", "slide.jpeg", "--out", "analysis",
+      "--host-bridge", "/private/bridge",
       "--max-region-analysis", "0",
       "--max-occlusion-completions", "4",
       "--record",
     ]),
     {
       command: "analyze", image: "slide.jpeg", out: "analysis", record: true,
+      hostBridge: "/private/bridge",
       maxRegionAnalysis: 0, maxOcclusionCompletions: 4,
     },
   );
@@ -100,7 +102,7 @@ test("uses bounded default analysis budgets when flags are omitted", async () =>
     {
       build: async () => assert.fail("build must not be dispatched"),
       run: async () => assert.fail("run must not be dispatched"),
-      analyze: async (options) => { received = options.config; },
+      analyze: async (options) => { received = options.routingConfig; },
     },
   );
 
@@ -126,7 +128,7 @@ test("zero flags disable both optional network analysis stages", async () => {
     {
       analyze: async () => assert.fail("analyze must not be dispatched"),
       build: async () => assert.fail("build must not be dispatched"),
-      run: async (options) => { received = options.config; },
+      run: async (options) => { received = options.routingConfig; },
     },
   );
 
@@ -164,6 +166,7 @@ test("rejects all analysis and network-stage flags on offline build", () => {
     ["--max-occlusion-completions", "1"],
     ["--record"],
     ["--image", "slide.png"],
+    ["--host-bridge", "/private/bridge"],
   ]) {
     assert.throws(
       () => parseCliArgs([
@@ -247,26 +250,29 @@ test("usage advertises PNG and JPEG inputs and the v2 offline boundary", () => {
       assert.match(error.message, /\.jpe?g/);
       assert.match(error.message, /build --analysis <dir> --out <dir>/);
       assert.match(error.message, /build-v1/);
+      assert.match(error.message, /run .*--host-bridge/s);
       return true;
     },
   );
 });
 
-test("rejects missing credentials before dispatching a network command", async () => {
+test("dispatches a host-only network command without API credentials", async () => {
   let dispatched = false;
-  await assert.rejects(
-    runCli(
-      ["run", "does-not-exist.png", "--out", "output"],
-      {},
-      {
-        analyze: async () => { dispatched = true; },
-        build: async () => { dispatched = true; },
-        run: async () => { dispatched = true; },
+  await runCli(
+    ["run", "does-not-exist.png", "--out", "output"],
+    {},
+    {
+      analyze: async () => { dispatched = true; },
+      build: async () => { dispatched = true; },
+      run: async (options) => {
+        dispatched = true;
+        assert.equal(options.routingConfig?.openai, undefined);
+        assert.equal("gemini" in options.routingConfig!, false);
+        assert.equal(options.routingConfig?.alibaba, undefined);
       },
-    ),
-    /Missing required environment variables: DASHSCOPE_API_KEY, DASHSCOPE_WORKSPACE_ID/,
+    },
   );
-  assert.equal(dispatched, false);
+  assert.equal(dispatched, true);
 });
 
 test("keeps --image as a compatibility alias for existing analyze and run scripts", () => {

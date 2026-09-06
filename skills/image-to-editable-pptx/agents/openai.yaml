@@ -1,4 +1,4 @@
 interface:
   display_name: "Image to Editable PPTX"
   short_description: "Turn slide images into editable PPTX files"
-  default_prompt: "Convert this slide image into a high-fidelity editable PPTX."
+  default_prompt: "Use $image-to-editable-pptx to convert this slide image into an editable PPTX using automatic local OpenCodex discovery or an explicit registered-tool bridge, with the documented API fallback order ending with Alibaba, and verify actual provider results."
