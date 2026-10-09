@@ -68,6 +68,21 @@ OCR and scene use `host-openai`, `api-openai`, `api-alibaba`. Completion skips `
 
 ## Run the converter
 
+### Patch a flattened PPTX locally
+
+If a slide is already a flattened raster image and only a bounded label or title needs correction,
+use the deterministic local patch route instead of invoking analysis or a provider:
+
+```bash
+npm run cli -- raster-patch <input.pptx> --patch <plan.json> --out <output.pptx>
+```
+
+The plan names one `ppt/media/<filename>` entry and describes an image-pixel `region`, optional
+background, supersampling `scale` from 1 through 4, and bounded text boxes. The implementation
+validates that every box is inside the source image, supports PNG/JPEG media, and atomically writes
+the patched archive. It does not call a model or network. Use this path for a known local correction;
+it does not infer text, fonts, coordinates, or background reconstruction from a screenshot.
+
 For a new self-contained manifest v2 analysis package:
 
 ```bash

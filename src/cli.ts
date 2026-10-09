@@ -13,6 +13,7 @@ import {
   type BuildOptions,
   type RunPipelineOptions,
 } from "./pipeline.js";
+import { patchRasterPptxFile } from "./raster-patch.js";
 
 const USAGE = `Image to Editable PPTX
 
@@ -27,6 +28,7 @@ Usage:
     [--host-bridge <private-dir>] [--max-region-analysis <0..8>]
     [--max-occlusion-completions <0..4>]
     [--required-text-count <n>] [--record]
+  npm run cli -- raster-patch <input.pptx> --patch <plan.json> --out <output.pptx>
 
 build consumes a self-contained analysis package v2 without network access.
 build-v1 is the explicit compatibility path for legacy analysis packages that
@@ -71,17 +73,26 @@ type RunCommand = AnalysisLimits & {
   hostBridge?: string;
 };
 
+type RasterPatchCommand = {
+  command: "raster-patch";
+  pptx: string;
+  patch: string;
+  out: string;
+};
+
 export type CliCommand =
   | AnalyzeCommand
   | BuildCommand
   | BuildV1Command
-  | RunCommand;
+  | RunCommand
+  | RasterPatchCommand;
 
 type CliDependencies = {
   discoverHost?: typeof discoverOpenCodexBridge;
   analyze(options: AnalyzeOptions): Promise<unknown>;
   build(options: BuildOptions): Promise<unknown>;
   run(options: RunPipelineOptions): Promise<unknown>;
+  rasterPatch?: (inputPath: string, patchPath: string, outputPath: string) => Promise<unknown>;
 };
 
 const defaultDependencies: CliDependencies = {
@@ -89,6 +100,7 @@ const defaultDependencies: CliDependencies = {
   analyze: analyzeSlide,
   build: buildSlide,
   run: runPipeline,
+  rasterPatch: patchRasterPptxFile,
 };
 
 function usageError(message: string): Error {
@@ -127,9 +139,10 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
     command !== "analyze" &&
     command !== "build" &&
     command !== "build-v1" &&
-    command !== "run"
+    command !== "run" &&
+    command !== "raster-patch"
   ) {
-    throw usageError("Expected command analyze, build, build-v1, or run.");
+    throw usageError("Expected command analyze, build, build-v1, run, or raster-patch.");
   }
 
   const values = new Map<string, string>();
@@ -153,7 +166,8 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
       argument !== "--required-text-count" &&
       argument !== "--max-region-analysis" &&
       argument !== "--max-occlusion-completions" &&
-      argument !== "--host-bridge"
+      argument !== "--host-bridge" &&
+      argument !== "--patch"
     ) {
       throw usageError(`Unknown option: ${optionName(argument)}`);
     }
@@ -172,6 +186,7 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
   if (out === undefined) throw usageError("--out is required.");
 
   const analysis = values.get("--analysis");
+  const patch = values.get("--patch");
   const hostBridge = values.get("--host-bridge");
   const requiredTextCount = parseRequiredTextCount(
     values.get("--required-text-count"),
@@ -186,6 +201,30 @@ export function parseCliArgs(args: readonly string[]): CliCommand {
     values.get("--max-occlusion-completions"),
     4,
   );
+
+  if (command === "raster-patch") {
+    if (positionals.length !== 1) {
+      throw usageError("raster-patch requires exactly one positional input PPTX.");
+    }
+    if (patch === undefined) throw usageError("raster-patch requires --patch.");
+    if (
+      analysis !== undefined ||
+      values.has("--image") ||
+      requiredTextCount !== undefined ||
+      maxRegionAnalysis !== undefined ||
+      maxOcclusionCompletions !== undefined ||
+      hostBridge !== undefined ||
+      record
+    ) {
+      throw usageError("raster-patch accepts only an input PPTX, --patch, and --out.");
+    }
+    return {
+      command,
+      pptx: positionals[0]!,
+      patch,
+      out,
+    };
+  }
 
   if (command === "build" || command === "build-v1") {
     if (analysis === undefined) throw usageError(`${command} requires --analysis.`);
@@ -341,6 +380,12 @@ export async function runCli(
       });
       break;
     }
+    case "raster-patch":
+      if (dependencies.rasterPatch === undefined) {
+        throw new Error("raster-patch dependency is unavailable");
+      }
+      await dependencies.rasterPatch(command.pptx, command.patch, command.out);
+      break;
   }
 }
 

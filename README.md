@@ -94,6 +94,40 @@ npm run cli -- build-v1 <source.jpeg> --analysis <legacy-analysis-dir> --out <ou
 
 `--max-region-analysis` 的默认值为 8，`--max-occlusion-completions` 的默认值为 4。两者只接受所示范围内的严格整数；设为 `0` 可分别禁用局部视觉精修或遮挡补全。不存在 unlimited 模式。离线 `build`/`build-v1` 拒绝这两个网络阶段参数和 `--record`。为兼容旧脚本，`analyze`/`run` 仍接受 `--image <path>` 别名，但新文档统一使用位置图片参数。
 
+## 局部栅格补丁
+
+当 PPTX 中某一页已经是完整栅格图、只需要修正局部标题或标签时，可以只替换
+`ppt/media/` 中的目标图片，不重新跑 OCR、场景分析或图层重构：
+
+```bash
+npm run cli -- raster-patch <input.pptx> --patch <plan.json> --out <output.pptx>
+```
+
+补丁计划使用图片像素坐标，示例：
+
+```json
+{
+  "mediaPath": "ppt/media/image9.png",
+  "region": { "x": 820, "y": 1240, "width": 960, "height": 260 },
+  "background": "#ffffff",
+  "scale": 3,
+  "texts": [
+    {
+      "text": "异常企业排行",
+      "box": { "x": 30, "y": 24, "width": 700, "height": 72 },
+      "fontSize": 42,
+      "color": "#111827",
+      "fontWeight": "700",
+      "align": "left"
+    }
+  ]
+}
+```
+
+该命令只接受 `ppt/media/<filename>`，会校验区域边界和文字框边界，支持 PNG/JPEG，
+并以临时文件加原子改名写出结果。它是确定性的本地像素修补路径，不调用任何模型或网络；
+PPTX 其他条目的未压缩内容保持不变。字体、颜色和区域尺寸需要根据原始页面实际像素校准。
+
 ## analysis package v2
 
 `analyze` 在新目录中写入经 schema 验证和 SHA-256 绑定的自包含分析包，包括 `source.rgba`、`ocr.json`、`scene-graph.json`、局部精修/遮挡补全资产及 `analysis-ledger.json`。源图的标准 RGBA 像素已包含在包内，所以 v2 `build` 只需 analysis 目录。路径、哈希、尺寸或资产库存不一致时，离线构建会失败而不是使用未验证文件。
