@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { DEFAULT_OPENAI_ANALYSIS_MODEL } from "../config.js";
 import type { FileHostBridge, HostBridgeRequest, HostBridgeResult, HostProvider } from "./host-bridge.js";
 import {
   containsOpenAiPolicyRefusal,
@@ -142,7 +143,7 @@ export async function discoverOpenCodexBridge(
       object(entry.capabilities)?.supports_vision === true);
     return row === undefined ? undefined : `${provider}/${bare}`;
   };
-  const analysis = select("openai", env.OPENCODEX_OPENAI_ANALYSIS_MODEL ?? "gpt-5.6-sol");
+  const analysis = select("openai", env.OPENCODEX_OPENAI_ANALYSIS_MODEL ?? DEFAULT_OPENAI_ANALYSIS_MODEL);
   if (!analysis) return undefined;
   const timeout = options.requestTimeoutMs ?? 120_000;
   const headers = { "Content-Type": "application/json" };
@@ -154,7 +155,7 @@ export async function discoverOpenCodexBridge(
         instructions: "Follow the supplied image analysis or editing task. Return only the requested result.",
         input: [{ role: "user", content: [
           { type: "input_text", text: prompt },
-          ...images.map((image) => ({ type: "input_image", image_url: `data:image/png;base64,${image.toString("base64")}` })),
+          ...images.map((image) => ({ type: "input_image", detail: "high", image_url: `data:image/png;base64,${image.toString("base64")}` })),
         ] }],
       }),
     });

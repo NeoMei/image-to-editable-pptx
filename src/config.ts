@@ -1,3 +1,6 @@
+export const DEFAULT_OPENAI_ANALYSIS_MODEL = "gpt-6.2-sol";
+export const DEFAULT_ALIBABA_VISION_MODEL = "qwen4-max";
+
 export type AppConfig = {
   apiKey: string;
   workspaceId: string;
@@ -109,7 +112,7 @@ export function loadConfig(env: Environment = process.env): AppConfig {
       "/compatible-mode/v1",
     ),
     ocrModel: "qwen3.5-ocr",
-    visionModel: "qwen3-vl-plus",
+    visionModel: DEFAULT_ALIBABA_VISION_MODEL,
     editModel: "wanx2.1-imageedit",
     requestTimeoutMs: 120_000,
     pollIntervalMs: 2_000,
@@ -160,7 +163,7 @@ export function loadRoutingConfig(
           openai: {
             apiKey: openaiKey,
             analysisModel:
-              optionalCredential(env, "OPENAI_ANALYSIS_MODEL") ?? "gpt-4.1",
+              optionalCredential(env, "OPENAI_ANALYSIS_MODEL") ?? DEFAULT_OPENAI_ANALYSIS_MODEL,
             imageModel:
               optionalCredential(env, "OPENAI_IMAGE_MODEL") ?? "gpt-image-2",
           },

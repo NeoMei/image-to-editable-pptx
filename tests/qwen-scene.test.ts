@@ -337,10 +337,11 @@ test("sends a generic JSON-only scene request for the owning canvas", async () =
   };
 
   try {
+    const currentConfig = { ...config, visionModel: "qwen4-max" };
     const graph = await analyzeScene(
       Buffer.from([0x89, 0x50]),
       { width: 1377, height: 811 },
-      config,
+      currentConfig,
     );
 
     assert.equal(graph.nodes.length, 7);
@@ -351,9 +352,13 @@ test("sends a generic JSON-only scene request for the owning canvas", async () =
     );
     const body = JSON.parse(String(calls[0]?.init?.body)) as {
       model: string;
+      enable_thinking: boolean;
+      response_format: { type: string };
       messages: Array<{ content: unknown }>;
     };
-    assert.equal(body.model, config.visionModel);
+    assert.equal(body.model, currentConfig.visionModel);
+    assert.equal(body.enable_thinking, false);
+    assert.deepEqual(body.response_format, { type: "json_object" });
     const serializedPrompt = JSON.stringify(body.messages[0]?.content);
     assert.match(serializedPrompt, /JSON only/i);
     assert.match(serializedPrompt, /1377 x 811/);

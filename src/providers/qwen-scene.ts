@@ -2,7 +2,7 @@ import OpenAI from "openai";
 import sharp from "sharp";
 import { z } from "zod";
 
-import type { AppConfig } from "../config.js";
+import { DEFAULT_ALIBABA_VISION_MODEL, type AppConfig } from "../config.js";
 import {
   CanvasSizeSchema,
   SceneGraphSchema,
@@ -384,10 +384,14 @@ async function createSceneCompletion(
   });
 
   observer?.recordTransportAttempt?.();
+  const jsonOptions = config.visionModel === DEFAULT_ALIBABA_VISION_MODEL
+    ? { enable_thinking: false, response_format: { type: "json_object" as const } }
+    : {};
   const completion = await client.chat.completions
     .create({
       model: config.visionModel,
       messages,
+      ...jsonOptions,
     })
     .catch((error: unknown) => {
       if (outerHttpParseError !== undefined) throw outerHttpParseError;

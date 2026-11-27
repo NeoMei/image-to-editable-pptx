@@ -6,7 +6,7 @@ import { loadRoutingConfig } from "../src/config.js";
 test("routing config accepts OpenAI-only credentials without eager Alibaba config", () => {
   const config = loadRoutingConfig({ OPENAI_API_KEY: "openai-secret" });
   assert.equal(config.openai?.apiKey, "openai-secret");
-  assert.equal(config.openai?.analysisModel, "gpt-4.1");
+  assert.equal(config.openai?.analysisModel, "gpt-6.2-sol");
   assert.equal(config.openai?.imageModel, "gpt-image-2");
   assert.equal("gemini" in config, false);
   assert.equal(config.alibaba, undefined);
@@ -33,4 +33,7 @@ test("routing config includes Alibaba only when both credentials are valid", () 
     }).alibaba?.workspaceId,
     "workspace-123",
   );
+  const { alibaba } = loadRoutingConfig({ DASHSCOPE_API_KEY: "key", DASHSCOPE_WORKSPACE_ID: "workspace-123" });
+  assert.equal(alibaba?.visionModel, "qwen4-max");
+  assert.equal(alibaba?.ocrModel, "qwen3.5-ocr");
 });

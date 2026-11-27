@@ -94,6 +94,8 @@ test("OpenAI OCR uses the fixed Responses endpoint and validates pixel geometry"
   assert.equal(requests[0]?.url, "https://api.openai.com/v1/responses");
   assert.equal((requests[0]?.init.headers as Record<string, string>).Authorization, "Bearer openai-test-key");
   assert.equal(requests[0]?.init.redirect, "error");
+  const body = JSON.parse(String(requests[0]?.init.body));
+  assert.equal(body.input[0].content[1].detail, "high");
 });
 
 test("OpenAI explicit refusal is fatal and is never retried", async () => {
