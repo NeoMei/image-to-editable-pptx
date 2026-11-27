@@ -40,7 +40,7 @@ not changed. The local public API must accept unauthenticated local
 admission; a protected or stopped endpoint is unavailable, not a reason to extract
 credentials. Only literal loopback HTTP endpoints are accepted; redirects are rejected.
 
-The default analysis route is `openai/gpt-5.6-sol`; override it using
+The default analysis route is `openai/gpt-6.2-sol`; override it using
 `OPENCODEX_OPENAI_ANALYSIS_MODEL` with a model
 advertised by the matching provider with vision support. Catalog entries create
 candidates, not proof of access: only a real successful response and validated
@@ -220,8 +220,12 @@ complete credential set is available:
 
 | Candidate | Credentials | Analysis default | Completion default |
 | --- | --- | --- | --- |
-| `api-openai` | `OPENAI_API_KEY` | `OPENAI_ANALYSIS_MODEL` or `gpt-4.1` | `OPENAI_IMAGE_MODEL` or `gpt-image-2` |
-| `api-alibaba` | both `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID` | `qwen3.5-ocr` / `qwen3-vl-plus` | `wanx2.1-imageedit` |
+| `api-openai` | `OPENAI_API_KEY` | `OPENAI_ANALYSIS_MODEL` or `gpt-6.2-sol` | `OPENAI_IMAGE_MODEL` or `gpt-image-2` |
+| `api-alibaba` | both `DASHSCOPE_API_KEY` and `DASHSCOPE_WORKSPACE_ID` | `qwen3.5-ocr` / `qwen4-max` | `wanx2.1-imageedit` |
+
+OpenAI analysis requests high-detail image input. Alibaba scene analysis uses
+Qwen4-Max JSON mode with thinking disabled. Text localization uses the
+Qwen3.5-OCR coordinate contract.
 
 Never put credentials in CLI flags, bridge files, prompts, recordings, logs, or
 commits. If neither a real host capability nor a complete API credential set is

@@ -17,7 +17,7 @@ test("OpenCodex rejects direct completion without transmitting source or consult
     discover: async () => JSON.stringify({ baseUrl: "http://127.0.0.1:10100/v1" }),
     imageRouting: async () => { routingReads++; return {}; },
     fetch: async (url) => {
-      if (String(url).endsWith("/models")) return Response.json({ data: [{ id: "gpt-5.6-sol", owned_by: "openai", capabilities: { supports_vision: true } }] });
+      if (String(url).endsWith("/models")) return Response.json({ data: [{ id: "gpt-6.2-sol", owned_by: "openai", capabilities: { supports_vision: true } }] });
       inferenceCalls++;
       return Response.json({ error: "must not send image edits" }, { status: 400 });
     },

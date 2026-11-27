@@ -17,7 +17,7 @@ const discoverOpenCodexBridge: typeof discoverBridge = (env, options) => discove
 
 const endpoint = "http://127.0.0.1:10100/v1";
 const models = [
-  { id: "gpt-5.6-sol", owned_by: "openai", capabilities: { supports_vision: true } },
+  { id: "gpt-6.2-sol", owned_by: "openai", capabilities: { supports_vision: true } },
 ];
 const response = (model: string, text: string) => ({
   status: "completed", model,
@@ -83,11 +83,13 @@ test("discovers the signed-in OpenAI host without an official API key and uses s
       assert.equal(init?.redirect, "error");
       assert.equal(body.store, false);
       assert.equal(body.stream, true);
-      assert.equal(body.model, "openai/gpt-5.6-sol");
+      assert.equal(body.model, "openai/gpt-6.2-sol");
+      assert.equal(body.reasoning, undefined);
+      assert.equal(body.input[0].content[1].detail, "high");
       // The live Codex endpoint can omit output from response.completed.
       return new Response([
         `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: response("", '{"lines":[]}').output[0] })}\r\n\r\n`,
-        `data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", model: "gpt-5.6-sol", output: [] } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", model: "gpt-6.2-sol", output: [] } })}\n\n`,
         "data: [DONE]\n\n",
       ].join(""), { headers: { "content-type": "text/event-stream" } });
     },
@@ -176,7 +178,7 @@ for (const operation of ["ocr", "scene"] as const) {
     const failure = { type: "upstream_error", code: "upstream_reset", message: "private-sentinel" };
     const bridge = await discoverOpenCodexBridge({}, { discover, fetch: async (url, init) => {
       if (String(url).endsWith("/models")) return Response.json({ data: models });
-      assert.equal(JSON.parse(String(init?.body)).model, "openai/gpt-5.6-sol");
+      assert.equal(JSON.parse(String(init?.body)).model, "openai/gpt-6.2-sol");
       return new Response([
         `data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: response("", payloadText).output[0] })}\n\n`,
         `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: failure, last_error: failure } })}\n\n`,
@@ -285,7 +287,7 @@ test("analysis joins final text across separate messages before semantic validat
   const bridge = await discoverOpenCodexBridge({}, { discover, fetch: async (url) => String(url).endsWith("/models")
     ? Response.json({ data: models }) : new Response(`data: ${JSON.stringify({
       type: "response.completed",
-      response: { status: "completed", model: "gpt-5.6-sol", output: [
+      response: { status: "completed", model: "gpt-6.2-sol", output: [
         { type: "message", content: [{ type: "output_text", text: '{"lines":' }] },
         { type: "message", content: [{ type: "output_text", text: "[]}" }] },
       ] },

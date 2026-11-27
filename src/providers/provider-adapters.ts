@@ -212,7 +212,7 @@ function openAiAnalysisBody(model: string, prompt: string, image: Buffer): strin
     model,
     input: [{ role: "user", content: [
       { type: "input_text", text: prompt },
-      { type: "input_image", image_url: `data:image/png;base64,${image.toString("base64")}` },
+      { type: "input_image", detail: "high", image_url: `data:image/png;base64,${image.toString("base64")}` },
     ] }],
   });
 }
