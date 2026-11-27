@@ -72,6 +72,8 @@ export DASHSCOPE_WORKSPACE_ID='<your-dashscope-workspace-id>'
 
 可用 `OPENAI_ANALYSIS_MODEL` / `OPENAI_IMAGE_MODEL` 覆盖 API 默认模型；当前默认为 `gpt-6.2-sol` / `gpt-image-2`，百炼为 `qwen3.5-ocr` / `qwen4-max` / `wanx2.1-imageedit`。文件桥接记录实际工具元数据中的模型；OpenCodex 记录响应模型，响应未带模型时记录成功请求的明确模型，不用目录标签冒充实际调用证明。
 
+OpenAI 分析请求使用 high 图片细节。百炼场景分析使用 Qwen4-Max 的 JSON Mode 并关闭深度思考，OCR 继续使用 Qwen3.5-OCR 的坐标合同。Qwen3.5-OCR 仍是官方当前列出的专用 OCR 模型，不因通用视觉模型升级而替换。
+
 只有 `unavailable`、`auth_unavailable`、`retryable_exhausted` 会推进到下一候选；`policy_refused`、`invalid_input`、`invalid_output`、`local_failure` 是致命边界，会停止整个运行。每个 operation 都有独立的只向前 sticky 游标，成功后下一次从该候选开始，不会在同一运行中回退到更早候选。
 
 凭证只能通过环境变量提供。CLI 不接受 API Key、workspace ID、Authorization 或 provider base URL 参数；不要把凭证写入命令、bridge 文件、仓库、截图或录制文件。

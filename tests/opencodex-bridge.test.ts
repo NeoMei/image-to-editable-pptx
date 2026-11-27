@@ -84,6 +84,7 @@ test("discovers the signed-in OpenAI host without an official API key and uses s
       assert.equal(body.store, false);
       assert.equal(body.stream, true);
       assert.equal(body.model, "openai/gpt-6.2-sol");
+      assert.equal(body.reasoning, undefined);
       assert.equal(body.input[0].content[1].detail, "high");
       // The live Codex endpoint can omit output from response.completed.
       return new Response([
