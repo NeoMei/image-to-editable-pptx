@@ -170,6 +170,5 @@ npm pack --dry-run
 
 测试使用本地 fixture 和可注入 provider，不应访问网络。
 子进程 bridge E2E 使用测试专用 host emulator，真实启动 CLI、写入 v2 分析包并生成 PPTX/三张 QA 图，同时确定性禁止网络。它证明文件协议集成，不是真实 OpenAI 验收，也不证明 completion、文字可编辑或 PowerPoint/WPS 验收。
-依赖审计仅临时接受 PptxGenJS 4.0.1 未使用的 `image-size` 声明所带来的两个
-无可安装修复版本的公告；门禁绑定精确版本、扫描发布代码确认不可达，并于
-2026-10-03 到期复审。任何新增公告或依赖变化都会失败。
+依赖审计要求 npm audit 通过。PptxGenJS 4.0.1 声明的间接依赖
+`image-size` 在本项目锁定到已修复的 2.2.0。

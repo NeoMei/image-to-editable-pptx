@@ -45,7 +45,7 @@ test("uses the patched Sharp line for untrusted slide images", async () => {
     dependencies: Record<string, string>;
   };
 
-  assert.equal(packageJson.dependencies.sharp, "^0.35.3");
+  assert.equal(packageJson.dependencies.sharp, "^0.35.5");
 });
 
 test("dependency audit does not leak npm-run allowScripts config into nested npm", async (t) => {
