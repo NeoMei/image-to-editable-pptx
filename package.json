@@ -47,8 +47,13 @@
     "jszip": "^3.10.2",
     "openai": "^5.0.0",
     "pptxgenjs": "^4.0.1",
-    "sharp": "^0.35.3",
-    "zod": "^4.0.0"
+    "sharp": "^0.35.5",
+    "zod": "^4.6.6"
+  },
+  "overrides": {
+    "pptxgenjs": {
+      "image-size": "2.2.0"
+    }
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
